@@ -11,7 +11,7 @@ import createCorePlugin from '../plugins/core.ts'
 import createWritePluginPlugin from '../plugins/write-plugin.ts'
 import createDiscordPlugin from '../plugins/discord.ts'
 import createPluginManagerPlugin from '../plugins/plugin-manager.ts'
-import createClaudeCodePlugin from '../plugins/claude-code.ts'
+import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -47,7 +47,7 @@ async function main() {
   pluginManager.registerBuiltin('write-plugin', createWritePluginPlugin)
   pluginManager.registerBuiltin('discord', createDiscordPlugin)
   pluginManager.registerBuiltin('plugin-manager', createPluginManagerPlugin)
-  pluginManager.registerBuiltin('claude-code', createClaudeCodePlugin)
+  pluginManager.registerBuiltin('claude-code-tmux', createClaudeCodeTmuxPlugin)
   // core needs the plugin manager reference
   pluginManager.registerBuiltin('core', () => createCorePlugin(pluginManager))
 

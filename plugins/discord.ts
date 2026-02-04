@@ -49,7 +49,7 @@ async function downloadFile(url: string, outputPath: string): Promise<void> {
 
 async function transcribeAudio(audioPath: string): Promise<string> {
   try {
-    const { stdout } = await execAsync(`uvx whisperx "${audioPath}" --model tiny --language en --output_format txt`)
+    const { stdout } = await execAsync(`uvx --from openai-whisper whisper "${audioPath}" --model tiny --language en --output_format txt`)
     // whisperx outputs a .txt file in the same directory
     const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
     try {
