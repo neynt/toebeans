@@ -88,8 +88,8 @@ Current working directory: ${process.cwd()}`
         try {
           await runAgentTurn(msg.content, {
             provider,
-            system: buildSystemPrompt(),
-            tools: getTools(),
+            system: buildSystemPrompt,
+            tools: getTools,
             sessionId: msg.sessionId,
             workingDir: process.cwd(),
             onChunk: (chunk) => broadcast(msg.sessionId, chunk),

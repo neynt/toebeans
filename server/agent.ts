@@ -4,8 +4,8 @@ import { loadSession, appendMessage } from './session.ts'
 
 export interface AgentOptions {
   provider: LlmProvider
-  system: string
-  tools: Tool[]
+  system: () => string
+  tools: () => Tool[]
   sessionId: string
   workingDir: string
   onChunk?: (chunk: ServerMessage) => void
@@ -15,7 +15,7 @@ export async function runAgentTurn(
   userContent: string,
   options: AgentOptions
 ): Promise<AgentResult> {
-  const { provider, system, tools, sessionId, workingDir, onChunk } = options
+  const { provider, system: getSystem, tools: getTools, sessionId, workingDir, onChunk } = options
 
   // load existing messages
   const messages = await loadSession(sessionId)
@@ -28,19 +28,22 @@ export async function runAgentTurn(
   messages.push(userMessage)
   await appendMessage(sessionId, userMessage)
 
-  const toolDefs: ToolDef[] = tools.map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema,
-  }))
-
   const toolContext: ToolContext = { sessionId, workingDir }
-  const toolMap = new Map(tools.map(t => [t.name, t]))
 
   let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
   // agent loop - continue until no tool calls
   while (true) {
+    // refresh tools and system prompt each iteration (for load_plugin)
+    const tools = getTools()
+    const system = getSystem()
+    const toolDefs: ToolDef[] = tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema,
+    }))
+    const toolMap = new Map(tools.map(t => [t.name, t]))
+
     const assistantContent: ContentBlock[] = []
     let hasToolUse = false
 
