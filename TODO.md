@@ -1,0 +1,3 @@
+- [x] add a plugin to support Discord
+- [x] write a nicer README.md explaining the core concepts (e.g. core, plugin, list of core plugins, llm provider, what's in the core server, what can be accomplished with plugins)
+- [x] test the client in tmux
