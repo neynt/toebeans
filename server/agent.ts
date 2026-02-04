@@ -1,0 +1,126 @@
+import type { LlmProvider } from './llm-provider.ts'
+import type { Message, ContentBlock, Tool, ToolContext, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
+import { loadSession, appendMessage } from './session.ts'
+
+export interface AgentOptions {
+  provider: LlmProvider
+  system: string
+  tools: Tool[]
+  sessionId: string
+  workingDir: string
+  onChunk?: (chunk: ServerMessage) => void
+}
+
+export async function runAgentTurn(
+  userContent: string,
+  options: AgentOptions
+): Promise<AgentResult> {
+  const { provider, system, tools, sessionId, workingDir, onChunk } = options
+
+  // load existing messages
+  const messages = await loadSession(sessionId)
+
+  // add user message
+  const userMessage: Message = {
+    role: 'user',
+    content: [{ type: 'text', text: userContent }],
+  }
+  messages.push(userMessage)
+  await appendMessage(sessionId, userMessage)
+
+  const toolDefs: ToolDef[] = tools.map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema,
+  }))
+
+  const toolContext: ToolContext = { sessionId, workingDir }
+  const toolMap = new Map(tools.map(t => [t.name, t]))
+
+  let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+  // agent loop - continue until no tool calls
+  while (true) {
+    const assistantContent: ContentBlock[] = []
+    let hasToolUse = false
+
+    // stream response
+    for await (const chunk of provider.stream({ messages, system, tools: toolDefs })) {
+      switch (chunk.type) {
+        case 'text':
+          onChunk?.({ type: 'text', text: chunk.text })
+          // accumulate text into last text block or create new one
+          const lastBlock = assistantContent[assistantContent.length - 1]
+          if (lastBlock?.type === 'text') {
+            lastBlock.text += chunk.text
+          } else {
+            assistantContent.push({ type: 'text', text: chunk.text })
+          }
+          break
+
+        case 'tool_use':
+          hasToolUse = true
+          onChunk?.({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input })
+          assistantContent.push({
+            type: 'tool_use',
+            id: chunk.id,
+            name: chunk.name,
+            input: chunk.input,
+          })
+          break
+
+        case 'usage':
+          totalUsage.input += chunk.input
+          totalUsage.output += chunk.output
+          totalUsage.cacheRead += chunk.cacheRead ?? 0
+          totalUsage.cacheWrite += chunk.cacheWrite ?? 0
+          break
+      }
+    }
+
+    // save assistant message
+    const assistantMessage: Message = { role: 'assistant', content: assistantContent }
+    messages.push(assistantMessage)
+    await appendMessage(sessionId, assistantMessage)
+
+    if (!hasToolUse) {
+      // no tool calls, we're done
+      onChunk?.({ type: 'done', usage: totalUsage })
+      break
+    }
+
+    // execute tools and collect results
+    const toolResults: ContentBlock[] = []
+    for (const block of assistantContent) {
+      if (block.type === 'tool_use') {
+        const tool = toolMap.get(block.name)
+        let result: { content: string; is_error?: boolean }
+
+        if (!tool) {
+          result = { content: `Unknown tool: ${block.name}`, is_error: true }
+        } else {
+          try {
+            result = await tool.execute(block.input, toolContext)
+          } catch (err) {
+            result = { content: `Tool error: ${err}`, is_error: true }
+          }
+        }
+
+        onChunk?.({ type: 'tool_result', tool_use_id: block.id, content: result.content, is_error: result.is_error })
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: result.content,
+          is_error: result.is_error,
+        })
+      }
+    }
+
+    // add tool results as user message
+    const toolResultMessage: Message = { role: 'user', content: toolResults }
+    messages.push(toolResultMessage)
+    await appendMessage(sessionId, toolResultMessage)
+  }
+
+  return { messages, usage: totalUsage }
+}
