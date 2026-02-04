@@ -9,6 +9,7 @@ import createToolsPlugin from '../plugins/tools.ts'
 import createMemoryPlugin from '../plugins/memory.ts'
 import createCorePlugin from '../plugins/core.ts'
 import createWritePluginPlugin from '../plugins/write-plugin.ts'
+import createDiscordPlugin from '../plugins/discord.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -29,6 +30,7 @@ async function main() {
   pluginManager.registerBuiltin('tools', createToolsPlugin)
   pluginManager.registerBuiltin('memory', createMemoryPlugin)
   pluginManager.registerBuiltin('write-plugin', createWritePluginPlugin)
+  pluginManager.registerBuiltin('discord', createDiscordPlugin)
   // core needs the plugin manager reference
   pluginManager.registerBuiltin('core', () => createCorePlugin(pluginManager))
 
@@ -43,6 +45,42 @@ async function main() {
   }
 
   const provider = new AnthropicProvider()
+
+  // start consuming plugin inputs (for channel plugins like discord)
+  async function consumePluginInputs() {
+    for (const [name, loaded] of pluginManager.getAllPlugins()) {
+      if (loaded.plugin.input && loaded.state === 'loaded') {
+        ;(async () => {
+          try {
+            for await (const { sessionId, message } of loaded.plugin.input!) {
+              console.log(`[${name}] incoming message for session: ${sessionId}`)
+              const text = message.content
+                .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                .map(b => b.text)
+                .join('\n')
+              if (!text.trim()) continue
+
+              try {
+                await runAgentTurn(text, {
+                  provider,
+                  system: buildSystemPrompt,
+                  tools: getTools,
+                  sessionId,
+                  workingDir: process.cwd(),
+                  onChunk: (chunk) => broadcast(sessionId, chunk),
+                })
+              } catch (err) {
+                console.error(`agent error for ${sessionId}:`, err)
+                broadcast(sessionId, { type: 'error', message: String(err) })
+              }
+            }
+          } catch (err) {
+            console.error(`plugin input error (${name}):`, err)
+          }
+        })()
+      }
+    }
+  }
 
   function buildSystemPrompt(): string {
     const base = `You are a helpful AI assistant called toebeans. You have access to various tools and plugins to help users.
@@ -166,6 +204,9 @@ Current working directory: ${process.cwd()}`
   })
 
   console.log(`server running on http://localhost:${server.port}`)
+
+  // start plugin input consumers
+  consumePluginInputs()
 }
 
 main().catch(console.error)
