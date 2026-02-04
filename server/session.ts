@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message, SessionInfo } from './types.ts'
@@ -7,20 +8,30 @@ const TOEBEANS_DIR = join(DATA_DIR, 'toebeans')
 const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
 
 export async function ensureDataDirs(): Promise<void> {
-  await Bun.write(join(TOEBEANS_DIR, '.keep'), '')
-  await Bun.write(join(SESSIONS_DIR, '.keep'), '')
-  await Bun.write(join(TOEBEANS_DIR, 'knowledge', '.keep'), '')
-  await Bun.write(join(TOEBEANS_DIR, 'plugins', '.keep'), '')
+  await mkdir(SESSIONS_DIR, { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'knowledge'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'plugins'), { recursive: true })
 }
 
 function getSessionPath(sessionId: string): string {
   return join(SESSIONS_DIR, `${sessionId}.jsonl`)
 }
 
-export function generateSessionId(): string {
+export async function generateSessionId(): Promise<string> {
   const now = new Date()
   const date = now.toISOString().slice(0, 10) // YYYY-MM-DD
-  const seq = String(Math.floor(Math.random() * 10000)).padStart(4, '0')
+
+  // find existing sessions for today and get the next sequence number
+  const glob = new Bun.Glob(`${date}-*.jsonl`)
+  let maxSeq = -1
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const match = path.match(new RegExp(`${date}-(\\d{4})\\.jsonl`))
+    if (match?.[1]) {
+      maxSeq = Math.max(maxSeq, parseInt(match[1], 10))
+    }
+  }
+
+  const seq = String(maxSeq + 1).padStart(4, '0')
   return `${date}-${seq}`
 }
 
@@ -84,4 +95,8 @@ export function getKnowledgeDir(): string {
 
 export function getPluginsDir(): string {
   return join(TOEBEANS_DIR, 'plugins')
+}
+
+export function getSoulPath(): string {
+  return join(TOEBEANS_DIR, 'SOUL.md')
 }

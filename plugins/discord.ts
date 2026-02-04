@@ -1,11 +1,12 @@
 import type { Plugin } from '../server/plugin.ts'
 import type { Tool, ToolResult, Message } from '../server/types.ts'
-import { Client, GatewayIntentBits, Events, type TextChannel, type Message as DiscordMessage } from 'discord.js'
+import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
 
 interface DiscordConfig {
   token: string
   channels?: string[]  // channel IDs to listen to (empty = all accessible)
   respondToMentions?: boolean  // only respond when mentioned
+  allowDMs?: boolean  // respond to direct messages (default: true)
 }
 
 interface QueuedMessage {
@@ -68,7 +69,8 @@ export default function createDiscordPlugin(): Plugin {
             return { content: 'Channel not found or not a text channel', is_error: true }
           }
           const truncated = content.slice(0, 2000)
-          await (channel as TextChannel).send(truncated)
+          // works for both TextChannel and DMChannel
+          await (channel as TextChannel | DMChannel).send(truncated)
           return { content: `Sent message to channel ${channel_id}` }
         } catch (err) {
           return { content: `Failed to send: ${err}`, is_error: true }
@@ -180,6 +182,40 @@ The bot listens for messages and can respond to conversations.`,
 
     input: inputGenerator(),
 
+    async output(sessionId: string, content: string) {
+      if (!client) return
+
+      // sessionId format: discord:channelId
+      const channelId = sessionId.replace(/^discord:/, '')
+      if (!channelId) return
+
+      try {
+        const channel = await client.channels.fetch(channelId)
+        if (!channel?.isTextBased()) return
+
+        // split long messages (discord limit is 2000 chars)
+        const chunks: string[] = []
+        let remaining = content
+        while (remaining.length > 0) {
+          if (remaining.length <= 2000) {
+            chunks.push(remaining)
+            break
+          }
+          // try to split at newline
+          let splitAt = remaining.lastIndexOf('\n', 2000)
+          if (splitAt === -1 || splitAt < 1000) splitAt = 2000
+          chunks.push(remaining.slice(0, splitAt))
+          remaining = remaining.slice(splitAt).trimStart()
+        }
+
+        for (const chunk of chunks) {
+          await (channel as TextChannel | DMChannel).send(chunk)
+        }
+      } catch (err) {
+        console.error(`discord output error:`, err)
+      }
+    },
+
     async init(cfg: unknown) {
       config = cfg as DiscordConfig
       if (!config?.token) {
@@ -191,15 +227,28 @@ The bot listens for messages and can respond to conversations.`,
         intents: [
           GatewayIntentBits.Guilds,
           GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.DirectMessages,
           GatewayIntentBits.MessageContent,
         ],
+        partials: [Partials.Channel],  // required for DM events
       })
 
-      client.on(Events.MessageCreate, (msg: DiscordMessage) => {
+      client.on(Events.MessageCreate, async (msg: DiscordMessage) => {
         // ignore bot messages
         if (msg.author.bot) return
 
-        // filter by channels if configured
+        const isDM = msg.channel.type === ChannelType.DM
+
+        // handle DMs
+        if (isDM) {
+          if (config!.allowDMs === false) return
+          // start typing immediately
+          ;(msg.channel as DMChannel).sendTyping().catch(() => {})
+          queueMessage(msg.channelId, msg.content, msg.author.username)
+          return
+        }
+
+        // filter by channels if configured (only for guild messages)
         if (config!.channels?.length && !config!.channels.includes(msg.channelId)) {
           return
         }
@@ -209,6 +258,10 @@ The bot listens for messages and can respond to conversations.`,
           return
         }
 
+        // start typing immediately
+        if ('sendTyping' in msg.channel) {
+          ;(msg.channel as TextChannel).sendTyping().catch(() => {})
+        }
         queueMessage(msg.channelId, msg.content, msg.author.username)
       })
 

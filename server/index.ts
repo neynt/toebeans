@@ -2,7 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, generateSessionId } from './session.ts'
+import { ensureDataDirs, generateSessionId, loadSession, getSoulPath } from './session.ts'
 import { runAgentTurn } from './agent.ts'
 import { AnthropicProvider } from '../providers/anthropic.ts'
 import createToolsPlugin from '../plugins/tools.ts'
@@ -10,6 +10,7 @@ import createMemoryPlugin from '../plugins/memory.ts'
 import createCorePlugin from '../plugins/core.ts'
 import createWritePluginPlugin from '../plugins/write-plugin.ts'
 import createDiscordPlugin from '../plugins/discord.ts'
+import createPluginManagerPlugin from '../plugins/plugin-manager.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -24,6 +25,19 @@ async function main() {
   await ensureDataDirs()
   const config = await loadConfig()
 
+  // load soul (or create from default)
+  const soulPath = getSoulPath()
+  const soulFile = Bun.file(soulPath)
+  let soul: string
+  if (await soulFile.exists()) {
+    soul = await soulFile.text()
+  } else {
+    const defaultSoul = await Bun.file(new URL('./default-soul.md', import.meta.url)).text()
+    await Bun.write(soulPath, defaultSoul)
+    soul = defaultSoul
+    console.log(`created default SOUL.md at ${soulPath}`)
+  }
+
   const pluginManager = new PluginManager()
 
   // register builtin plugins
@@ -31,6 +45,7 @@ async function main() {
   pluginManager.registerBuiltin('memory', createMemoryPlugin)
   pluginManager.registerBuiltin('write-plugin', createWritePluginPlugin)
   pluginManager.registerBuiltin('discord', createDiscordPlugin)
+  pluginManager.registerBuiltin('plugin-manager', createPluginManagerPlugin)
   // core needs the plugin manager reference
   pluginManager.registerBuiltin('core', () => createCorePlugin(pluginManager))
 
@@ -44,7 +59,14 @@ async function main() {
     }
   }
 
-  const provider = new AnthropicProvider()
+  // create provider from config
+  if (config.llm.provider !== 'anthropic') {
+    throw new Error(`unsupported provider: ${config.llm.provider}`)
+  }
+  const provider = new AnthropicProvider({
+    apiKey: config.llm.apiKey,
+    model: config.llm.model,
+  })
 
   // start consuming plugin inputs (for channel plugins like discord)
   async function consumePluginInputs() {
@@ -60,6 +82,9 @@ async function main() {
                 .join('\n')
               if (!text.trim()) continue
 
+              // collect response text to send back via plugin output
+              let responseText = ''
+
               try {
                 await runAgentTurn(text, {
                   provider,
@@ -67,11 +92,26 @@ async function main() {
                   tools: getTools,
                   sessionId,
                   workingDir: process.cwd(),
-                  onChunk: (chunk) => broadcast(sessionId, chunk),
+                  onChunk: (chunk) => {
+                    broadcast(sessionId, chunk)
+                    // collect text chunks for plugin output
+                    if (chunk.type === 'text') {
+                      responseText += chunk.text
+                    }
+                  },
                 })
+
+                // send response back via plugin output
+                if (responseText.trim() && loaded.plugin.output) {
+                  await loaded.plugin.output(sessionId, responseText)
+                }
               } catch (err) {
                 console.error(`agent error for ${sessionId}:`, err)
                 broadcast(sessionId, { type: 'error', message: String(err) })
+                // send error back via plugin output
+                if (loaded.plugin.output) {
+                  await loaded.plugin.output(sessionId, `error: ${err}`)
+                }
               }
             }
           } catch (err) {
@@ -83,13 +123,21 @@ async function main() {
   }
 
   function buildSystemPrompt(): string {
-    const base = `You are a helpful AI assistant called toebeans. You have access to various tools and plugins to help users.
+    const parts: string[] = []
 
-Current working directory: ${process.cwd()}`
+    // soul first - sets the tone
+    parts.push(soul)
 
+    // then context
+    parts.push(`Current working directory: ${process.cwd()}`)
+
+    // then plugin instructions
     const pluginSection = pluginManager.getSystemPromptSection()
+    if (pluginSection) {
+      parts.push(pluginSection)
+    }
 
-    return pluginSection ? `${base}\n\n${pluginSection}` : base
+    return parts.join('\n\n')
   }
 
   function getTools(): Tool[] {
@@ -145,7 +193,7 @@ Current working directory: ${process.cwd()}`
 
   const server = Bun.serve<WebSocketData>({
     port,
-    fetch(req, server) {
+    async fetch(req, server) {
       const url = new URL(req.url)
 
       if (url.pathname === '/ws') {
@@ -163,8 +211,40 @@ Current working directory: ${process.cwd()}`
       }
 
       if (url.pathname === '/session/new') {
-        const sessionId = generateSessionId()
+        const sessionId = await generateSessionId()
         return new Response(JSON.stringify({ sessionId }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
+      // debug endpoint: GET /debug/:sessionId
+      const debugMatch = url.pathname.match(/^\/debug\/(.+)$/)
+      if (debugMatch) {
+        const sessionId = debugMatch[1]
+        const messages = await loadSession(sessionId)
+        const system = buildSystemPrompt()
+        const tools = getTools().map(t => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema,
+        }))
+
+        const debug = {
+          sessionId,
+          system,
+          messages,
+          tools,
+          stats: {
+            messageCount: messages.length,
+            systemLength: system.length,
+            toolCount: tools.length,
+            estimatedTokens: Math.ceil(
+              (system.length + JSON.stringify(messages).length + JSON.stringify(tools).length) / 4
+            ),
+          },
+        }
+
+        return new Response(JSON.stringify(debug, null, 2), {
           headers: { 'content-type': 'application/json' },
         })
       }

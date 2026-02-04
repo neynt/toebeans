@@ -67,7 +67,7 @@ export class ContextManager {
    * Returns the new session ID
    */
   async compact(summary: string): Promise<string> {
-    const newSessionId = generateSessionId()
+    const newSessionId = await generateSessionId()
 
     // create initial message with summary context
     const summaryMessage: Message = {

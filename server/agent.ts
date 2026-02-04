@@ -2,6 +2,17 @@ import type { LlmProvider } from './llm-provider.ts'
 import type { Message, ContentBlock, Tool, ToolContext, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
 import { loadSession, appendMessage } from './session.ts'
 
+const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
+
+function truncateToolResult(content: string): string {
+  if (content.length <= MAX_TOOL_RESULT_LENGTH) {
+    return content
+  }
+  const half = Math.floor(MAX_TOOL_RESULT_LENGTH / 2)
+  const truncatedBytes = content.length - MAX_TOOL_RESULT_LENGTH
+  return content.slice(0, half) + `\n\n... [truncated ${truncatedBytes} characters] ...\n\n` + content.slice(-half)
+}
+
 export interface AgentOptions {
   provider: LlmProvider
   system: () => string
@@ -104,6 +115,7 @@ export async function runAgentTurn(
         } else {
           try {
             result = await tool.execute(block.input, toolContext)
+            result.content = truncateToolResult(result.content)
           } catch (err) {
             result = { content: `Tool error: ${err}`, is_error: true }
           }

@@ -132,8 +132,39 @@ function handleInput(line: string) {
     return
   }
 
+  if (input === '/debug') {
+    if (!state.sessionId) {
+      console.log('no session')
+      showPrompt()
+      return
+    }
+    fetch(`${HTTP_URL}/debug/${state.sessionId}`)
+      .then(r => r.json())
+      .then((data: { system: string; messages: unknown[]; tools: { name: string }[]; stats: { messageCount: number; systemLength: number; toolCount: number; estimatedTokens: number } }) => {
+        console.log('\n=== SYSTEM PROMPT ===')
+        console.log(data.system)
+        console.log('\n=== MESSAGES ===')
+        console.log(JSON.stringify(data.messages, null, 2))
+        console.log('\n=== TOOLS ===')
+        for (const t of data.tools) {
+          console.log(`- ${t.name}`)
+        }
+        console.log('\n=== STATS ===')
+        console.log(`messages: ${data.stats.messageCount}`)
+        console.log(`system length: ${data.stats.systemLength} chars`)
+        console.log(`tools: ${data.stats.toolCount}`)
+        console.log(`estimated tokens: ~${data.stats.estimatedTokens}`)
+        showPrompt()
+      })
+      .catch(err => {
+        console.error('debug error:', err)
+        showPrompt()
+      })
+    return
+  }
+
   if (input.startsWith('/')) {
-    console.log('unknown command. available: /new, /session, /quit')
+    console.log('unknown command. available: /new, /session, /debug, /quit')
     showPrompt()
     return
   }
@@ -169,7 +200,7 @@ function main() {
   })
 
   console.log('toebeans cli')
-  console.log('commands: /new (new session), /session (show id), /quit')
+  console.log('commands: /new, /session, /debug, /quit')
   console.log('')
 
   connect()

@@ -31,6 +31,9 @@ export interface Plugin {
   // for channel plugins: yields incoming messages
   input?: AsyncIterable<{ sessionId: string; message: Message }>
 
+  // for channel plugins: send a response back
+  output?: (sessionId: string, content: string) => Promise<void>
+
   // lifecycle
   init?: (config: unknown) => void | Promise<void>
   destroy?: () => void | Promise<void>

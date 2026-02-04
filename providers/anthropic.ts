@@ -10,9 +10,9 @@ export class AnthropicProvider implements LlmProvider {
   private client: Anthropic
   private model: string
 
-  constructor(options: { apiKey?: string; model?: string } = {}) {
+  constructor(options: { apiKey?: string; model: string }) {
     this.client = new Anthropic({ apiKey: options.apiKey })
-    this.model = options.model ?? 'claude-sonnet-4-20250514'
+    this.model = options.model
   }
 
   async *stream(params: {

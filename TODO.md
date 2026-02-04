@@ -1,3 +1,6 @@
 - [x] add a plugin to support Discord
 - [x] write a nicer README.md explaining the core concepts (e.g. core, plugin, list of core plugins, llm provider, what's in the core server, what can be accomplished with plugins)
 - [x] test the client in tmux
+- [x] can you number session files starting from 0000 instead of randomly
+- [x] i'd like to give the agent more personality. could you add a SOUL.md next to config.json? see /home/kanoko/.openclaw/workspace/IDENTITY.md and /home/kanoko/.openclaw/workspace/SOUL.md for inspiration. i'd want the agent's soul to be a mix of openclaw's IDENTITY and SOUL.
+- [ ] 
