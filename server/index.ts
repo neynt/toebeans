@@ -2,7 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, generateSessionId, loadSession, getSoulPath } from './session.ts'
+import { ensureDataDirs, generateSessionId, loadSession, getSoulPath, listSessions } from './session.ts'
 import { runAgentTurn } from './agent.ts'
 import { AnthropicProvider } from '../providers/anthropic.ts'
 import createToolsPlugin from '../plugins/tools.ts'
@@ -11,6 +11,7 @@ import createCorePlugin from '../plugins/core.ts'
 import createWritePluginPlugin from '../plugins/write-plugin.ts'
 import createDiscordPlugin from '../plugins/discord.ts'
 import createPluginManagerPlugin from '../plugins/plugin-manager.ts'
+import createClaudeCodePlugin from '../plugins/claude-code.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -46,6 +47,7 @@ async function main() {
   pluginManager.registerBuiltin('write-plugin', createWritePluginPlugin)
   pluginManager.registerBuiltin('discord', createDiscordPlugin)
   pluginManager.registerBuiltin('plugin-manager', createPluginManagerPlugin)
+  pluginManager.registerBuiltin('claude-code', createClaudeCodePlugin)
   // core needs the plugin manager reference
   pluginManager.registerBuiltin('core', () => createCorePlugin(pluginManager))
 
@@ -213,6 +215,22 @@ async function main() {
       if (url.pathname === '/session/new') {
         const sessionId = await generateSessionId()
         return new Response(JSON.stringify({ sessionId }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
+      if (url.pathname === '/sessions') {
+        const sessions = await listSessions()
+        return new Response(JSON.stringify(sessions), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
+      // get session messages
+      const sessionMatch = url.pathname.match(/^\/session\/(.+)\/messages$/)
+      if (sessionMatch) {
+        const messages = await loadSession(sessionMatch[1])
+        return new Response(JSON.stringify(messages), {
           headers: { 'content-type': 'application/json' },
         })
       }

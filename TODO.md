@@ -3,4 +3,14 @@
 - [x] test the client in tmux
 - [x] can you number session files starting from 0000 instead of randomly
 - [x] i'd like to give the agent more personality. could you add a SOUL.md next to config.json? see /home/kanoko/.openclaw/workspace/IDENTITY.md and /home/kanoko/.openclaw/workspace/SOUL.md for inspiration. i'd want the agent's soul to be a mix of openclaw's IDENTITY and SOUL.
-- [ ] 
+- [x] discord: when receiving messages over discord, should have some metadata attached like channel id and message id so bot can react
+- [x] cli: make it a full blown ink tui
+- [x] cli: make ctrl+d exit
+- [x] debug: add tui subcommands for listing sessions, printing out what would be the context sent to a session
+- [x] claude code skill: i would like you to implement a claude code plugin that lets the agent control claude code. recursive, i know.
+- [ ] add ability to parse voice notes coming from discord, through a plugin.
+- [ ] qwen3-tts voice
+- [ ] use a local llm?
+- [ ] visual web browser tool
+- [ ] scheduled wakeups
+- [ ] tui should display a full audit log, including a history of all tool calls

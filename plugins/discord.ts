@@ -1,17 +1,69 @@
 import type { Plugin } from '../server/plugin.ts'
 import type { Tool, ToolResult, Message } from '../server/types.ts'
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
+import { exec } from 'child_process'
+import { promisify } from 'util'
+import { writeFile, unlink } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import https from 'https'
+import http from 'http'
+
+const execAsync = promisify(exec)
 
 interface DiscordConfig {
   token: string
   channels?: string[]  // channel IDs to listen to (empty = all accessible)
   respondToMentions?: boolean  // only respond when mentioned
   allowDMs?: boolean  // respond to direct messages (default: true)
+  transcribeVoice?: boolean  // transcribe voice messages (default: true)
 }
 
 interface QueuedMessage {
   sessionId: string
   message: Message
+}
+
+async function downloadFile(url: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http
+    client.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`))
+        return
+      }
+      const chunks: Buffer[] = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', async () => {
+        try {
+          await writeFile(outputPath, Buffer.concat(chunks))
+          resolve()
+        } catch (err) {
+          reject(err)
+        }
+      })
+      response.on('error', reject)
+    }).on('error', reject)
+  })
+}
+
+async function transcribeAudio(audioPath: string): Promise<string> {
+  try {
+    const { stdout } = await execAsync(`uvx whisperx "${audioPath}" --model tiny --language en --output_format txt`)
+    // whisperx outputs a .txt file in the same directory
+    const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
+    try {
+      const { stdout: transcription } = await execAsync(`cat "${txtPath}"`)
+      await unlink(txtPath)
+      return transcription.trim()
+    } catch {
+      // if txt file doesn't exist, return stdout
+      return stdout.trim() || '(transcription failed)'
+    }
+  } catch (err) {
+    console.error('Transcription error:', err)
+    return `(transcription failed: ${err})`
+  }
 }
 
 export default function createDiscordPlugin(): Plugin {
@@ -20,12 +72,16 @@ export default function createDiscordPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
-  function queueMessage(channelId: string, content: string, author: string) {
+  function queueMessage(channelId: string, content: string, author: string, isDM: boolean) {
+    const channelContext = isDM
+      ? `[DM from ${author}, channel_id: ${channelId}]`
+      : `[#channel ${channelId}, from ${author}]`
+
     const msg: QueuedMessage = {
       sessionId: `discord:${channelId}`,
       message: {
         role: 'user',
-        content: [{ type: 'text', text: `[${author}]: ${content}` }],
+        content: [{ type: 'text', text: `${channelContext}\n${content}` }],
       },
     }
     messageQueue.push(msg)
@@ -170,13 +226,17 @@ export default function createDiscordPlugin(): Plugin {
   return {
     name: 'discord',
     summary: 'Discord integration. Use load_plugin("discord") to send/read messages.',
-    description: `Discord bot integration:
-- discord_send: Send a message to a channel
+    description: `Discord bot integration. Your text responses are automatically sent back to the channel/DM.
+
+Automatically transcribes voice messages using WhisperX.
+
+Tools (only use these for special cases):
+- discord_send: Send a message to a different channel than you're responding to
 - discord_read_history: Read recent messages from a channel
 - discord_react: Add emoji reaction to a message
 - discord_list_channels: List accessible channels
 
-The bot listens for messages and can respond to conversations.`,
+Messages include [channel_id: X] - use this if you need to call discord tools.`,
 
     tools,
 
@@ -242,27 +302,48 @@ The bot listens for messages and can respond to conversations.`,
         // handle DMs
         if (isDM) {
           if (config!.allowDMs === false) return
-          // start typing immediately
-          ;(msg.channel as DMChannel).sendTyping().catch(() => {})
-          queueMessage(msg.channelId, msg.content, msg.author.username)
-          return
-        }
+        } else {
+          // filter by channels if configured (only for guild messages)
+          if (config!.channels?.length && !config!.channels.includes(msg.channelId)) {
+            return
+          }
 
-        // filter by channels if configured (only for guild messages)
-        if (config!.channels?.length && !config!.channels.includes(msg.channelId)) {
-          return
-        }
-
-        // filter by mentions if configured
-        if (config!.respondToMentions && client?.user && !msg.mentions.has(client.user.id)) {
-          return
+          // filter by mentions if configured
+          if (config!.respondToMentions && client?.user && !msg.mentions.has(client.user.id)) {
+            return
+          }
         }
 
         // start typing immediately
-        if ('sendTyping' in msg.channel) {
-          ;(msg.channel as TextChannel).sendTyping().catch(() => {})
+        const typingChannel = msg.channel as TextChannel | DMChannel
+        typingChannel.sendTyping().catch(() => {})
+
+        let content = msg.content
+
+        // handle voice messages / audio attachments
+        if (config!.transcribeVoice !== false && msg.attachments.size > 0) {
+          for (const attachment of msg.attachments.values()) {
+            // check if it's an audio file
+            const isAudio = attachment.contentType?.startsWith('audio/') || 
+                           /\.(mp3|wav|ogg|m4a|opus|webm)$/i.test(attachment.name || '')
+            
+            if (isAudio) {
+              try {
+                const tempFile = join(tmpdir(), `discord-audio-${Date.now()}-${attachment.name}`)
+                await downloadFile(attachment.url, tempFile)
+                const transcription = await transcribeAudio(tempFile)
+                await unlink(tempFile).catch(() => {})
+                
+                content += `\n\n[Voice message transcription: ${transcription}]`
+              } catch (err) {
+                console.error('Failed to transcribe audio:', err)
+                content += `\n\n[Voice message - transcription failed]`
+              }
+            }
+          }
         }
-        queueMessage(msg.channelId, msg.content, msg.author.username)
+
+        queueMessage(msg.channelId, content, msg.author.username, isDM)
       })
 
       client.on(Events.ClientReady, () => {

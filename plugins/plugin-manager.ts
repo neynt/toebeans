@@ -43,6 +43,10 @@ const PLUGIN_REGISTRY: Record<string, PluginInfo> = {
     description: 'Core plugin management (load_plugin tool).',
     fields: [],
   },
+  'claude-code': {
+    description: 'Control Claude Code instances via tmux. Recursive fun.',
+    fields: [],
+  },
   'plugin-manager': {
     description: 'Meta-plugin for enabling/disabling other plugins via config.json.',
     fields: [],
