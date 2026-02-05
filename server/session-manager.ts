@@ -106,7 +106,7 @@ export function createSessionManager(
   }
 
   async function appendToKnowledge(content: string): Promise<void> {
-    const knowledgePath = join(getKnowledgeDir(), 'learned.md')
+    const knowledgePath = join(getKnowledgeDir(), 'USER.md')
     const file = Bun.file(knowledgePath)
     const timestamp = new Date().toISOString().slice(0, 10)
     const entry = `\n## ${timestamp}\n\n${content}\n`
@@ -115,7 +115,7 @@ export function createSessionManager(
       const existing = await file.text()
       await Bun.write(knowledgePath, existing + entry)
     } else {
-      await Bun.write(knowledgePath, `# Learned about user\n${entry}`)
+      await Bun.write(knowledgePath, `# About the user\n${entry}`)
     }
   }
 

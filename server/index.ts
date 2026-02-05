@@ -2,7 +2,8 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager, type LoadedPlugin } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, loadSession, getSoulPath, listSessions } from './session.ts'
+import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir } from './session.ts'
+import { join } from 'path'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../providers/anthropic.ts'
@@ -206,11 +207,21 @@ async function main() {
     startConsumingPluginInput(name, loaded)
   })
 
-  function buildSystemPrompt(): string {
+  async function buildSystemPrompt(): Promise<string> {
     const parts: string[] = []
 
     // soul first - sets the tone
     parts.push(soul)
+
+    // user knowledge (if exists)
+    const userKnowledgePath = join(getKnowledgeDir(), 'USER.md')
+    const userKnowledgeFile = Bun.file(userKnowledgePath)
+    if (await userKnowledgeFile.exists()) {
+      const userKnowledge = await userKnowledgeFile.text()
+      if (userKnowledge.trim()) {
+        parts.push(userKnowledge)
+      }
+    }
 
     // then context
     parts.push(`Current working directory: ${process.cwd()}`)
@@ -334,7 +345,7 @@ async function main() {
       if (debugMatch) {
         const sessionId = debugMatch[1]!
         const messages = await loadSession(sessionId)
-        const system = buildSystemPrompt()
+        const system = await buildSystemPrompt()
         const tools = getTools().map(t => ({
           name: t.name,
           description: t.description,

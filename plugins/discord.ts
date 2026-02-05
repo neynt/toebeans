@@ -73,8 +73,8 @@ export default function createDiscordPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
-  // track streaming state per session
-  const streamingMessages = new Map<string, { channel: TextChannel | DMChannel; messageId: string; buffer: string; lastUpdate: number }>()
+  // track buffered content per session (for sentence-based sending)
+  const messageBuffers = new Map<string, string>()
 
   function queueMessage(channelId: string, content: string, author: string, isDM: boolean) {
     const channelContext = isDM
@@ -249,85 +249,76 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
     async output(sessionId: string, content: string) {
       if (!client) return
 
-      // sessionId format: discord:channelId
-      const channelId = sessionId.replace(/^discord:/, '')
+      // sessionId format: channelId (already stripped of discord: prefix by routeOutput)
+      const channelId = sessionId
       if (!channelId) return
 
-      // special marker to flush and end streaming
+      // special marker to flush remaining buffer
       const shouldFlush = content === '__FLUSH__'
 
       try {
         const channel = await client.channels.fetch(channelId)
         if (!channel?.isTextBased()) return
-
         const textChannel = channel as TextChannel | DMChannel
-        let streamState = streamingMessages.get(sessionId)
+
+        // helper to send a message, splitting if over 2000 chars
+        const sendMessage = async (text: string) => {
+          const trimmed = text.trim()
+          if (!trimmed) return
+
+          let remaining = trimmed
+          while (remaining.length > 0) {
+            const chunk = remaining.slice(0, 2000)
+            await textChannel.send(chunk)
+            remaining = remaining.slice(2000)
+          }
+        }
+
+        // get or create buffer for this session
+        let buffer = messageBuffers.get(sessionId) || ''
 
         if (shouldFlush) {
-          // flush final buffer
-          if (streamState) {
-            try {
-              const msg = await textChannel.messages.fetch(streamState.messageId)
-              if (streamState.buffer.length > 2000) {
-                // split overflow into multiple messages
-                await msg.edit(streamState.buffer.slice(0, 2000))
-                let remaining = streamState.buffer.slice(2000)
-                while (remaining.length > 0) {
-                  const chunk = remaining.slice(0, 2000)
-                  await textChannel.send(chunk)
-                  remaining = remaining.slice(2000)
-                }
-              } else {
-                await msg.edit(streamState.buffer)
-              }
-            } catch (err) {
-              console.error('discord flush error:', err)
-            }
-            streamingMessages.delete(sessionId)
+          // send any remaining buffer
+          if (buffer.trim()) {
+            await sendMessage(buffer)
           }
+          messageBuffers.delete(sessionId)
           return
         }
 
-        if (!streamState) {
-          // start new streaming message
-          const initialContent = content.slice(0, 2000) || '...'
-          const msg = await textChannel.send(initialContent)
-          streamState = {
-            channel: textChannel,
-            messageId: msg.id,
-            buffer: content,
-            lastUpdate: Date.now(),
-          }
-          streamingMessages.set(sessionId, streamState)
-        } else {
-          // append to existing buffer
-          streamState.buffer += content
+        // append new content to buffer
+        buffer += content
+        messageBuffers.set(sessionId, buffer)
 
-          // rate limit updates (max every 500ms to avoid discord rate limits)
-          const now = Date.now()
-          if (now - streamState.lastUpdate >= 500) {
-            try {
-              const msg = await textChannel.messages.fetch(streamState.messageId)
-              // if buffer exceeds 2000 chars, send overflow as new message
-              if (streamState.buffer.length > 2000) {
-                await msg.edit(streamState.buffer.slice(0, 2000))
-                const overflow = streamState.buffer.slice(2000)
-                const newMsg = await textChannel.send(overflow.slice(0, 2000))
-                streamState.messageId = newMsg.id
-                streamState.buffer = overflow
-              } else {
-                await msg.edit(streamState.buffer)
-              }
-              streamState.lastUpdate = now
-            } catch (err) {
-              console.error('discord edit error:', err)
-              // if edit fails, send as new message
-              const msg = await textChannel.send(content.slice(0, 2000) || '...')
-              streamState.messageId = msg.id
-              streamState.buffer = content
-              streamState.lastUpdate = now
+        // look for complete sentences/paragraphs to send
+        // send on: paragraph break (double newline) or sentence end followed by space/newline
+        while (true) {
+          // check for paragraph break first
+          const paraBreak = buffer.indexOf('\n\n')
+          if (paraBreak !== -1) {
+            const toSend = buffer.slice(0, paraBreak)
+            buffer = buffer.slice(paraBreak + 2)
+            messageBuffers.set(sessionId, buffer)
+            await sendMessage(toSend)
+            continue
+          }
+
+          // check for sentence end (. ! ?) followed by space or newline
+          const sentenceMatch = buffer.match(/[.!?][\s\n]/)
+          if (sentenceMatch && sentenceMatch.index !== undefined) {
+            // only send if we have more content after (to avoid sending incomplete final sentence)
+            const endIdx = sentenceMatch.index + 1
+            if (buffer.length > endIdx + 1) {
+              const toSend = buffer.slice(0, endIdx)
+              buffer = buffer.slice(endIdx).trimStart()
+              messageBuffers.set(sessionId, buffer)
+              await sendMessage(toSend)
+              continue
             }
           }
+
+          // no complete unit found, wait for more content
+          break
         }
       } catch (err) {
         console.error(`discord output error:`, err)

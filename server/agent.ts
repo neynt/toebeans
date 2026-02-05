@@ -71,7 +71,7 @@ function truncateToolResult(content: string): string {
 
 export interface AgentOptions {
   provider: LlmProvider
-  system: () => string
+  system: () => string | Promise<string>
   tools: () => Tool[]
   sessionId: string
   workingDir: string
@@ -103,7 +103,7 @@ export async function runAgentTurn(
   while (true) {
     // refresh tools and system prompt each iteration (for load_plugin)
     const tools = getTools()
-    const system = getSystem()
+    const system = await getSystem()
     const toolDefs: ToolDef[] = tools.map(t => ({
       name: t.name,
       description: t.description,
