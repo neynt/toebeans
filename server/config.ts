@@ -18,8 +18,10 @@ const configSchema = z.object({
     port: z.number().optional().default(3000),
   }).optional().default({}),
   session: z.object({
-    expirySeconds: z.number().optional().default(3600), // 1 hour
-    autoSummarize: z.boolean().optional().default(true),
+    // compact session when it exceeds this many tokens (default: 190k, leaving 10k buffer for 200k context)
+    compactAtTokens: z.number().optional().default(190000),
+    // auto-compact and finish session after this many seconds of inactivity (default: 1 hour)
+    lifespanSeconds: z.number().optional().default(3600),
   }).optional().default({}),
   plugins: z.record(z.string(), pluginConfigSchema).optional().default({}),
   llm: llmConfigSchema,
@@ -32,8 +34,8 @@ const DEFAULT_CONFIG: Config = {
     port: 3000,
   },
   session: {
-    expirySeconds: 3600,
-    autoSummarize: true,
+    compactAtTokens: 190000,
+    lifespanSeconds: 3600,
   },
   plugins: {
     bash: { state: 'loaded', config: {} },

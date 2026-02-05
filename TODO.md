@@ -10,11 +10,14 @@
 - [x] claude code skill: i would like you to implement a claude code plugin that lets the agent control claude code. recursive, i know.
 - [x] add ability to parse voice notes coming from discord, through a plugin.
 - [x] wakeups and cron
-- [ ] better claude code skill
+- [x] better claude code skill
+- [x] session management
 - [ ] qwen3-tts voice
 - [ ] use a local llm?
 - [ ] visual web browser tool
+- [ ] basic web browsing tool
 - [ ] scheduled wakeups
 - [ ] tui should display a full audit log, including a history of all tool calls
 - [ ] brave web search api
 - [ ] google local places api
+- [ ] knowledge revamp

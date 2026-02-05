@@ -2,8 +2,9 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager, type LoadedPlugin } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, generateSessionId, loadSession, getSoulPath, listSessions } from './session.ts'
+import { ensureDataDirs, loadSession, getSoulPath, listSessions } from './session.ts'
 import { runAgentTurn } from './agent.ts'
+import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../providers/anthropic.ts'
 import createBashPlugin from '../plugins/bash.ts'
 import createMemoryPlugin from '../plugins/memory.ts'
@@ -69,6 +70,9 @@ async function main() {
     model: config.llm.model,
   })
 
+  // create session manager for handling main session and compaction
+  const sessionManager = createSessionManager(provider, config)
+
   // consume input from a single plugin
   const consumingPlugins = new Set<string>()
 
@@ -104,8 +108,12 @@ async function main() {
 
     ;(async () => {
       try {
-        for await (const { sessionId, message, outputTarget } of loaded.plugin.input!) {
-          console.log(`[${name}] incoming message for session: ${sessionId}${outputTarget ? ` (output -> ${outputTarget})` : ''}`)
+        for await (const { sessionId: pluginSessionId, message, outputTarget } of loaded.plugin.input!) {
+          // use main session for conversation, unless explicitly specified in outputTarget's session
+          const mainSessionId = await sessionManager.getSessionForMessage()
+          const conversationSessionId = outputTarget?.includes(':') ? mainSessionId : mainSessionId
+
+          console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || pluginSessionId})`)
           const text = message.content
             .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
             .map(b => b.text)
@@ -118,11 +126,11 @@ async function main() {
           let currentToolName: string | null = null
 
           // determine output function and target
+          // use explicit outputTarget, or fall back to plugin's sessionId for routing
+          const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
           let outputFn: ((content: string) => Promise<void>) | null = null
-          if (outputTarget) {
-            outputFn = (content) => routeOutput(outputTarget, content)
-          } else if (loaded.plugin.output) {
-            outputFn = (content) => loaded.plugin.output!(sessionId, content)
+          if (effectiveOutputTarget) {
+            outputFn = (content) => routeOutput(effectiveOutputTarget, content)
           }
 
           try {
@@ -130,10 +138,10 @@ async function main() {
               provider,
               system: buildSystemPrompt,
               tools: getTools,
-              sessionId,
+              sessionId: conversationSessionId,
               workingDir: process.cwd(),
               onChunk: async (chunk) => {
-                broadcast(sessionId, chunk)
+                broadcast(conversationSessionId, chunk)
 
                 // stream text chunks immediately
                 if (chunk.type === 'text') {
@@ -165,9 +173,12 @@ async function main() {
                 }
               },
             })
+
+            // check if session needs compaction
+            await sessionManager.checkCompaction(conversationSessionId)
           } catch (err) {
-            console.error(`agent error for ${sessionId}:`, err)
-            broadcast(sessionId, { type: 'error', message: String(err) })
+            console.error(`agent error for ${conversationSessionId}:`, err)
+            broadcast(conversationSessionId, { type: 'error', message: String(err) })
 
             // send error output and flush
             const errorMsg = `error: ${err}`
@@ -242,20 +253,23 @@ async function main() {
       }
 
       case 'message': {
-        console.log(`message for session ${msg.sessionId}: ${msg.content.slice(0, 50)}...`)
+        // use main session for websocket messages too
+        const wsSessionId = await sessionManager.getSessionForMessage()
+        console.log(`message for session ${wsSessionId}: ${msg.content.slice(0, 50)}...`)
 
         try {
           await runAgentTurn(msg.content, {
             provider,
             system: buildSystemPrompt,
             tools: getTools,
-            sessionId: msg.sessionId,
+            sessionId: wsSessionId,
             workingDir: process.cwd(),
-            onChunk: (chunk) => broadcast(msg.sessionId, chunk),
+            onChunk: (chunk) => broadcast(wsSessionId, chunk),
           })
+          await sessionManager.checkCompaction(wsSessionId)
         } catch (err) {
           console.error('agent error:', err)
-          broadcast(msg.sessionId, { type: 'error', message: String(err) })
+          broadcast(wsSessionId, { type: 'error', message: String(err) })
         }
         break
       }
@@ -283,8 +297,17 @@ async function main() {
         return new Response('ok')
       }
 
+      // get current main session (for TUI to connect to)
+      if (url.pathname === '/session/current') {
+        const sessionId = await sessionManager.getSessionForMessage()
+        return new Response(JSON.stringify({ sessionId }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
+      // legacy: /session/new now returns current session
       if (url.pathname === '/session/new') {
-        const sessionId = await generateSessionId()
+        const sessionId = await sessionManager.getSessionForMessage()
         return new Response(JSON.stringify({ sessionId }), {
           headers: { 'content-type': 'application/json' },
         })
@@ -300,7 +323,7 @@ async function main() {
       // get session messages
       const sessionMatch = url.pathname.match(/^\/session\/(.+)\/messages$/)
       if (sessionMatch) {
-        const messages = await loadSession(sessionMatch[1])
+        const messages = await loadSession(sessionMatch[1]!)
         return new Response(JSON.stringify(messages), {
           headers: { 'content-type': 'application/json' },
         })
@@ -309,7 +332,7 @@ async function main() {
       // debug endpoint: GET /debug/:sessionId
       const debugMatch = url.pathname.match(/^\/debug\/(.+)$/)
       if (debugMatch) {
-        const sessionId = debugMatch[1]
+        const sessionId = debugMatch[1]!
         const messages = await loadSession(sessionId)
         const system = buildSystemPrompt()
         const tools = getTools().map(t => ({
