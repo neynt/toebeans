@@ -1,5 +1,7 @@
 # toebeans
 
+<img src="toebeans.heif">
+
 a minimal, extensible personal assistant.
 
 ## core concepts
