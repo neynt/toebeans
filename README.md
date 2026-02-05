@@ -1,6 +1,6 @@
 # toebeans
 
-<img src="toebeans.heif">
+<img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png">
 
 a minimal, extensible personal assistant.
 
