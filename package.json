@@ -6,7 +6,8 @@
   "scripts": {
     "server": "bun run server/index.ts",
     "client": "bun run client/tui.tsx",
-    "client:simple": "bun run client/cli.ts"
+    "client:simple": "bun run client/cli.ts",
+    "debug": "bun run debug/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

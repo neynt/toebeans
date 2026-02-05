@@ -13,6 +13,7 @@ const execAsync = promisify(exec)
 
 interface DiscordConfig {
   token: string
+  allowedUsers: string[]  // user IDs allowed to interact (required for safety)
   channels?: string[]  // channel IDs to listen to (empty = all accessible)
   respondToMentions?: boolean  // only respond when mentioned
   allowDMs?: boolean  // respond to direct messages (default: true)
@@ -71,6 +72,9 @@ export default function createDiscordPlugin(): Plugin {
   let config: DiscordConfig | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
+
+  // track streaming state per session
+  const streamingMessages = new Map<string, { channel: TextChannel | DMChannel; messageId: string; buffer: string; lastUpdate: number }>()
 
   function queueMessage(channelId: string, content: string, author: string, isDM: boolean) {
     const channelContext = isDM
@@ -249,27 +253,81 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
       const channelId = sessionId.replace(/^discord:/, '')
       if (!channelId) return
 
+      // special marker to flush and end streaming
+      const shouldFlush = content === '__FLUSH__'
+
       try {
         const channel = await client.channels.fetch(channelId)
         if (!channel?.isTextBased()) return
 
-        // split long messages (discord limit is 2000 chars)
-        const chunks: string[] = []
-        let remaining = content
-        while (remaining.length > 0) {
-          if (remaining.length <= 2000) {
-            chunks.push(remaining)
-            break
+        const textChannel = channel as TextChannel | DMChannel
+        let streamState = streamingMessages.get(sessionId)
+
+        if (shouldFlush) {
+          // flush final buffer
+          if (streamState) {
+            try {
+              const msg = await textChannel.messages.fetch(streamState.messageId)
+              if (streamState.buffer.length > 2000) {
+                // split overflow into multiple messages
+                await msg.edit(streamState.buffer.slice(0, 2000))
+                let remaining = streamState.buffer.slice(2000)
+                while (remaining.length > 0) {
+                  const chunk = remaining.slice(0, 2000)
+                  await textChannel.send(chunk)
+                  remaining = remaining.slice(2000)
+                }
+              } else {
+                await msg.edit(streamState.buffer)
+              }
+            } catch (err) {
+              console.error('discord flush error:', err)
+            }
+            streamingMessages.delete(sessionId)
           }
-          // try to split at newline
-          let splitAt = remaining.lastIndexOf('\n', 2000)
-          if (splitAt === -1 || splitAt < 1000) splitAt = 2000
-          chunks.push(remaining.slice(0, splitAt))
-          remaining = remaining.slice(splitAt).trimStart()
+          return
         }
 
-        for (const chunk of chunks) {
-          await (channel as TextChannel | DMChannel).send(chunk)
+        if (!streamState) {
+          // start new streaming message
+          const initialContent = content.slice(0, 2000) || '...'
+          const msg = await textChannel.send(initialContent)
+          streamState = {
+            channel: textChannel,
+            messageId: msg.id,
+            buffer: content,
+            lastUpdate: Date.now(),
+          }
+          streamingMessages.set(sessionId, streamState)
+        } else {
+          // append to existing buffer
+          streamState.buffer += content
+
+          // rate limit updates (max every 500ms to avoid discord rate limits)
+          const now = Date.now()
+          if (now - streamState.lastUpdate >= 500) {
+            try {
+              const msg = await textChannel.messages.fetch(streamState.messageId)
+              // if buffer exceeds 2000 chars, send overflow as new message
+              if (streamState.buffer.length > 2000) {
+                await msg.edit(streamState.buffer.slice(0, 2000))
+                const overflow = streamState.buffer.slice(2000)
+                const newMsg = await textChannel.send(overflow.slice(0, 2000))
+                streamState.messageId = newMsg.id
+                streamState.buffer = overflow
+              } else {
+                await msg.edit(streamState.buffer)
+              }
+              streamState.lastUpdate = now
+            } catch (err) {
+              console.error('discord edit error:', err)
+              // if edit fails, send as new message
+              const msg = await textChannel.send(content.slice(0, 2000) || '...')
+              streamState.messageId = msg.id
+              streamState.buffer = content
+              streamState.lastUpdate = now
+            }
+          }
         }
       } catch (err) {
         console.error(`discord output error:`, err)
@@ -296,6 +354,12 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
       client.on(Events.MessageCreate, async (msg: DiscordMessage) => {
         // ignore bot messages
         if (msg.author.bot) return
+
+        // check user whitelist (required for safety)
+        if (!config!.allowedUsers.includes(msg.author.id)) {
+          console.log(`discord: ignored message from non-whitelisted user ${msg.author.username} (${msg.author.id})`)
+          return
+        }
 
         const isDM = msg.channel.type === ChannelType.DM
 

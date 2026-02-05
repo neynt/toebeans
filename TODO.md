@@ -8,9 +8,13 @@
 - [x] cli: make ctrl+d exit
 - [x] debug: add tui subcommands for listing sessions, printing out what would be the context sent to a session
 - [x] claude code skill: i would like you to implement a claude code plugin that lets the agent control claude code. recursive, i know.
-- [ ] add ability to parse voice notes coming from discord, through a plugin.
+- [x] add ability to parse voice notes coming from discord, through a plugin.
+- [x] wakeups and cron
+- [ ] better claude code skill
 - [ ] qwen3-tts voice
 - [ ] use a local llm?
 - [ ] visual web browser tool
 - [ ] scheduled wakeups
 - [ ] tui should display a full audit log, including a history of all tool calls
+- [ ] brave web search api
+- [ ] google local places api

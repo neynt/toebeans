@@ -29,7 +29,9 @@ export interface Plugin {
   }
 
   // for channel plugins: yields incoming messages
-  input?: AsyncIterable<{ sessionId: string; message: Message }>
+  // outputTarget is optional - if provided, routes output to that target instead of back to this plugin
+  // format: 'pluginName:target' (e.g., 'discord:channelId')
+  input?: AsyncIterable<{ sessionId: string; message: Message; outputTarget?: string }>
 
   // for channel plugins: send a response back
   output?: (sessionId: string, content: string) => Promise<void>
@@ -53,9 +55,38 @@ export interface LoadedPlugin {
 export class PluginManager {
   private plugins = new Map<string, LoadedPlugin>()
   private builtinPlugins = new Map<string, () => Plugin>()
+  private onLoadCallbacks: ((name: string, plugin: LoadedPlugin) => void)[] = []
 
   registerBuiltin(name: string, factory: () => Plugin): void {
     this.builtinPlugins.set(name, factory)
+  }
+
+  onPluginLoaded(callback: (name: string, plugin: LoadedPlugin) => void): void {
+    this.onLoadCallbacks.push(callback)
+  }
+
+  getBuiltinNames(): string[] {
+    return Array.from(this.builtinPlugins.keys())
+  }
+
+  async discoverUserPlugins(): Promise<string[]> {
+    const userDir = getPluginsDir()
+    const names: string[] = []
+    const glob = new Bun.Glob('*.ts')
+    try {
+      for await (const file of glob.scan(userDir)) {
+        names.push(file.replace('.ts', ''))
+      }
+    } catch {
+      // dir might not exist
+    }
+    return names
+  }
+
+  async discoverAllPlugins(): Promise<string[]> {
+    const builtins = this.getBuiltinNames()
+    const user = await this.discoverUserPlugins()
+    return [...new Set([...builtins, ...user])]
   }
 
   async loadPlugin(name: string, config: PluginConfig): Promise<void> {
@@ -81,11 +112,17 @@ export class PluginManager {
       await plugin.init(config.config)
     }
 
-    this.plugins.set(name, {
+    const loadedPlugin: LoadedPlugin = {
       plugin,
       state: config.state,
       config: config.config,
-    })
+    }
+    this.plugins.set(name, loadedPlugin)
+
+    // notify listeners
+    for (const callback of this.onLoadCallbacks) {
+      callback(name, loadedPlugin)
+    }
   }
 
   setState(name: string, state: PluginState): void {

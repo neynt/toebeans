@@ -2,9 +2,20 @@ import { useState, useEffect, useCallback } from 'react'
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink'
 import TextInput from 'ink-text-input'
 import type { ServerMessage } from '../server/types.ts'
+import { loadConfig } from '../server/config.ts'
 
-const SERVER_URL = process.env.TOEBEANS_SERVER ?? 'ws://localhost:3000/ws'
-const HTTP_URL = SERVER_URL.replace('ws://', 'http://').replace('/ws', '')
+async function getServerUrls(): Promise<{ serverUrl: string; httpUrl: string }> {
+  if (process.env.TOEBEANS_SERVER) {
+    const serverUrl = process.env.TOEBEANS_SERVER
+    return { serverUrl, httpUrl: serverUrl.replace('ws://', 'http://').replace('/ws', '') }
+  }
+  const config = await loadConfig()
+  const serverUrl = `ws://localhost:${config.server.port}/ws`
+  return { serverUrl, httpUrl: `http://localhost:${config.server.port}` }
+}
+
+let SERVER_URL: string
+let HTTP_URL: string
 
 const MAX_CONTEXT_TOKENS = 200000 // claude's context window
 
@@ -242,6 +253,7 @@ function App() {
   const [usage, setUsage] = useState<{ input: number; output: number; cacheRead?: number } | null>(null)
   const [totalTokens, setTotalTokens] = useState(0)
   const [currentTool, setCurrentTool] = useState<ToolStatus | null>(null)
+  const [toolHistory, setToolHistory] = useState<ToolStatus[]>([])
   const [isWaiting, setIsWaiting] = useState(false)
   const [scrollOffset, setScrollOffset] = useState(0)
 
@@ -293,8 +305,13 @@ function App() {
             break
 
           case 'tool_result':
-            setCurrentTool((t) => (t ? { ...t, status: msg.is_error ? 'error' : 'done' } : null))
-            setTimeout(() => setCurrentTool(null), 1000)
+            setCurrentTool((t) => {
+              if (t) {
+                const completed = { ...t, status: (msg.is_error ? 'error' : 'done') as ToolStatus['status'] }
+                setToolHistory((h) => [...h, completed])
+              }
+              return null
+            })
             break
 
           case 'done':
@@ -309,6 +326,7 @@ function App() {
             setTotalTokens((t) => t + msg.usage.input + msg.usage.output)
             setIsWaiting(false)
             setCurrentTool(null)
+            // keep toolHistory visible - will be cleared on next user message
             break
 
           case 'error':
@@ -457,6 +475,7 @@ function App() {
     setMessages((prev) => [...prev, { id: nextMsgId(), role: 'user', content: trimmed }])
     ws.send(JSON.stringify({ type: 'message', sessionId, content: trimmed }))
     setIsWaiting(true)
+    setToolHistory([])
     setInput('')
     setScrollOffset(0)
   }, [input, ws, sessionId, isWaiting, exit, switchToSession])
@@ -509,6 +528,9 @@ function App() {
       <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden" justifyContent="flex-end">
         {visibleMessages.map((msg) => (
           <MessageView key={msg.id} message={msg} />
+        ))}
+        {toolHistory.map((tool, i) => (
+          <ToolIndicator key={`tool-${i}`} tool={tool} />
         ))}
         {currentTool && <ToolIndicator tool={currentTool} />}
         {isWaiting && !currentTool && messages[messages.length - 1]?.role !== 'assistant' && (
@@ -565,4 +587,11 @@ function App() {
   )
 }
 
-render(<App />)
+async function main() {
+  const urls = await getServerUrls()
+  SERVER_URL = urls.serverUrl
+  HTTP_URL = urls.httpUrl
+  render(<App />)
+}
+
+main()

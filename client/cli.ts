@@ -1,8 +1,17 @@
 import * as readline from 'readline'
 import type { ServerMessage } from '../server/types.ts'
+import { loadConfig } from '../server/config.ts'
 
-const SERVER_URL = process.env.TOEBEANS_SERVER ?? 'ws://localhost:3000/ws'
-const HTTP_URL = SERVER_URL.replace('ws://', 'http://').replace('/ws', '')
+async function getServerUrl(): Promise<string> {
+  if (process.env.TOEBEANS_SERVER) {
+    return process.env.TOEBEANS_SERVER
+  }
+  const config = await loadConfig()
+  return `ws://localhost:${config.server.port}/ws`
+}
+
+let SERVER_URL: string
+let HTTP_URL: string
 
 interface State {
   sessionId: string | null
@@ -183,7 +192,10 @@ function handleInput(line: string) {
   }))
 }
 
-function main() {
+async function main() {
+  SERVER_URL = await getServerUrl()
+  HTTP_URL = SERVER_URL.replace('ws://', 'http://').replace('/ws', '')
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,

@@ -4,6 +4,62 @@ import { loadSession, appendMessage } from './session.ts'
 
 const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
 
+// repair message history to handle interrupted tool calls
+// ensures every tool_use has a matching tool_result
+function repairMessages(messages: Message[]): Message[] {
+  const repaired: Message[] = []
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!
+    repaired.push(msg)
+
+    // check if this assistant message has tool_use blocks
+    if (msg.role === 'assistant') {
+      const toolUseIds = msg.content
+        .filter(b => b.type === 'tool_use')
+        .map(b => (b as { type: 'tool_use'; id: string; name: string; input: unknown }).id)
+
+      if (toolUseIds.length === 0) continue
+
+      // check next message for tool_results
+      const nextMsg = messages[i + 1]
+      const existingResultIds = new Set<string>()
+
+      if (nextMsg?.role === 'user') {
+        for (const block of nextMsg.content) {
+          if (block.type === 'tool_result' && 'tool_use_id' in block) {
+            existingResultIds.add(block.tool_use_id)
+          }
+        }
+      }
+
+      // find missing tool_results
+      const missingIds = toolUseIds.filter(id => !existingResultIds.has(id))
+
+      if (missingIds.length > 0) {
+        // insert synthetic tool_result message
+        const syntheticResults: ContentBlock[] = missingIds.map(id => ({
+          type: 'tool_result' as const,
+          tool_use_id: id,
+          content: '(interrupted - no result received)',
+          is_error: true,
+        }))
+
+        // if next message is user with some tool_results, prepend missing ones
+        if (nextMsg?.role === 'user' && existingResultIds.size > 0) {
+          // merge into existing user message (will be added in next iteration)
+          nextMsg.content = [...syntheticResults, ...nextMsg.content]
+        } else {
+          // insert new user message with synthetic results
+          repaired.push({ role: 'user', content: syntheticResults })
+        }
+      }
+    }
+  }
+
+  return repaired
+}
+
 function truncateToolResult(content: string): string {
   if (content.length <= MAX_TOOL_RESULT_LENGTH) {
     return content
@@ -28,8 +84,8 @@ export async function runAgentTurn(
 ): Promise<AgentResult> {
   const { provider, system: getSystem, tools: getTools, sessionId, workingDir, onChunk } = options
 
-  // load existing messages
-  const messages = await loadSession(sessionId)
+  // load existing messages and repair any interrupted tool calls
+  const messages = repairMessages(await loadSession(sessionId))
 
   // add user message
   const userMessage: Message = {

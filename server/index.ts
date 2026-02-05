@@ -1,17 +1,17 @@
 import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
-import { PluginManager } from './plugin.ts'
+import { PluginManager, type LoadedPlugin } from './plugin.ts'
 import { loadConfig } from './config.ts'
 import { ensureDataDirs, generateSessionId, loadSession, getSoulPath, listSessions } from './session.ts'
 import { runAgentTurn } from './agent.ts'
 import { AnthropicProvider } from '../providers/anthropic.ts'
-import createToolsPlugin from '../plugins/tools.ts'
+import createBashPlugin from '../plugins/bash.ts'
 import createMemoryPlugin from '../plugins/memory.ts'
-import createCorePlugin from '../plugins/core.ts'
-import createWritePluginPlugin from '../plugins/write-plugin.ts'
+import createPluginsPlugin from '../plugins/plugins.ts'
 import createDiscordPlugin from '../plugins/discord.ts'
-import createPluginManagerPlugin from '../plugins/plugin-manager.ts'
 import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux.ts'
+import createTimersPlugin from '../plugins/timers.ts'
+import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -42,14 +42,13 @@ async function main() {
   const pluginManager = new PluginManager()
 
   // register builtin plugins
-  pluginManager.registerBuiltin('tools', createToolsPlugin)
+  pluginManager.registerBuiltin('bash', createBashPlugin)
   pluginManager.registerBuiltin('memory', createMemoryPlugin)
-  pluginManager.registerBuiltin('write-plugin', createWritePluginPlugin)
   pluginManager.registerBuiltin('discord', createDiscordPlugin)
-  pluginManager.registerBuiltin('plugin-manager', createPluginManagerPlugin)
   pluginManager.registerBuiltin('claude-code-tmux', createClaudeCodeTmuxPlugin)
-  // core needs the plugin manager reference
-  pluginManager.registerBuiltin('core', () => createCorePlugin(pluginManager))
+  pluginManager.registerBuiltin('timers', createTimersPlugin)
+  pluginManager.registerBuiltin('claude-code-direct', createClaudeCodeDirectPlugin)
+  pluginManager.registerBuiltin('plugins', () => createPluginsPlugin(pluginManager))
 
   // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
@@ -70,59 +69,131 @@ async function main() {
     model: config.llm.model,
   })
 
-  // start consuming plugin inputs (for channel plugins like discord)
-  async function consumePluginInputs() {
-    for (const [name, loaded] of pluginManager.getAllPlugins()) {
-      if (loaded.plugin.input && loaded.state === 'loaded') {
-        ;(async () => {
-          try {
-            for await (const { sessionId, message } of loaded.plugin.input!) {
-              console.log(`[${name}] incoming message for session: ${sessionId}`)
-              const text = message.content
-                .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-                .map(b => b.text)
-                .join('\n')
-              if (!text.trim()) continue
+  // consume input from a single plugin
+  const consumingPlugins = new Set<string>()
 
-              // collect response text to send back via plugin output
-              let responseText = ''
+  // route output to a plugin by target string (format: 'pluginName:target')
+  async function routeOutput(target: string, content: string) {
+    const colonIdx = target.indexOf(':')
+    if (colonIdx === -1) {
+      console.error(`invalid output target format: ${target} (expected pluginName:target)`)
+      return
+    }
 
-              try {
-                await runAgentTurn(text, {
-                  provider,
-                  system: buildSystemPrompt,
-                  tools: getTools,
-                  sessionId,
-                  workingDir: process.cwd(),
-                  onChunk: (chunk) => {
-                    broadcast(sessionId, chunk)
-                    // collect text chunks for plugin output
-                    if (chunk.type === 'text') {
-                      responseText += chunk.text
-                    }
-                  },
-                })
+    const pluginName = target.slice(0, colonIdx)
+    const pluginTarget = target.slice(colonIdx + 1)
 
-                // send response back via plugin output
-                if (responseText.trim() && loaded.plugin.output) {
-                  await loaded.plugin.output(sessionId, responseText)
-                }
-              } catch (err) {
-                console.error(`agent error for ${sessionId}:`, err)
-                broadcast(sessionId, { type: 'error', message: String(err) })
-                // send error back via plugin output
-                if (loaded.plugin.output) {
-                  await loaded.plugin.output(sessionId, `error: ${err}`)
-                }
-              }
-            }
-          } catch (err) {
-            console.error(`plugin input error (${name}):`, err)
+    const targetPlugin = pluginManager.getPlugin(pluginName)
+    if (!targetPlugin) {
+      console.error(`output target plugin not found: ${pluginName}`)
+      return
+    }
+
+    if (!targetPlugin.plugin.output) {
+      console.error(`output target plugin has no output function: ${pluginName}`)
+      return
+    }
+
+    await targetPlugin.plugin.output(pluginTarget, content)
+  }
+
+  function startConsumingPluginInput(name: string, loaded: LoadedPlugin) {
+    if (!loaded.plugin.input || loaded.state !== 'loaded') return
+    if (consumingPlugins.has(name)) return // already consuming
+    consumingPlugins.add(name)
+
+    ;(async () => {
+      try {
+        for await (const { sessionId, message, outputTarget } of loaded.plugin.input!) {
+          console.log(`[${name}] incoming message for session: ${sessionId}${outputTarget ? ` (output -> ${outputTarget})` : ''}`)
+          const text = message.content
+            .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+            .map(b => b.text)
+            .join('\n')
+          if (!text.trim()) continue
+
+          // collect response for final output
+          let responseText = ''
+          const toolCalls: { name: string; error: boolean }[] = []
+          let currentToolName: string | null = null
+
+          // determine output function and target
+          let outputFn: ((content: string) => Promise<void>) | null = null
+          if (outputTarget) {
+            outputFn = (content) => routeOutput(outputTarget, content)
+          } else if (loaded.plugin.output) {
+            outputFn = (content) => loaded.plugin.output!(sessionId, content)
           }
-        })()
+
+          try {
+            await runAgentTurn(text, {
+              provider,
+              system: buildSystemPrompt,
+              tools: getTools,
+              sessionId,
+              workingDir: process.cwd(),
+              onChunk: async (chunk) => {
+                broadcast(sessionId, chunk)
+
+                // stream text chunks immediately
+                if (chunk.type === 'text') {
+                  responseText += chunk.text
+                  if (outputFn) {
+                    await outputFn(chunk.text)
+                  }
+                } else if (chunk.type === 'tool_use') {
+                  currentToolName = chunk.name
+                  // stream tool call notification
+                  if (outputFn) {
+                    await outputFn(`[calling ${chunk.name}]\n`)
+                  }
+                } else if (chunk.type === 'tool_result') {
+                  if (currentToolName) {
+                    toolCalls.push({ name: currentToolName, error: !!chunk.is_error })
+                    // stream tool result
+                    if (outputFn) {
+                      const status = chunk.is_error ? '✗' : '✓'
+                      await outputFn(`[${status} ${currentToolName}]\n`)
+                    }
+                    currentToolName = null
+                  }
+                } else if (chunk.type === 'done') {
+                  // flush final message
+                  if (outputFn) {
+                    await outputFn('__FLUSH__')
+                  }
+                }
+              },
+            })
+          } catch (err) {
+            console.error(`agent error for ${sessionId}:`, err)
+            broadcast(sessionId, { type: 'error', message: String(err) })
+
+            // send error output and flush
+            const errorMsg = `error: ${err}`
+            if (outputFn) {
+              await outputFn(errorMsg)
+              await outputFn('__FLUSH__')
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`plugin input error (${name}):`, err)
       }
+    })()
+  }
+
+  // start consuming inputs for all currently loaded plugins
+  function consumePluginInputs() {
+    for (const [name, loaded] of pluginManager.getAllPlugins()) {
+      startConsumingPluginInput(name, loaded)
     }
   }
+
+  // also start consuming when a plugin is dynamically loaded
+  pluginManager.onPluginLoaded((name, loaded) => {
+    startConsumingPluginInput(name, loaded)
+  })
 
   function buildSystemPrompt(): string {
     const parts: string[] = []
@@ -191,7 +262,7 @@ async function main() {
     }
   }
 
-  const port = parseInt(process.env.PORT ?? '3000', 10)
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : config.server.port
 
   const server = Bun.serve<WebSocketData>({
     port,
