@@ -6,7 +6,7 @@ const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
 
 // repair message history to handle interrupted tool calls
 // ensures every tool_use has a matching tool_result
-function repairMessages(messages: Message[]): Message[] {
+export function repairMessages(messages: Message[]): Message[] {
   const repaired: Message[] = []
 
   for (let i = 0; i < messages.length; i++) {

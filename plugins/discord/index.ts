@@ -74,10 +74,17 @@ export default function createDiscordPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
+  // helper to format bytes in human-friendly units
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes}B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  }
+
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them
-  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string }>()
+  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputBytes: number }>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
 
@@ -309,56 +316,90 @@ export default function createDiscordPlugin(): Plugin {
               messageBuffers.delete(sessionId)
             }
           } else if (message.type === 'tool_use') {
-            // send tool use immediately with details
+            // calculate input bytes
             const inputStr = typeof message.input === 'string'
               ? message.input
-              : JSON.stringify(message.input, null, 2)
+              : JSON.stringify(message.input)
+            const inputBytes = Buffer.byteLength(inputStr, 'utf8')
 
-            // format based on tool type
-            let toolMessage = `🔧 **${message.name}**\n`
+            // create concise single-line tool message
+            let toolMessage = `🔧 ${message.name}`
 
-            // show input details for common tools
+            // add brief summary based on tool type
             if (message.name === 'bash') {
               const cmd = (message.input as any)?.command
               if (cmd) {
-                toolMessage += '```bash\n' + cmd.slice(0, 200) + (cmd.length > 200 ? '...' : '') + '\n```'
+                const truncated = cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd
+                toolMessage += `: ${truncated}`
               }
             } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
               const path = (message.input as any)?.path || (message.input as any)?.file_path
               if (path) {
-                toolMessage += `\`${path}\``
+                const basename = path.split('/').pop() || path
+                toolMessage += `: ${basename}`
+              }
+            } else if (message.name === 'spawn_claude_code') {
+              const task = (message.input as any)?.task
+              if (task) {
+                const truncated = task.length > 50 ? task.slice(0, 47) + '...' : task
+                toolMessage += `: ${truncated}`
+              }
+            } else if (message.name === 'discord_send' || message.name === 'discord_read_history' || message.name === 'discord_react') {
+              // just the tool name, no params
+            } else if (message.name === 'remember' || message.name === 'recall') {
+              const topic = (message.input as any)?.topic || (message.input as any)?.query
+              if (topic) {
+                const truncated = topic.length > 50 ? topic.slice(0, 47) + '...' : topic
+                toolMessage += `: ${truncated}`
+              }
+            } else if (message.name === 'timer_create' || message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
+              const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+              if (filename) {
+                toolMessage += `: ${filename}`
+              }
+            } else if (message.name === 'web_browse') {
+              const url = (message.input as any)?.url
+              if (url) {
+                const truncated = url.length > 50 ? url.slice(0, 47) + '...' : url
+                toolMessage += `: ${truncated}`
+              }
+            } else if (message.name === 'generate_image') {
+              const prompt = (message.input as any)?.prompt
+              if (prompt) {
+                const truncated = prompt.length > 50 ? prompt.slice(0, 47) + '...' : prompt
+                toolMessage += `: ${truncated}`
               }
             } else {
-              // generic input display (truncated)
-              const shortInput = inputStr.slice(0, 200)
-              if (shortInput.includes('\n')) {
-                toolMessage += '```\n' + shortInput + (inputStr.length > 200 ? '\n...' : '') + '\n```'
-              } else {
-                toolMessage += `\`${shortInput}${inputStr.length > 200 ? '...' : ''}\``
-              }
+              // fallback: first 50 chars of JSON
+              const truncated = inputStr.length > 50 ? inputStr.slice(0, 47) + '...' : inputStr
+              toolMessage += `: ${truncated}`
             }
 
+            // append byte count
+            toolMessage += ` (${formatBytes(inputBytes)} call)`
+
             const msg = await textChannel.send(toolMessage)
-            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage })
+            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputBytes })
           } else if (message.type === 'tool_result') {
-            // edit the original tool use message to append result (keeping params visible)
+            // swap emoji and add result byte count
             const toolInfo = toolMessages.get(message.tool_use_id)
             if (toolInfo) {
               try {
                 const msg = await textChannel.messages.fetch(toolInfo.messageId)
                 const status = message.is_error ? '❌' : '✅'
 
-                // replace the 🔧 prefix with status, keep the rest of the original content
-                let newContent = toolInfo.originalContent.replace(/^🔧/, status)
+                // calculate result bytes
+                const resultStr = typeof message.content === 'string'
+                  ? message.content
+                  : JSON.stringify(message.content)
+                const resultBytes = Buffer.byteLength(resultStr, 'utf8')
 
-                // append result preview
-                const resultPreview = message.content.slice(0, 200)
-                const hasMore = message.content.length > 200
-                if (resultPreview.trim()) {
-                  newContent += '\n```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
-                }
+                // replace emoji and update byte info
+                const newContent = toolInfo.originalContent
+                  .replace(/^🔧/, status)
+                  .replace(/ \(.*? call\)$/, ` (${formatBytes(toolInfo.inputBytes)} call → ${formatBytes(resultBytes)} result)`)
 
-                await msg.edit(newContent.slice(0, 2000))
+                await msg.edit(newContent)
                 toolMessages.delete(message.tool_use_id)
               } catch (err) {
                 console.error('failed to edit tool message:', err)

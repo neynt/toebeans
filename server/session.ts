@@ -43,22 +43,33 @@ function getSessionPath(sessionId: string): string {
 }
 
 export async function generateSessionId(): Promise<string> {
-  // find highest existing session number by scanning sessions directory
+  const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD
+  const prefix = `${today}-`
+
   const glob = new Bun.Glob('*.jsonl')
-  let maxNum = -1
+  const usedNumbers = new Set<number>()
 
   for await (const path of glob.scan(SESSIONS_DIR)) {
     const sessionId = path.replace('.jsonl', '')
-    // check if it's a 4-digit number format
-    const num = parseInt(sessionId, 10)
-    if (!isNaN(num) && sessionId === num.toString().padStart(4, '0')) {
-      maxNum = Math.max(maxNum, num)
+    // only look at sessions with today's date prefix
+    if (sessionId.startsWith(prefix)) {
+      const numPart = sessionId.slice(prefix.length) // extract NNNN part
+      const num = parseInt(numPart, 10)
+      if (!isNaN(num) && num >= 0 && num <= 9999) {
+        usedNumbers.add(num)
+      }
     }
   }
 
-  // next session is maxNum + 1, zero-padded to 4 digits
-  const nextNum = maxNum + 1
-  return nextNum.toString().padStart(4, '0')
+  // find smallest unused number in range 0-9999
+  for (let i = 0; i <= 9999; i++) {
+    if (!usedNumbers.has(i)) {
+      return `${prefix}${i.toString().padStart(4, '0')}`
+    }
+  }
+
+  // all 10000 slots taken (unlikely)
+  throw new Error(`all session IDs exhausted for ${today} (0000-9999)`)
 }
 
 export async function loadSession(sessionId: string): Promise<Message[]> {

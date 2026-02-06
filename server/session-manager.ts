@@ -1,6 +1,7 @@
 import type { LlmProvider } from './llm-provider.ts'
 import type { Message } from './types.ts'
 import type { Config } from './config.ts'
+import { repairMessages } from './agent.ts'
 import {
   getCurrentSessionId,
   loadSession,
@@ -135,14 +136,17 @@ export function createSessionManager(
     const beforeTokens = await estimateSessionTokens(sessionId)
     console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens)`)
 
-    const messages = await loadSession(sessionId)
-    if (messages.length === 0) {
+    const rawMessages = await loadSession(sessionId)
+    if (rawMessages.length === 0) {
       // nothing to compact, just create new session
       const newId = await generateSessionId()
       await markSessionFinished(sessionId)
       await setCurrentSessionId(newId)
       return newId
     }
+
+    // repair interrupted tool calls before sending to API
+    const messages = repairMessages(rawMessages)
 
     // generate summary + extract knowledge in one call (cache-friendly)
     const { summary, knowledge } = await compactAndExtract(messages)
