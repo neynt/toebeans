@@ -12,7 +12,9 @@
 - [x] wakeups and cron
 - [x] better claude code skill
 - [x] session management
+- [ ] manual compaction
 - [ ] qwen3-tts voice
+- [ ] see images
 - [ ] use a local llm?
 - [ ] visual web browser tool
 - [ ] basic web browsing tool

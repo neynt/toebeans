@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { LlmProvider } from '../server/llm-provider.ts'
-import type { Message, StreamChunk, ToolDef, CacheHint, ContentBlock } from '../server/types.ts'
+import type { Message, StreamChunk, ToolDef, CacheHint } from '../server/types.ts'
 
 type AnthropicContentBlock = Anthropic.Messages.ContentBlockParam
 type AnthropicTool = Anthropic.Messages.Tool
@@ -45,14 +45,31 @@ export class AnthropicProvider implements LlmProvider {
         ;(lastBlock as { cache_control?: { type: string } }).cache_control = { type: cacheHint.type }
       }
 
+      // auto-cache: put a breakpoint near the end of the conversation
+      // so the prefix stays cached across turns within the agent loop
+      const fromEnd = params.messages.length - idx
+      if (fromEnd === 2 && content.length > 0) {
+        const lastBlock = content[content.length - 1]!
+        if (!(lastBlock as { cache_control?: unknown }).cache_control) {
+          ;(lastBlock as { cache_control?: { type: string } }).cache_control = { type: 'ephemeral' }
+        }
+      }
+
       return { role: msg.role, content }
     })
 
-    const tools: AnthropicTool[] = params.tools.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.input_schema as Anthropic.Messages.Tool.InputSchema,
-    }))
+    const tools: AnthropicTool[] = params.tools.map((t, i) => {
+      const tool: AnthropicTool = {
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema as Anthropic.Messages.Tool.InputSchema,
+      }
+      // cache breakpoint on last tool — caches system + tools together
+      if (i === params.tools.length - 1) {
+        ;(tool as { cache_control?: { type: string } }).cache_control = { type: 'ephemeral' }
+      }
+      return tool
+    })
 
     const systemBlocks: Anthropic.Messages.TextBlockParam[] = [
       { type: 'text', text: params.system, cache_control: { type: 'ephemeral' } },

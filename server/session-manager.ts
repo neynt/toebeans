@@ -8,6 +8,7 @@ import {
   isSessionFinished,
   estimateSessionTokens,
   getSessionLastActivity,
+  getSessionCreatedAt,
   writeSession,
   setCurrentSessionId,
   generateSessionId,
@@ -36,6 +37,14 @@ Format as bullet points if there are items to note.`
 export interface SessionManager {
   getSessionForMessage(): Promise<string>
   checkCompaction(sessionId: string): Promise<void>
+  forceCompact(sessionId: string): Promise<string>
+  getSessionInfo(sessionId: string): Promise<{
+    id: string
+    messageCount: number
+    estimatedTokens: number
+    createdAt: Date | null
+    lastActivity: Date | null
+  }>
 }
 
 export function createSessionManager(
@@ -212,6 +221,26 @@ export function createSessionManager(
           await compactSession(sessionId)
           return
         }
+      }
+    },
+
+    async forceCompact(sessionId: string): Promise<string> {
+      console.log(`session-manager: forcing compaction of session ${sessionId}`)
+      return await compactSession(sessionId)
+    },
+
+    async getSessionInfo(sessionId: string) {
+      const messages = await loadSession(sessionId)
+      const tokens = await estimateSessionTokens(sessionId)
+      const createdAt = await getSessionCreatedAt(sessionId)
+      const lastActivity = await getSessionLastActivity(sessionId)
+
+      return {
+        id: sessionId,
+        messageCount: messages.length,
+        estimatedTokens: tokens,
+        createdAt,
+        lastActivity,
       }
     },
   }

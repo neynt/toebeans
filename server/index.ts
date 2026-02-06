@@ -42,6 +42,18 @@ async function main() {
     console.log(`created default SOUL.md at ${soulPath}`)
   }
 
+  // create provider from config
+  if (config.llm.provider !== 'anthropic') {
+    throw new Error(`unsupported provider: ${config.llm.provider}`)
+  }
+  const provider = new AnthropicProvider({
+    apiKey: config.llm.apiKey,
+    model: config.llm.model,
+  })
+
+  // create session manager for handling main session and compaction
+  const sessionManager = createSessionManager(provider, config)
+
   const pluginManager = new PluginManager()
 
   // register builtin plugins
@@ -54,27 +66,19 @@ async function main() {
   pluginManager.registerBuiltin('plugins', () => createPluginsPlugin(pluginManager))
   pluginManager.registerBuiltin('web-browse', createWebBrowsePlugin)
 
-  // load plugins from config
+  // load plugins from config (inject session manager for discord)
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
     try {
-      await pluginManager.loadPlugin(name, pluginConfig)
+      // inject session manager into discord plugin config
+      const enrichedConfig = name === 'discord'
+        ? { ...pluginConfig, config: { ...(pluginConfig.config || {}), sessionManager } }
+        : pluginConfig
+      await pluginManager.loadPlugin(name, enrichedConfig)
       console.log(`loaded plugin: ${name} (${pluginConfig.state})`)
     } catch (err) {
       console.error(`failed to load plugin ${name}:`, err)
     }
   }
-
-  // create provider from config
-  if (config.llm.provider !== 'anthropic') {
-    throw new Error(`unsupported provider: ${config.llm.provider}`)
-  }
-  const provider = new AnthropicProvider({
-    apiKey: config.llm.apiKey,
-    model: config.llm.model,
-  })
-
-  // create session manager for handling main session and compaction
-  const sessionManager = createSessionManager(provider, config)
 
   // consume input from a single plugin
   const consumingPlugins = new Set<string>()

@@ -18,6 +18,7 @@ interface DiscordConfig {
   respondToMentions?: boolean  // only respond when mentioned
   allowDMs?: boolean  // respond to direct messages (default: true)
   transcribeVoice?: boolean  // transcribe voice messages (default: true)
+  sessionManager?: any  // session manager instance for slash commands
 }
 
 interface QueuedMessage {
@@ -76,7 +77,7 @@ export default function createDiscordPlugin(): Plugin {
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them
-  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string }>()
+  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string }>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
 
@@ -349,24 +350,23 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
             }
 
             const msg = await textChannel.send(toolMessage)
-            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name })
+            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage })
           } else if (message.type === 'tool_result') {
-            // edit the original tool use message to show result
+            // edit the original tool use message to append result (keeping params visible)
             const toolInfo = toolMessages.get(message.tool_use_id)
             if (toolInfo) {
               try {
                 const msg = await textChannel.messages.fetch(toolInfo.messageId)
                 const status = message.is_error ? '❌' : '✅'
+
+                // replace the 🔧 prefix with status, keep the rest of the original content
+                let newContent = toolInfo.originalContent.replace(/^🔧/, status)
+
+                // append result preview
                 const resultPreview = message.content.slice(0, 300)
                 const hasMore = message.content.length > 300
-
-                let newContent = `${status} **${toolInfo.toolName}**\n`
-
-                // show result preview
-                if (message.is_error) {
-                  newContent += '```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
-                } else if (resultPreview.trim()) {
-                  newContent += '```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
+                if (resultPreview.trim()) {
+                  newContent += '\n```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
                 }
 
                 await msg.edit(newContent.slice(0, 2000))
@@ -440,8 +440,60 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
           }
         }
 
-        // start typing immediately
         const typingChannel = msg.channel as TextChannel | DMChannel
+
+        // handle slash commands
+        if (msg.content.startsWith('/')) {
+          const args = msg.content.slice(1).trim().split(/\s+/)
+          const command = args[0]?.toLowerCase()
+
+          try {
+            if (command === 'compact') {
+              if (!config!.sessionManager) {
+                await msg.reply('session manager not available')
+                return
+              }
+              typingChannel.sendTyping().catch(() => {})
+              // get current main session (discord shares one session)
+              const sessionId = await config!.sessionManager.getSessionForMessage()
+              const newId = await config!.sessionManager.forceCompact(sessionId)
+              await msg.reply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
+              return
+            } else if (command === 'session') {
+              if (!config!.sessionManager) {
+                await msg.reply('session manager not available')
+                return
+              }
+              typingChannel.sendTyping().catch(() => {})
+              // get current main session (discord shares one session)
+              const sessionId = await config!.sessionManager.getSessionForMessage()
+              const info = await config!.sessionManager.getSessionInfo(sessionId)
+
+              const createdStr = info.createdAt ? info.createdAt.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
+              const lastActivityStr = info.lastActivity ? info.lastActivity.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
+              const ageMinutes = info.createdAt ? Math.floor((Date.now() - info.createdAt.getTime()) / 60000) : 0
+
+              let reply = '📊 **Session Info**\n'
+              reply += `**ID:** \`${info.id}\`\n`
+              reply += `**Messages:** ${info.messageCount}\n`
+              reply += `**Tokens:** ~${info.estimatedTokens}\n`
+              reply += `**Created:** ${createdStr}\n`
+              reply += `**Last Activity:** ${lastActivityStr}\n`
+              reply += `**Age:** ${ageMinutes} minutes`
+
+              await msg.reply(reply)
+              return
+            } else {
+              await msg.reply(`❌ unknown command: \`${command}\`\navailable commands: \`/compact\`, \`/session\``)
+              return
+            }
+          } catch (err) {
+            await msg.reply(`❌ command error: ${err}`)
+            return
+          }
+        }
+
+        // start typing immediately for non-command messages
         typingChannel.sendTyping().catch(() => {})
 
         let content = msg.content
