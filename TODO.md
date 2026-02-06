@@ -12,12 +12,12 @@
 - [x] wakeups and cron
 - [x] better claude code skill
 - [x] session management
-- [ ] manual compaction
+- [x] manual compaction
+- [x] basic web browsing tool
 - [ ] qwen3-tts voice
 - [ ] see images
 - [ ] use a local llm?
 - [ ] visual web browser tool
-- [ ] basic web browsing tool
 - [ ] scheduled wakeups
 - [ ] tui should display a full audit log, including a history of all tool calls
 - [ ] brave web search api

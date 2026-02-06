@@ -2,14 +2,6 @@ import { PluginManager } from '../server/plugin.ts'
 import { loadConfig } from '../server/config.ts'
 import { loadSession, getSoulPath, listSessions } from '../server/session.ts'
 
-// builtin plugin imports
-import createBashPlugin from '../plugins/bash.ts'
-import createMemoryPlugin from '../plugins/memory.ts'
-import createPluginsPlugin from '../plugins/plugins.ts'
-import createDiscordPlugin from '../plugins/discord.ts'
-import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux.ts'
-import createTimersPlugin from '../plugins/timers.ts'
-
 export default async function printLlmQuery() {
   const sessionId = process.argv[3]
 
@@ -29,20 +21,12 @@ export default async function printLlmQuery() {
   const soulFile = Bun.file(getSoulPath())
   const soul = await soulFile.exists() ? await soulFile.text() : '(no soul file)'
 
-  // set up plugins (mirrors server/index.ts)
+  // set up plugins (skipInit — debug only needs tools/descriptions)
   const pluginManager = new PluginManager()
 
-  pluginManager.registerBuiltin('bash', createBashPlugin)
-  pluginManager.registerBuiltin('memory', createMemoryPlugin)
-  pluginManager.registerBuiltin('discord', createDiscordPlugin)
-  pluginManager.registerBuiltin('claude-code-tmux', createClaudeCodeTmuxPlugin)
-  pluginManager.registerBuiltin('timers', createTimersPlugin)
-  pluginManager.registerBuiltin('plugins', () => createPluginsPlugin(pluginManager))
-
-  // load configured plugins
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
     try {
-      await pluginManager.loadPlugin(name, pluginConfig)
+      await pluginManager.loadPlugin(name, pluginConfig, { skipInit: true })
     } catch (err) {
       console.error(`warning: failed to load plugin ${name}:`, err)
     }

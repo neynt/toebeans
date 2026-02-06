@@ -1,5 +1,5 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult } from '../server/types.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult } from '../../server/types.ts'
 import { $ } from 'bun'
 
 const TMUX_SESSION = 'toebeans-claude-code'

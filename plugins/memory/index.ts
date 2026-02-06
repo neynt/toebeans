@@ -1,6 +1,6 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, ToolContext } from '../server/types.ts'
-import { getKnowledgeDir } from '../server/session.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult, ToolContext } from '../../server/types.ts'
+import { getKnowledgeDir } from '../../server/session.ts'
 import { join, resolve } from 'path'
 import { $ } from 'bun'
 
@@ -107,13 +107,12 @@ function createMemoryTools(): Tool[] {
 export default function createMemoryPlugin(): Plugin {
   return {
     name: 'memory',
-    summary: 'Long-term memory available. Use load_plugin("memory") for remember/recall tools.',
     description: `Long-term memory system:
 - remember(topic, content): Store markdown content under a topic
 - recall(query): Search memories by content
 - recall(topic=...): Read a specific memory file
 
-Memories are stored as markdown files in ~/.local/share/toebeans/knowledge/`,
+Memories are stored as markdown files in ~/.toebeans/knowledge/`,
     tools: createMemoryTools(),
   }
 }

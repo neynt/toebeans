@@ -2,52 +2,24 @@ import { z } from 'zod'
 import { getDataDir } from './session.ts'
 import { join } from 'path'
 
-const pluginConfigSchema = z.object({
-  state: z.enum(['dormant', 'visible', 'loaded']),
-  config: z.unknown().optional(),
-})
-
-const llmConfigSchema = z.object({
-  provider: z.string().optional().default('anthropic'),
-  model: z.string().optional(),
-  apiKey: z.string().optional(),
-}).optional().default({})
-
 const configSchema = z.object({
   server: z.object({
-    port: z.number().optional().default(3000),
-  }).optional().default({}),
+    port: z.number(),
+  }).passthrough(),
   session: z.object({
-    // compact session when it exceeds this many tokens (default: 190k, leaving 10k buffer for 200k context)
-    compactAtTokens: z.number().optional().default(190000),
-    // auto-compact and finish session after this many seconds of inactivity (default: 1 hour)
-    lifespanSeconds: z.number().optional().default(3600),
-  }).optional().default({}),
-  plugins: z.record(z.string(), pluginConfigSchema).optional().default({}),
-  llm: llmConfigSchema,
-})
+    compactAtTokens: z.number(),
+    lifespanSeconds: z.number(),
+  }).passthrough(),
+  plugins: z.record(z.string(), z.unknown()),
+  llm: z.object({
+    provider: z.string(),
+    model: z.string(),
+    apiKey: z.string().optional(),
+    thinkingBudget: z.number().optional(),
+  }).passthrough(),
+}).passthrough()
 
 export type Config = z.infer<typeof configSchema>
-
-const DEFAULT_CONFIG: Config = {
-  server: {
-    port: 3000,
-  },
-  session: {
-    compactAtTokens: 190000,
-    lifespanSeconds: 3600,
-  },
-  plugins: {
-    bash: { state: 'loaded', config: {} },
-    memory: { state: 'visible', config: {} },
-    plugins: { state: 'loaded', config: {} },
-    'claude-code-direct': { state: 'loaded', config: {} },
-  },
-  llm: {
-    provider: 'anthropic',
-    model: 'claude-sonnet-4-5-20250929',
-  },
-}
 
 // cache the raw config to preserve key order on save
 let rawConfigCache: Record<string, unknown> | null = null
@@ -56,38 +28,20 @@ export async function loadConfig(): Promise<Config> {
   const configPath = join(getDataDir(), 'config.json')
   const file = Bun.file(configPath)
 
-  if (await file.exists()) {
-    try {
-      const raw = await file.json() as Record<string, unknown>
-      rawConfigCache = raw
-      const config = configSchema.parse(raw)
-
-      // merge in any new default plugins that aren't in the user's config
-      let updated = false
-      for (const [name, pluginConfig] of Object.entries(DEFAULT_CONFIG.plugins)) {
-        if (!(name in config.plugins)) {
-          config.plugins[name] = pluginConfig
-          // also add to raw cache to preserve order
-          if (rawConfigCache.plugins && typeof rawConfigCache.plugins === 'object') {
-            (rawConfigCache.plugins as Record<string, unknown>)[name] = pluginConfig
-          }
-          updated = true
-        }
-      }
-      if (updated) {
-        await Bun.write(configPath, JSON.stringify(rawConfigCache, null, 2))
-      }
-
-      return config
-    } catch (err) {
-      console.error('Failed to parse config, using defaults:', err)
-    }
+  if (!(await file.exists())) {
+    console.error(`config file not found: ${configPath}`)
+    console.error('create one to get started.')
+    process.exit(1)
   }
 
-  // write default config
-  rawConfigCache = structuredClone(DEFAULT_CONFIG) as Record<string, unknown>
-  await Bun.write(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2))
-  return DEFAULT_CONFIG
+  try {
+    const raw = await file.json() as Record<string, unknown>
+    rawConfigCache = raw
+    return configSchema.parse(raw)
+  } catch (err) {
+    console.error('Failed to parse config:', err)
+    process.exit(1)
+  }
 }
 
 export async function saveConfig(config: Config): Promise<void> {

@@ -3,8 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import type { Message, SessionInfo } from './types.ts'
 
-const DATA_DIR = process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share')
-const TOEBEANS_DIR = join(DATA_DIR, 'toebeans')
+const TOEBEANS_DIR = join(homedir(), '.toebeans')
 const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
 const STATE_PATH = join(TOEBEANS_DIR, 'state.json')
 

@@ -1,11 +1,10 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, ToolContext, Message } from '../server/types.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult, ToolContext, Message } from '../../server/types.ts'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 
-const DATA_DIR = process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share')
-const LOG_DIR = join(DATA_DIR, 'toebeans', 'claude-code')
+const LOG_DIR = join(homedir(), '.toebeans', 'claude-code')
 
 interface ProcessInfo {
   proc: ReturnType<typeof Bun.spawn>

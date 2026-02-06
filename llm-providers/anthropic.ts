@@ -9,10 +9,12 @@ export class AnthropicProvider implements LlmProvider {
   name = 'anthropic'
   private client: Anthropic
   private model: string
+  private thinkingBudget?: number
 
-  constructor(options: { apiKey?: string; model: string }) {
+  constructor(options: { apiKey?: string; model: string; thinkingBudget?: number }) {
     this.client = new Anthropic({ apiKey: options.apiKey })
     this.model = options.model
+    this.thinkingBudget = options.thinkingBudget
   }
 
   async *stream(params: {
@@ -75,12 +77,18 @@ export class AnthropicProvider implements LlmProvider {
       { type: 'text', text: params.system, cache_control: { type: 'ephemeral' } },
     ]
 
+    const thinkingEnabled = this.thinkingBudget && this.thinkingBudget >= 1024
+    const maxTokens = thinkingEnabled ? this.thinkingBudget! + 8192 : 8192
+
     const stream = this.client.messages.stream({
       model: this.model,
-      max_tokens: 8192,
+      max_tokens: maxTokens,
       system: systemBlocks,
       messages,
       tools: tools.length > 0 ? tools : undefined,
+      ...(thinkingEnabled
+        ? { thinking: { type: 'enabled' as const, budget_tokens: this.thinkingBudget! } }
+        : {}),
     })
 
     let currentToolUse: { id: string; name: string; inputJson: string } | null = null
@@ -95,6 +103,7 @@ export class AnthropicProvider implements LlmProvider {
               inputJson: '',
             }
           }
+          // skip 'thinking' content blocks — internal reasoning, not shown
           break
 
         case 'content_block_delta':
@@ -103,6 +112,7 @@ export class AnthropicProvider implements LlmProvider {
           } else if (event.delta.type === 'input_json_delta' && currentToolUse) {
             currentToolUse.inputJson += event.delta.partial_json
           }
+          // skip 'thinking_delta' — internal reasoning
           break
 
         case 'content_block_stop':

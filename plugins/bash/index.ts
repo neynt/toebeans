@@ -1,5 +1,5 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { ToolResult, ToolContext } from '../server/types.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { $ } from 'bun'
 import { resolve } from 'path'
 

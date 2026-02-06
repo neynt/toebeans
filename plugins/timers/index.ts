@@ -1,6 +1,6 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, Message } from '../server/types.ts'
-import { getDataDir, generateSessionId } from '../server/session.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult, Message } from '../../server/types.ts'
+import { getDataDir, generateSessionId } from '../../server/session.ts'
 import { join } from 'path'
 import { mkdir } from 'node:fs/promises'
 
@@ -178,7 +178,6 @@ export default function createTimersPlugin(): Plugin {
   async function scheduleTimer(filename: string) {
     const schedule = parseSchedule(filename)
     if (!schedule) {
-      console.log(`timers: invalid schedule format: ${filename}`)
       return
     }
 
@@ -190,7 +189,6 @@ export default function createTimersPlugin(): Plugin {
 
     const msUntil = schedule.next.getTime() - Date.now()
     if (msUntil < 0 && !schedule.repeat) {
-      console.log(`timers: ${filename} is in the past, skipping`)
       return
     }
 
@@ -364,7 +362,6 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
 
   return {
     name: 'timers',
-    summary: 'Schedule wake-up timers. Use load_plugin("timers") to manage.',
     description: `Timer system for scheduling future tasks.
 
 Current timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}

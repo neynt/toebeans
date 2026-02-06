@@ -1,21 +1,13 @@
 import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
-import { PluginManager, type LoadedPlugin } from './plugin.ts'
+import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
 import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir } from './session.ts'
 import { join } from 'path'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
-import { AnthropicProvider } from '../providers/anthropic.ts'
-import createBashPlugin from '../plugins/bash.ts'
-import createMemoryPlugin from '../plugins/memory.ts'
-import createPluginsPlugin from '../plugins/plugins.ts'
-import createDiscordPlugin from '../plugins/discord.ts'
-import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux.ts'
-import createTimersPlugin from '../plugins/timers.ts'
-import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct.ts'
+import { AnthropicProvider } from '../llm-providers/anthropic.ts'
 
-import createWebBrowsePlugin from '../plugins/web-browse.ts'
 interface WebSocketData {
   subscriptions: Set<string>
 }
@@ -49,6 +41,7 @@ async function main() {
   const provider = new AnthropicProvider({
     apiKey: config.llm.apiKey,
     model: config.llm.model,
+    thinkingBudget: config.llm.thinkingBudget,
   })
 
   // create session manager for handling main session and compaction
@@ -56,32 +49,19 @@ async function main() {
 
   const pluginManager = new PluginManager()
 
-  // register builtin plugins
-  pluginManager.registerBuiltin('bash', createBashPlugin)
-  pluginManager.registerBuiltin('memory', createMemoryPlugin)
-  pluginManager.registerBuiltin('discord', createDiscordPlugin)
-  pluginManager.registerBuiltin('claude-code-tmux', createClaudeCodeTmuxPlugin)
-  pluginManager.registerBuiltin('timers', createTimersPlugin)
-  pluginManager.registerBuiltin('claude-code-direct', createClaudeCodeDirectPlugin)
-  pluginManager.registerBuiltin('plugins', () => createPluginsPlugin(pluginManager))
-  pluginManager.registerBuiltin('web-browse', createWebBrowsePlugin)
-
-  // load plugins from config (inject session manager for discord)
+  // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
     try {
       // inject session manager into discord plugin config
-      const enrichedConfig = name === 'discord'
-        ? { ...pluginConfig, config: { ...(pluginConfig.config || {}), sessionManager } }
+      const effectiveConfig = name === 'discord'
+        ? { ...(pluginConfig as object), sessionManager }
         : pluginConfig
-      await pluginManager.loadPlugin(name, enrichedConfig)
-      console.log(`loaded plugin: ${name} (${pluginConfig.state})`)
+      await pluginManager.loadPlugin(name, effectiveConfig)
+      console.log(`loaded plugin: ${name}`)
     } catch (err) {
       console.error(`failed to load plugin ${name}:`, err)
     }
   }
-
-  // consume input from a single plugin
-  const consumingPlugins = new Set<string>()
 
   // route output to a plugin by target string (format: 'pluginName:target')
   async function routeOutput(target: string, message: ServerMessage) {
@@ -108,17 +88,15 @@ async function main() {
     await targetPlugin.plugin.output(pluginTarget, message)
   }
 
-  function startConsumingPluginInput(name: string, loaded: LoadedPlugin) {
-    if (!loaded.plugin.input || loaded.state !== 'loaded') return
-    if (consumingPlugins.has(name)) return // already consuming
-    consumingPlugins.add(name)
+  // start consuming inputs from all loaded plugins
+  for (const [name, loaded] of pluginManager.getAllPlugins()) {
+    if (!loaded.plugin.input) continue
 
     ;(async () => {
       try {
         for await (const { sessionId: pluginSessionId, message, outputTarget } of loaded.plugin.input!) {
-          // use main session for conversation, unless explicitly specified in outputTarget's session
           const mainSessionId = await sessionManager.getSessionForMessage()
-          const conversationSessionId = outputTarget?.includes(':') ? mainSessionId : mainSessionId
+          const conversationSessionId = mainSessionId
 
           console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || pluginSessionId})`)
           const text = message.content
@@ -128,7 +106,6 @@ async function main() {
           if (!text.trim()) continue
 
           // determine output function and target
-          // use explicit outputTarget, or fall back to plugin's sessionId for routing
           const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
           let outputFn: ((message: ServerMessage) => Promise<void>) | null = null
           if (effectiveOutputTarget) {
@@ -169,18 +146,6 @@ async function main() {
       }
     })()
   }
-
-  // start consuming inputs for all currently loaded plugins
-  function consumePluginInputs() {
-    for (const [name, loaded] of pluginManager.getAllPlugins()) {
-      startConsumingPluginInput(name, loaded)
-    }
-  }
-
-  // also start consuming when a plugin is dynamically loaded
-  pluginManager.onPluginLoaded((name, loaded) => {
-    startConsumingPluginInput(name, loaded)
-  })
 
   async function buildSystemPrompt(): Promise<string> {
     const parts: string[] = []
@@ -382,9 +347,6 @@ async function main() {
   })
 
   console.log(`server running on http://localhost:${server.port}`)
-
-  // start plugin input consumers
-  consumePluginInputs()
 }
 
 main().catch(console.error)

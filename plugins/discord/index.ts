@@ -1,5 +1,5 @@
-import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, Message, ServerMessage } from '../server/types.ts'
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult, Message, ServerMessage } from '../../server/types.ts'
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
@@ -234,7 +234,6 @@ export default function createDiscordPlugin(): Plugin {
 
   return {
     name: 'discord',
-    summary: 'Discord integration. Use load_plugin("discord") to send/read messages.',
     description: `Discord bot integration. Your text responses are automatically sent back to the channel/DM.
 
 Automatically transcribes voice messages using WhisperX.

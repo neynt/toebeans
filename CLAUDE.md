@@ -18,7 +18,7 @@ TOEBEANS_SERVER=ws://localhost:3001/ws bun run client
 
 ## Data location
 
-All user data is stored in `~/.local/share/toebeans/`:
+All user data is stored in `~/.toebeans/`:
 - `config.json` - plugin config, session settings
 - `sessions/` - session message history (JSONL)
 - `knowledge/` - markdown memory files
@@ -28,7 +28,7 @@ All user data is stored in `~/.local/share/toebeans/`:
 
 - `server/` - WebSocket server, agent loop, plugin system
 - `client/` - CLI client
-- `providers/` - LLM provider implementations (anthropic)
+- `llm-providers/` - LLM provider implementations (anthropic)
 - `plugins/` - built-in plugins (tools, memory, core, write-plugin)
 
 ## Bun

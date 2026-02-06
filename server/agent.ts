@@ -155,10 +155,12 @@ export async function runAgentTurn(
       }
     }
 
-    // save assistant message
-    const assistantMessage: Message = { role: 'assistant', content: assistantContent }
-    messages.push(assistantMessage)
-    await appendMessage(sessionId, assistantMessage)
+    // save assistant message (skip if empty — model had nothing to say)
+    if (assistantContent.length > 0) {
+      const assistantMessage: Message = { role: 'assistant', content: assistantContent }
+      messages.push(assistantMessage)
+      await appendMessage(sessionId, assistantMessage)
+    }
 
     if (!hasToolUse) {
       // signal end of text block before finishing (flush any buffered text)

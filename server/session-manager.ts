@@ -16,23 +16,17 @@ import {
 } from './session.ts'
 import { join } from 'path'
 
-const SUMMARY_PROMPT = `Summarize this conversation concisely. Include:
-1. Key topics discussed
-2. Important decisions or conclusions
-3. Any tasks that were completed or are pending
-4. Relevant context for continuing the conversation
+const COMPACTION_PROMPT = `Summarize this conversation for your future self. You are being compacted — this summary will be the only context you have when the conversation continues.
 
-Be brief but preserve important details. Write in past tense.`
+Write two sections:
 
-const KNOWLEDGE_PROMPT = `Based on this conversation, extract any new facts learned about the user that would be useful to remember for future conversations. This includes:
-- Personal preferences
-- Technical environment details
-- Projects they're working on
-- Communication style preferences
-- Important dates or deadlines mentioned
+## Summary
+Concise summary of what happened. Include key topics, decisions, completed tasks, and any pending tasks. Preserve important details like IDs, names, and technical specifics you'll need.
 
-If nothing new was learned, respond with "NONE".
-Format as bullet points if there are items to note.`
+## User Knowledge
+New facts learned about the user (preferences, environment, projects, communication style). If nothing new was learned, write "nothing new".
+
+Be brief but don't lose anything you'd regret forgetting.`
 
 export interface SessionManager {
   getSessionForMessage(): Promise<string>
@@ -53,65 +47,59 @@ export function createSessionManager(
 ): SessionManager {
   const { compactAtTokens, lifespanSeconds } = config.session
 
-  async function summarizeSession(messages: Message[]): Promise<string> {
-    const conversationText = messages
-      .map(m => {
-        const role = m.role
-        const text = m.content
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map(b => b.text)
-          .join('\n')
-        return `${role}: ${text}`
-      })
-      .join('\n\n')
-
-    let summary = ''
-    for await (const chunk of provider.stream({
-      messages: [{
-        role: 'user',
-        content: [{ type: 'text', text: `${SUMMARY_PROMPT}\n\n---\n\n${conversationText}` }],
-      }],
-      system: 'You are a helpful assistant that summarizes conversations.',
-      tools: [],
-    })) {
-      if (chunk.type === 'text') {
-        summary += chunk.text
-      }
-    }
-    return summary.trim()
+  // trim tool_result content to keep compaction cache-friendly
+  // the actual messages stay intact so the cache prefix hits
+  function trimForCompaction(messages: Message[]): Message[] {
+    return messages.map(msg => ({
+      role: msg.role,
+      content: msg.content.map(block => {
+        if (block.type === 'tool_result') {
+          const trimmed = block.content.length > 200
+            ? block.content.slice(0, 200) + '... (truncated)'
+            : block.content
+          return { ...block, content: trimmed }
+        }
+        return block
+      }),
+    }))
   }
 
-  async function extractKnowledge(messages: Message[]): Promise<string | null> {
-    const conversationText = messages
-      .map(m => {
-        const role = m.role
-        const text = m.content
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map(b => b.text)
-          .join('\n')
-        return `${role}: ${text}`
-      })
-      .join('\n\n')
+  async function compactAndExtract(messages: Message[]): Promise<{ summary: string; knowledge: string | null }> {
+    // send the actual session messages (cache-friendly!) with tool results trimmed,
+    // then append a user message asking for the summary
+    const trimmed = trimForCompaction(messages)
 
-    let knowledge = ''
-    for await (const chunk of provider.stream({
-      messages: [{
+    // if last message is a user message, merge the prompt into it to avoid consecutive user messages
+    const lastMsg = trimmed[trimmed.length - 1]
+    if (lastMsg?.role === 'user') {
+      lastMsg.content.push({ type: 'text', text: COMPACTION_PROMPT })
+    } else {
+      trimmed.push({
         role: 'user',
-        content: [{ type: 'text', text: `${KNOWLEDGE_PROMPT}\n\n---\n\n${conversationText}` }],
-      }],
-      system: 'You are a helpful assistant that extracts user information from conversations.',
+        content: [{ type: 'text', text: COMPACTION_PROMPT }],
+      })
+    }
+
+    let result = ''
+    for await (const chunk of provider.stream({
+      messages: trimmed,
+      system: 'You are being compacted. Respond with the requested summary.',
       tools: [],
     })) {
       if (chunk.type === 'text') {
-        knowledge += chunk.text
+        result += chunk.text
       }
     }
 
-    const trimmed = knowledge.trim()
-    if (trimmed === 'NONE' || trimmed.length === 0) {
-      return null
-    }
-    return trimmed
+    // parse out sections
+    const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Knowledge|$)/)
+    const knowledgeMatch = result.match(/## User Knowledge\s*\n([\s\S]*)/)
+
+    const summary = summaryMatch?.[1]?.trim() || result.trim()
+    const knowledgeRaw = knowledgeMatch?.[1]?.trim()
+    const knowledge = knowledgeRaw && !/^nothing new/i.test(knowledgeRaw) ? knowledgeRaw : null
+
+    return { summary, knowledge }
   }
 
   async function appendToKnowledge(content: string): Promise<void> {
@@ -140,12 +128,9 @@ export function createSessionManager(
       return newId
     }
 
-    // generate summary
-    const summary = await summarizeSession(messages)
+    // generate summary + extract knowledge in one call (cache-friendly)
+    const { summary, knowledge } = await compactAndExtract(messages)
     console.log(`session-manager: generated summary (${summary.length} chars)`)
-
-    // extract knowledge
-    const knowledge = await extractKnowledge(messages)
     if (knowledge) {
       console.log(`session-manager: extracted knowledge`)
       await appendToKnowledge(knowledge)
@@ -163,14 +148,7 @@ export function createSessionManager(
         text: `[Previous conversation summary]\n\n${summary}\n\n[End of summary - new conversation starts here]`,
       }],
     }
-    const ackMessage: Message = {
-      role: 'assistant',
-      content: [{
-        type: 'text',
-        text: 'Got it, I have the context from our previous conversation. How can I help?',
-      }],
-    }
-    await writeSession(newId, [summaryMessage, ackMessage])
+    await writeSession(newId, [summaryMessage])
     await setCurrentSessionId(newId)
 
     console.log(`session-manager: created new session ${newId}`)
