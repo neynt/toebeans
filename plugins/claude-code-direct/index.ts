@@ -300,33 +300,92 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
 
     {
       name: 'read_claude_code_output',
-      description: 'Read output from a Claude Code session log (raw stream-json output).',
+      description: 'Read output from a Claude Code session log. Returns a clean, readable summary by default, or raw stream-json with raw=true.',
       inputSchema: {
         type: 'object',
         properties: {
           sessionId: { type: 'string', description: 'The session ID to read' },
-          tail: { type: 'number', description: 'Only return last N lines (optional, returns all if not specified)' },
+          tail: { type: 'number', description: 'How many lines to read from end of log (default: 5)' },
+          raw: { type: 'boolean', description: 'Return raw stream-json instead of summary (default: false)' },
         },
         required: ['sessionId'],
       },
       async execute(input: unknown): Promise<ToolResult> {
-        const { sessionId, tail = 5 } = input as { sessionId: string; tail?: number }
+        const { sessionId, tail = 5, raw = false } = input as { sessionId: string; tail?: number; raw?: boolean }
 
         const logPath = getLogPath(sessionId)
         const file = Bun.file(logPath)
 
         if (!(await file.exists())) {
-          return { content: `Session log not found: ${sessionId}`, is_error: true }
+          return { content: `session log not found: ${sessionId}`, is_error: true }
         }
 
         try {
           const content = await file.text()
-          const lines = content.split('\n')
-          const tailLines = lines.slice(-tail)
-          return { content: tailLines.join('\n') }
+          const lines = content.split('\n').filter(l => l.trim())
+          const tailLines = tail ? lines.slice(-tail) : lines
+
+          if (raw) {
+            return { content: tailLines.join('\n') }
+          }
+
+          // parse and summarize
+          const summaries: string[] = []
+
+          for (const line of tailLines) {
+            if (!line.trim()) continue
+
+            try {
+              const parsed = JSON.parse(line)
+
+              if (parsed.type === 'assistant') {
+                // extract text and tool uses from assistant messages
+                const parts: string[] = []
+                if (parsed.message?.content) {
+                  for (const block of parsed.message.content) {
+                    if (block.type === 'text' && block.text) {
+                      parts.push(block.text)
+                    } else if (block.type === 'tool_use') {
+                      parts.push(`[tool: ${block.name}]`)
+                    }
+                  }
+                }
+                if (parts.length > 0) {
+                  summaries.push(`assistant: ${parts.join(' ')}`)
+                }
+              } else if (parsed.type === 'user') {
+                // user messages are typically tool results - just summarize
+                const hasResults = parsed.message?.content?.some((b: { type: string }) => b.type === 'tool_result')
+                summaries.push(hasResults ? 'user: [tool results]' : 'user: [message]')
+              } else if (parsed.type === 'result') {
+                // final result
+                const parts: string[] = ['result:']
+                if (parsed.result) parts.push(parsed.result)
+                if (parsed.is_error) parts.push('(error)')
+                if (parsed.duration_ms != null) parts.push(`${parsed.duration_ms}ms`)
+                if (parsed.cost != null) parts.push(`$${parsed.cost.toFixed(4)}`)
+                summaries.push(parts.join(' '))
+              } else if (parsed.type === 'status') {
+                // status updates
+                if (parsed.status) {
+                  summaries.push(`status: ${parsed.status}`)
+                }
+              }
+              // skip other types (system, etc)
+            } catch {
+              // malformed json - skip silently
+              continue
+            }
+          }
+
+          if (summaries.length === 0) {
+            return { content: 'no parseable output found in log' }
+          }
+
+          return { content: summaries.join('\n\n') }
         } catch (err: unknown) {
           const error = err as { message?: string }
-          return { content: `Failed to read session: ${error.message}`, is_error: true }
+          return { content: `failed to read session: ${error.message}`, is_error: true }
         }
       },
     },
