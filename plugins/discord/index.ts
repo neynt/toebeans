@@ -321,7 +321,7 @@ export default function createDiscordPlugin(): Plugin {
             if (message.name === 'bash') {
               const cmd = (message.input as any)?.command
               if (cmd) {
-                toolMessage += '```bash\n' + cmd.slice(0, 1900) + '\n```'
+                toolMessage += '```bash\n' + cmd.slice(0, 200) + (cmd.length > 200 ? '...' : '') + '\n```'
               }
             } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
               const path = (message.input as any)?.path || (message.input as any)?.file_path
@@ -330,11 +330,11 @@ export default function createDiscordPlugin(): Plugin {
               }
             } else {
               // generic input display (truncated)
-              const shortInput = inputStr.slice(0, 500)
+              const shortInput = inputStr.slice(0, 200)
               if (shortInput.includes('\n')) {
-                toolMessage += '```\n' + shortInput + (inputStr.length > 500 ? '\n...' : '') + '\n```'
+                toolMessage += '```\n' + shortInput + (inputStr.length > 200 ? '\n...' : '') + '\n```'
               } else {
-                toolMessage += `\`${shortInput}${inputStr.length > 500 ? '...' : ''}\``
+                toolMessage += `\`${shortInput}${inputStr.length > 200 ? '...' : ''}\``
               }
             }
 
@@ -352,8 +352,8 @@ export default function createDiscordPlugin(): Plugin {
                 let newContent = toolInfo.originalContent.replace(/^🔧/, status)
 
                 // append result preview
-                const resultPreview = message.content.slice(0, 300)
-                const hasMore = message.content.length > 300
+                const resultPreview = message.content.slice(0, 200)
+                const hasMore = message.content.length > 200
                 if (resultPreview.trim()) {
                   newContent += '\n```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
                 }
