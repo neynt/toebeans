@@ -378,7 +378,7 @@ export default function createDiscordPlugin(): Plugin {
             // append byte count
             toolMessage += ` (${formatBytes(inputBytes)} call)`
 
-            const msg = await textChannel.send(toolMessage)
+            const msg = await textChannel.send(`\`${toolMessage}\``)
             toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputBytes })
           } else if (message.type === 'tool_result') {
             // swap emoji and add result byte count
@@ -399,7 +399,7 @@ export default function createDiscordPlugin(): Plugin {
                   .replace(/^🔧/, status)
                   .replace(/ \(.*? call\)$/, ` (${formatBytes(toolInfo.inputBytes)} call → ${formatBytes(resultBytes)} result)`)
 
-                await msg.edit(newContent)
+                await msg.edit(`\`${newContent}\``)
                 toolMessages.delete(message.tool_use_id)
               } catch (err) {
                 console.error('failed to edit tool message:', err)
