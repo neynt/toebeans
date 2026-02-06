@@ -93,8 +93,10 @@ async function main() {
   for (const [name, loaded] of pluginManager.getAllPlugins()) {
     if (!loaded.plugin.input) continue
 
+    console.log(`[server] starting input consumer for plugin: ${name}`)
     ;(async () => {
       try {
+        console.log(`[server] entering input loop for plugin: ${name}`)
         for await (const { sessionId: pluginSessionId, message, outputTarget } of loaded.plugin.input!) {
           const mainSessionId = await sessionManager.getSessionForMessage()
           const conversationSessionId = mainSessionId

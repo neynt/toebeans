@@ -62,34 +62,53 @@ async function writeMeta(meta: MetaFile): Promise<void> {
 interface QueuedMessage {
   sessionId: string
   message: Message
+  outputTarget?: string
+}
+
+interface ClaudeCodeDirectConfig {
+  notifyTarget?: string
 }
 
 export default function createClaudeCodeDirectPlugin(): Plugin {
+  let config: ClaudeCodeDirectConfig | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
   function queueNotification(text: string) {
+    console.log('[claude-code-direct] queueNotification called:', text.slice(0, 100))
     messageQueue.push({
       sessionId: 'claude-code-direct',
       message: {
         role: 'user',
         content: [{ type: 'text', text }],
       },
+      outputTarget: config?.notifyTarget,
     })
+    console.log('[claude-code-direct] messageQueue.length:', messageQueue.length)
     if (resolveWaiter) {
+      console.log('[claude-code-direct] resolving waiter')
       resolveWaiter()
       resolveWaiter = null
+    } else {
+      console.log('[claude-code-direct] no waiter to resolve')
     }
   }
 
   async function* inputGenerator(): AsyncGenerator<QueuedMessage> {
+    console.log('[claude-code-direct] inputGenerator started')
     while (true) {
       while (messageQueue.length > 0) {
-        yield messageQueue.shift()!
+        const msg = messageQueue.shift()!
+        const firstContent = msg.message.content[0]
+        const preview = firstContent && 'text' in firstContent ? firstContent.text.slice(0, 100) : '(no text)'
+        console.log('[claude-code-direct] yielding message:', preview)
+        yield msg
       }
+      console.log('[claude-code-direct] waiting for next message')
       await new Promise<void>(resolve => {
         resolveWaiter = resolve
       })
+      console.log('[claude-code-direct] waiter resolved, checking queue')
     }
   }
 
@@ -141,19 +160,39 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
           runningProcesses.set(sessionId, { proc, pid: proc.pid, task })
 
           // notify when done (best-effort — only works if toebeans is still alive)
+          console.log(`[claude-code-direct] registering exit handler for session ${sessionId}`)
           proc.exited.then(async (code) => {
-            runningProcesses.delete(sessionId)
+            console.log(`[claude-code-direct] proc.exited fired for ${sessionId}, exit code: ${code}`)
 
-            // update meta with exit info
-            meta.exitCode = code ?? 1
-            meta.endedAt = new Date().toISOString()
-            await writeMeta(meta)
+            try {
+              runningProcesses.delete(sessionId)
 
-            const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
-            const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
-            queueNotification(
-              `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
-            )
+              // update meta with exit info
+              meta.exitCode = code ?? 1
+              meta.endedAt = new Date().toISOString()
+              await writeMeta(meta)
+              console.log(`[claude-code-direct] wrote meta for ${sessionId}`)
+
+              const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
+              const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
+              queueNotification(
+                `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+              )
+            } catch (err) {
+              console.error(`[claude-code-direct] error in exit handler for ${sessionId}:`, err)
+              // still try to queue notification even if meta write failed
+              try {
+                const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
+                const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
+                queueNotification(
+                  `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+                )
+              } catch (notifyErr) {
+                console.error(`[claude-code-direct] failed to queue notification for ${sessionId}:`, notifyErr)
+              }
+            }
+          }).catch((err) => {
+            console.error(`[claude-code-direct] proc.exited promise rejected for ${sessionId}:`, err)
           })
 
           return {
@@ -271,7 +310,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
         required: ['sessionId'],
       },
       async execute(input: unknown): Promise<ToolResult> {
-        const { sessionId, tail } = input as { sessionId: string; tail?: number }
+        const { sessionId, tail = 5 } = input as { sessionId: string; tail?: number }
 
         const logPath = getLogPath(sessionId)
         const file = Bun.file(logPath)
@@ -282,14 +321,9 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
 
         try {
           const content = await file.text()
-
-          if (tail) {
-            const lines = content.split('\n')
-            const tailLines = lines.slice(-tail)
-            return { content: tailLines.join('\n') }
-          }
-
-          return { content }
+          const lines = content.split('\n')
+          const tailLines = lines.slice(-tail)
+          return { content: tailLines.join('\n') }
         } catch (err: unknown) {
           const error = err as { message?: string }
           return { content: `Failed to read session: ${error.message}`, is_error: true }
@@ -305,7 +339,9 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
     tools,
     input: inputGenerator(),
 
-    async init() {
+    async init(cfg: unknown) {
+      config = cfg as ClaudeCodeDirectConfig
+      console.log('[claude-code-direct] initialized with config:', config)
       await ensureLogDir()
     },
   }

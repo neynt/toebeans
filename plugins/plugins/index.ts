@@ -87,6 +87,19 @@ export default function createPluginsPlugin(): Plugin {
           return { content: `Disabled plugin "${name}". Server is restarting...` }
         },
       },
+      {
+        name: 'restart_server',
+        description: 'Restart the toebeans server. The process exits and the supervision loop restarts it.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        async execute(): Promise<ToolResult> {
+          console.log('restart_server: exiting...')
+          setTimeout(() => process.exit(0), 100)
+          return { content: 'Server is restarting...' }
+        },
+      },
     ],
   }
 }

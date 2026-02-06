@@ -43,11 +43,22 @@ function getSessionPath(sessionId: string): string {
 }
 
 export async function generateSessionId(): Promise<string> {
-  const now = new Date()
-  const date = now.toISOString().slice(0, 10) // YYYY-MM-DD
-  // use random 4-digit suffix to avoid conflicts without scanning files
-  const seq = String(Math.floor(Math.random() * 10000)).padStart(4, '0')
-  return `${date}-${seq}`
+  // find highest existing session number by scanning sessions directory
+  const glob = new Bun.Glob('*.jsonl')
+  let maxNum = -1
+
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const sessionId = path.replace('.jsonl', '')
+    // check if it's a 4-digit number format
+    const num = parseInt(sessionId, 10)
+    if (!isNaN(num) && sessionId === num.toString().padStart(4, '0')) {
+      maxNum = Math.max(maxNum, num)
+    }
+  }
+
+  // next session is maxNum + 1, zero-padded to 4 digits
+  const nextNum = maxNum + 1
+  return nextNum.toString().padStart(4, '0')
 }
 
 export async function loadSession(sessionId: string): Promise<Message[]> {
@@ -86,14 +97,14 @@ export async function listSessions(): Promise<SessionInfo[]> {
     const fullPath = join(SESSIONS_DIR, path)
     const stat = await Bun.file(fullPath).stat()
 
-    // parse date from session ID (YYYY-MM-DD-XXXX)
-    const datePart = sessionId.slice(0, 10)
-    const createdAt = new Date(datePart)
+    // use file creation time for both timestamps
+    const createdAt = stat ? new Date(stat.birthtime) : new Date()
+    const lastActiveAt = stat ? new Date(stat.mtime) : createdAt
 
     sessions.push({
       id: sessionId,
       createdAt,
-      lastActiveAt: stat ? new Date(stat.mtime) : createdAt,
+      lastActiveAt,
     })
   }
 
@@ -165,13 +176,7 @@ export async function getSessionCreatedAt(sessionId: string): Promise<Date | nul
   const file = Bun.file(path)
   if (!(await file.exists())) return null
 
-  // parse date from session ID if it matches pattern
-  const match = sessionId.match(/^(\d{4}-\d{2}-\d{2})/)
-  if (match) {
-    return new Date(match[1]!)
-  }
-
-  // fallback to file birthtime
+  // use file birthtime
   const stat = await file.stat()
   return stat ? new Date(stat.birthtime) : null
 }
