@@ -116,6 +116,21 @@ export function createSessionManager(
     }
   }
 
+  async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10)
+    const dailyLogPath = join(getKnowledgeDir(), `${today}.md`)
+    const file = Bun.file(dailyLogPath)
+    const timestamp = new Date().toISOString().slice(11, 19)
+    const entry = `\n### ${timestamp} (session ${sessionId})\n\n${content}\n`
+
+    if (await file.exists()) {
+      const existing = await file.text()
+      await Bun.write(dailyLogPath, existing + entry)
+    } else {
+      await Bun.write(dailyLogPath, `# Daily Log - ${today}\n${entry}`)
+    }
+  }
+
   async function compactSession(sessionId: string): Promise<string> {
     const beforeTokens = await estimateSessionTokens(sessionId)
     console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens)`)
@@ -131,6 +146,11 @@ export function createSessionManager(
 
     // generate summary + extract knowledge in one call (cache-friendly)
     const { summary, knowledge } = await compactAndExtract(messages)
+
+    // write summary to daily log
+    await appendToDailyLog(summary, sessionId)
+
+    // write user knowledge to USER.md (only salient/permanent info)
     if (knowledge) {
       console.log(`session-manager: extracted knowledge`)
       await appendToKnowledge(knowledge)

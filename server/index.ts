@@ -166,6 +166,28 @@ async function main() {
       }
     }
 
+    // recent daily logs (today and yesterday)
+    const recentLogs: string[] = []
+    const today = new Date()
+    const yesterday = new Date(today)
+    yesterday.setDate(yesterday.getDate() - 1)
+
+    for (const date of [today, yesterday]) {
+      const dateStr = date.toISOString().slice(0, 10)
+      const dailyLogPath = join(getKnowledgeDir(), `${dateStr}.md`)
+      const dailyLogFile = Bun.file(dailyLogPath)
+      if (await dailyLogFile.exists()) {
+        const content = await dailyLogFile.text()
+        if (content.trim()) {
+          recentLogs.push(content)
+        }
+      }
+    }
+
+    if (recentLogs.length > 0) {
+      parts.push('## Recent Activity\n\n' + recentLogs.join('\n\n'))
+    }
+
     // then context
     parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
