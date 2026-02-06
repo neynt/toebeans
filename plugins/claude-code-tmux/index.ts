@@ -176,12 +176,7 @@ function createTools(): Tool[] {
 export default function createClaudeCodeTmuxPlugin(): Plugin {
   return {
     name: 'claude-code-tmux',
-    description: `Control Claude Code instances via tmux (session: ${TMUX_SESSION}):
-- cc_list: List all windows
-- cc_read: Capture pane content (check status)
-- cc_send: Send text/keys to a pane
-- cc_new: Create new window, optionally start claude
-- cc_kill: Kill a window`,
+    description: `Control Claude Code instances via tmux (session: ${TMUX_SESSION}).`,
 
     tools: createTools(),
   }

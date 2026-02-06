@@ -35,6 +35,7 @@ export async function ensureDataDirs(): Promise<void> {
   await mkdir(SESSIONS_DIR, { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'knowledge'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'plugins'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'workspace'), { recursive: true })
 }
 
 function getSessionPath(sessionId: string): string {
@@ -109,6 +110,10 @@ export function getKnowledgeDir(): string {
 
 export function getPluginsDir(): string {
   return join(TOEBEANS_DIR, 'plugins')
+}
+
+export function getWorkspaceDir(): string {
+  return join(TOEBEANS_DIR, 'workspace')
 }
 
 export function getSoulPath(): string {

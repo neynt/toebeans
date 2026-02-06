@@ -107,12 +107,7 @@ function createMemoryTools(): Tool[] {
 export default function createMemoryPlugin(): Plugin {
   return {
     name: 'memory',
-    description: `Long-term memory system:
-- remember(topic, content): Store markdown content under a topic
-- recall(query): Search memories by content
-- recall(topic=...): Read a specific memory file
-
-Memories are stored as markdown files in ~/.toebeans/knowledge/`,
+    description: `Long-term memory. Stored as markdown files in ~/.toebeans/knowledge/.`,
     tools: createMemoryTools(),
   }
 }

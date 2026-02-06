@@ -2,7 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir } from './session.ts'
+import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir, getWorkspaceDir } from './session.ts'
 import { join } from 'path'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
@@ -19,6 +19,7 @@ async function main() {
   console.log('toebeans server starting...')
 
   await ensureDataDirs()
+  process.chdir(getWorkspaceDir())
   const config = await loadConfig()
 
   // load soul (or create from default)
@@ -118,7 +119,7 @@ async function main() {
               system: buildSystemPrompt,
               tools: getTools,
               sessionId: conversationSessionId,
-              workingDir: process.cwd(),
+              workingDir: getWorkspaceDir(),
               onChunk: async (chunk) => {
                 broadcast(conversationSessionId, chunk)
 
@@ -164,7 +165,7 @@ async function main() {
     }
 
     // then context
-    parts.push(`Current working directory: ${process.cwd()}`)
+    parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
     // then plugin instructions
     const pluginSection = pluginManager.getSystemPromptSection()
@@ -214,7 +215,7 @@ async function main() {
             system: buildSystemPrompt,
             tools: getTools,
             sessionId: wsSessionId,
-            workingDir: process.cwd(),
+            workingDir: getWorkspaceDir(),
             onChunk: (chunk) => broadcast(wsSessionId, chunk),
           })
           await sessionManager.checkCompaction(wsSessionId)

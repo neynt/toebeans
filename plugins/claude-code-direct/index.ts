@@ -300,14 +300,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
 
   return {
     name: 'claude-code-direct',
-    description: `Spawn one-shot Claude Code tasks and monitor their output.
-You will be automatically notified when spawned tasks complete.
-Log files contain raw claude stream-json output; metadata is in separate .meta.json files.
-
-Tools:
-- spawn_claude_code: Start a new task, returns session ID
-- list_claude_code_sessions: List recent sessions with status
-- read_claude_code_output: Read output from a session log`,
+    description: `Spawn one-shot Claude Code tasks and monitor their output. You are automatically notified when tasks complete.`,
 
     tools,
     input: inputGenerator(),

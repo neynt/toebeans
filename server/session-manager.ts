@@ -117,7 +117,8 @@ export function createSessionManager(
   }
 
   async function compactSession(sessionId: string): Promise<string> {
-    console.log(`session-manager: compacting session ${sessionId}`)
+    const beforeTokens = await estimateSessionTokens(sessionId)
+    console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens)`)
 
     const messages = await loadSession(sessionId)
     if (messages.length === 0) {
@@ -130,7 +131,6 @@ export function createSessionManager(
 
     // generate summary + extract knowledge in one call (cache-friendly)
     const { summary, knowledge } = await compactAndExtract(messages)
-    console.log(`session-manager: generated summary (${summary.length} chars)`)
     if (knowledge) {
       console.log(`session-manager: extracted knowledge`)
       await appendToKnowledge(knowledge)
@@ -151,7 +151,8 @@ export function createSessionManager(
     await writeSession(newId, [summaryMessage])
     await setCurrentSessionId(newId)
 
-    console.log(`session-manager: created new session ${newId}`)
+    const afterTokens = await estimateSessionTokens(newId)
+    console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
     return newId
   }
 

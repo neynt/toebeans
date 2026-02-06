@@ -3,9 +3,9 @@ import type { Tool, ToolResult, Message, ServerMessage } from '../../server/type
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { writeFile, unlink } from 'fs/promises'
-import { tmpdir } from 'os'
+import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
+import { getDataDir } from '../../server/session.ts'
 import https from 'https'
 import http from 'http'
 
@@ -234,17 +234,7 @@ export default function createDiscordPlugin(): Plugin {
 
   return {
     name: 'discord',
-    description: `Discord bot integration. Your text responses are automatically sent back to the channel/DM.
-
-Automatically transcribes voice messages using WhisperX.
-
-Tools (only use these for special cases):
-- discord_send: Send a message to a different channel than you're responding to
-- discord_read_history: Read recent messages from a channel
-- discord_react: Add emoji reaction to a message
-- discord_list_channels: List accessible channels
-
-Messages include [channel_id: X] - use this if you need to call discord tools.`,
+    description: `Discord bot. Text responses are automatically sent back to the channel/DM. Voice messages are transcribed. Messages include [channel_id: X] for routing.`,
 
     tools,
 
@@ -439,60 +429,8 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
           }
         }
 
+        // start typing immediately
         const typingChannel = msg.channel as TextChannel | DMChannel
-
-        // handle slash commands
-        if (msg.content.startsWith('/')) {
-          const args = msg.content.slice(1).trim().split(/\s+/)
-          const command = args[0]?.toLowerCase()
-
-          try {
-            if (command === 'compact') {
-              if (!config!.sessionManager) {
-                await msg.reply('session manager not available')
-                return
-              }
-              typingChannel.sendTyping().catch(() => {})
-              // get current main session (discord shares one session)
-              const sessionId = await config!.sessionManager.getSessionForMessage()
-              const newId = await config!.sessionManager.forceCompact(sessionId)
-              await msg.reply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
-              return
-            } else if (command === 'session') {
-              if (!config!.sessionManager) {
-                await msg.reply('session manager not available')
-                return
-              }
-              typingChannel.sendTyping().catch(() => {})
-              // get current main session (discord shares one session)
-              const sessionId = await config!.sessionManager.getSessionForMessage()
-              const info = await config!.sessionManager.getSessionInfo(sessionId)
-
-              const createdStr = info.createdAt ? info.createdAt.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
-              const lastActivityStr = info.lastActivity ? info.lastActivity.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
-              const ageMinutes = info.createdAt ? Math.floor((Date.now() - info.createdAt.getTime()) / 60000) : 0
-
-              let reply = '📊 **Session Info**\n'
-              reply += `**ID:** \`${info.id}\`\n`
-              reply += `**Messages:** ${info.messageCount}\n`
-              reply += `**Tokens:** ~${info.estimatedTokens}\n`
-              reply += `**Created:** ${createdStr}\n`
-              reply += `**Last Activity:** ${lastActivityStr}\n`
-              reply += `**Age:** ${ageMinutes} minutes`
-
-              await msg.reply(reply)
-              return
-            } else {
-              await msg.reply(`❌ unknown command: \`${command}\`\navailable commands: \`/compact\`, \`/session\``)
-              return
-            }
-          } catch (err) {
-            await msg.reply(`❌ command error: ${err}`)
-            return
-          }
-        }
-
-        // start typing immediately for non-command messages
         typingChannel.sendTyping().catch(() => {})
 
         let content = msg.content
@@ -506,10 +444,11 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
             
             if (isAudio) {
               try {
-                const tempFile = join(tmpdir(), `discord-audio-${Date.now()}-${attachment.name}`)
-                await downloadFile(attachment.url, tempFile)
-                const transcription = await transcribeAudio(tempFile)
-                await unlink(tempFile).catch(() => {})
+                const audioDir = join(getDataDir(), 'discord')
+                await mkdir(audioDir, { recursive: true })
+                const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
+                await downloadFile(attachment.url, audioFile)
+                const transcription = await transcribeAudio(audioFile)
                 
                 content += `\n\n[Voice message transcription: ${transcription}]`
               } catch (err) {
@@ -523,8 +462,68 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
         queueMessage(msg.channelId, content, msg.author.username, isDM)
       })
 
-      client.on(Events.ClientReady, () => {
+      client.on(Events.ClientReady, async () => {
         console.log(`discord: logged in as ${client!.user?.tag}`)
+
+        // register slash commands
+        try {
+          await client!.application?.commands.set([
+            { name: 'compact', description: 'Force compact the current session' },
+            { name: 'session', description: 'Show current session info' },
+          ])
+          console.log('discord: registered slash commands')
+        } catch (err) {
+          console.error('discord: failed to register slash commands:', err)
+        }
+      })
+
+      client.on(Events.InteractionCreate, async (interaction) => {
+        if (!interaction.isChatInputCommand()) return
+
+        // check user whitelist
+        if (!config!.allowedUsers.includes(interaction.user.id)) {
+          await interaction.reply({ content: '❌ not authorized', ephemeral: true })
+          return
+        }
+
+        if (!config!.sessionManager) {
+          await interaction.reply({ content: '❌ session manager not available', ephemeral: true })
+          return
+        }
+
+        try {
+          if (interaction.commandName === 'compact') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage()
+            const newId = await config!.sessionManager.forceCompact(sessionId)
+            await interaction.editReply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
+          } else if (interaction.commandName === 'session') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage()
+            const info = await config!.sessionManager.getSessionInfo(sessionId)
+
+            const createdStr = info.createdAt ? info.createdAt.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
+            const lastActivityStr = info.lastActivity ? info.lastActivity.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
+            const ageMinutes = info.createdAt ? Math.floor((Date.now() - info.createdAt.getTime()) / 60000) : 0
+
+            let reply = '📊 **Session Info**\n'
+            reply += `**ID:** \`${info.id}\`\n`
+            reply += `**Messages:** ${info.messageCount}\n`
+            reply += `**Tokens:** ~${info.estimatedTokens}\n`
+            reply += `**Created:** ${createdStr}\n`
+            reply += `**Last Activity:** ${lastActivityStr}\n`
+            reply += `**Age:** ${ageMinutes} minutes`
+
+            await interaction.editReply(reply)
+          }
+        } catch (err) {
+          const errorMsg = `❌ command error: ${err}`
+          if (interaction.deferred) {
+            await interaction.editReply(errorMsg)
+          } else {
+            await interaction.reply({ content: errorMsg, ephemeral: true })
+          }
+        }
       })
 
       await client.login(config.token)

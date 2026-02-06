@@ -362,21 +362,7 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
 
   return {
     name: 'timers',
-    description: `Timer system for scheduling future tasks.
-
-Current timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}
-
-Tools:
-- timer_create: Create a new timer (daily-HH:MM.md, weekly-day-HH:MM.md, hourly-MM.md, or YYYY-MM-DDTHH:MM.md)
-- timer_list: List all scheduled timers
-- timer_delete: Delete a timer
-- timer_read: Read timer content
-
-Timer files support YAML frontmatter:
-- session: which conversation to use (omit to generate fresh session each time)
-- output: where to send response, e.g. "discord:channelId" (omit for no output)
-
-When a timer fires, you'll receive a message with the timer content.`,
+    description: `Schedule future tasks. Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}. Timer filenames encode the schedule (daily-HH:MM.md, weekly-day-HH:MM.md, hourly-MM.md, YYYY-MM-DDTHH:MM.md). YAML frontmatter supports session and output (e.g. "discord:channelId") fields. When a timer fires, you receive its content as a message.`,
 
     tools,
     input: inputGenerator(),
