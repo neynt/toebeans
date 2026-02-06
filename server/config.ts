@@ -17,6 +17,7 @@ const configSchema = z.object({
     apiKey: z.string().optional(),
     thinkingBudget: z.number().optional(),
   }).passthrough(),
+  notifyOnRestart: z.string().optional(),
 }).passthrough()
 
 export type Config = z.infer<typeof configSchema>

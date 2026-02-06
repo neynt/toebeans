@@ -89,6 +89,17 @@ async function main() {
     await targetPlugin.plugin.output(pluginTarget, message)
   }
 
+  // send restart notification if configured
+  if (config.notifyOnRestart) {
+    console.log(`[server] sending restart notification to: ${config.notifyOnRestart}`)
+    try {
+      await routeOutput(config.notifyOnRestart, { type: 'text', text: 'back online ✓' })
+      await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
+    } catch (err) {
+      console.error(`[server] failed to send restart notification:`, err)
+    }
+  }
+
   // start consuming inputs from all loaded plugins
   for (const [name, loaded] of pluginManager.getAllPlugins()) {
     if (!loaded.plugin.input) continue
