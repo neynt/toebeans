@@ -1,4 +1,4 @@
-import type { Tool, Message, AgentResult } from './types.ts'
+import type { Tool, Message, AgentResult, ServerMessage } from './types.ts'
 import { getPluginsDir } from './session.ts'
 import { join } from 'path'
 
@@ -34,7 +34,8 @@ export interface Plugin {
   input?: AsyncIterable<{ sessionId: string; message: Message; outputTarget?: string }>
 
   // for channel plugins: send a response back
-  output?: (sessionId: string, content: string) => Promise<void>
+  // receives ServerMessage events (text, tool_use, tool_result, done, error)
+  output?: (sessionId: string, message: ServerMessage) => Promise<void>
 
   // lifecycle
   init?: (config: unknown) => void | Promise<void>

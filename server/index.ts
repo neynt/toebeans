@@ -15,6 +15,7 @@ import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux.ts'
 import createTimersPlugin from '../plugins/timers.ts'
 import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct.ts'
 
+import createWebBrowsePlugin from '../plugins/web-browse.ts'
 interface WebSocketData {
   subscriptions: Set<string>
 }
@@ -51,6 +52,7 @@ async function main() {
   pluginManager.registerBuiltin('timers', createTimersPlugin)
   pluginManager.registerBuiltin('claude-code-direct', createClaudeCodeDirectPlugin)
   pluginManager.registerBuiltin('plugins', () => createPluginsPlugin(pluginManager))
+  pluginManager.registerBuiltin('web-browse', createWebBrowsePlugin)
 
   // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
@@ -78,7 +80,7 @@ async function main() {
   const consumingPlugins = new Set<string>()
 
   // route output to a plugin by target string (format: 'pluginName:target')
-  async function routeOutput(target: string, content: string) {
+  async function routeOutput(target: string, message: ServerMessage) {
     const colonIdx = target.indexOf(':')
     if (colonIdx === -1) {
       console.error(`invalid output target format: ${target} (expected pluginName:target)`)
@@ -99,7 +101,7 @@ async function main() {
       return
     }
 
-    await targetPlugin.plugin.output(pluginTarget, content)
+    await targetPlugin.plugin.output(pluginTarget, message)
   }
 
   function startConsumingPluginInput(name: string, loaded: LoadedPlugin) {
@@ -121,17 +123,12 @@ async function main() {
             .join('\n')
           if (!text.trim()) continue
 
-          // collect response for final output
-          let responseText = ''
-          const toolCalls: { name: string; error: boolean }[] = []
-          let currentToolName: string | null = null
-
           // determine output function and target
           // use explicit outputTarget, or fall back to plugin's sessionId for routing
           const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
-          let outputFn: ((content: string) => Promise<void>) | null = null
+          let outputFn: ((message: ServerMessage) => Promise<void>) | null = null
           if (effectiveOutputTarget) {
-            outputFn = (content) => routeOutput(effectiveOutputTarget, content)
+            outputFn = (message) => routeOutput(effectiveOutputTarget, message)
           }
 
           try {
@@ -144,33 +141,9 @@ async function main() {
               onChunk: async (chunk) => {
                 broadcast(conversationSessionId, chunk)
 
-                // stream text chunks immediately
-                if (chunk.type === 'text') {
-                  responseText += chunk.text
-                  if (outputFn) {
-                    await outputFn(chunk.text)
-                  }
-                } else if (chunk.type === 'tool_use') {
-                  currentToolName = chunk.name
-                  // stream tool call notification
-                  if (outputFn) {
-                    await outputFn(`[calling ${chunk.name}]\n`)
-                  }
-                } else if (chunk.type === 'tool_result') {
-                  if (currentToolName) {
-                    toolCalls.push({ name: currentToolName, error: !!chunk.is_error })
-                    // stream tool result
-                    if (outputFn) {
-                      const status = chunk.is_error ? '✗' : '✓'
-                      await outputFn(`[${status} ${currentToolName}]\n`)
-                    }
-                    currentToolName = null
-                  }
-                } else if (chunk.type === 'done') {
-                  // flush final message
-                  if (outputFn) {
-                    await outputFn('__FLUSH__')
-                  }
+                // stream all chunks to output function
+                if (outputFn) {
+                  await outputFn(chunk)
                 }
               },
             })
@@ -181,11 +154,9 @@ async function main() {
             console.error(`agent error for ${conversationSessionId}:`, err)
             broadcast(conversationSessionId, { type: 'error', message: String(err) })
 
-            // send error output and flush
-            const errorMsg = `error: ${err}`
+            // send error output
             if (outputFn) {
-              await outputFn(errorMsg)
-              await outputFn('__FLUSH__')
+              await outputFn({ type: 'error', message: String(err) })
             }
           }
         }

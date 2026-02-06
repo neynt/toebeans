@@ -56,6 +56,7 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'text'; text: string }
+  | { type: 'text_block_end' }  // signals end of a text content block (flush buffer)
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
   | { type: 'done'; usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number } }

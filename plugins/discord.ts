@@ -1,5 +1,5 @@
 import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, Message } from '../server/types.ts'
+import type { Tool, ToolResult, Message, ServerMessage } from '../server/types.ts'
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
@@ -75,6 +75,8 @@ export default function createDiscordPlugin(): Plugin {
 
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
+  // track tool use messages by tool_use_id so we can edit them
+  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string }>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
 
@@ -248,7 +250,7 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
 
     input: inputGenerator(),
 
-    async output(sessionId: string, content: string) {
+    async output(sessionId: string, message: ServerMessage) {
       if (!client) return
 
       // sessionId format: channelId (already stripped of discord: prefix by routeOutput)
@@ -258,9 +260,6 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
       // serialize sends per session to prevent out-of-order messages
       const prevLock = sendLocks.get(sessionId) || Promise.resolve()
       const currentLock = prevLock.then(async () => {
-        // special marker to flush remaining buffer
-        const shouldFlush = content === '__FLUSH__'
-
         try {
           const channel = await client!.channels.fetch(channelId)
           if (!channel?.isTextBased()) return
@@ -276,9 +275,11 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
             await new Promise(resolve => setTimeout(resolve, delay))
 
             let remaining = trimmed
+            const messages: DiscordMessage[] = []
             while (remaining.length > 0) {
               const chunk = remaining.slice(0, 2000)
-              await textChannel.send(chunk)
+              const msg = await textChannel.send(chunk)
+              messages.push(msg)
               remaining = remaining.slice(2000)
             }
 
@@ -286,39 +287,105 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
             if (moreToFollow) {
               textChannel.sendTyping().catch(() => {})
             }
+
+            return messages[0] // return first message for tracking
           }
 
-          // get or create buffer for this session
-          let buffer = messageBuffers.get(sessionId) || ''
+          // handle different message types
+          if (message.type === 'text') {
+            // accumulate text in buffer
+            let buffer = messageBuffers.get(sessionId) || ''
+            buffer += message.text
+            messageBuffers.set(sessionId, buffer)
 
-          if (shouldFlush) {
-            // send any remaining buffer
+            // look for complete paragraphs to send (double newline)
+            while (true) {
+              const paraBreak = buffer.indexOf('\n\n')
+              if (paraBreak !== -1) {
+                const toSend = buffer.slice(0, paraBreak)
+                buffer = buffer.slice(paraBreak + 2)
+                messageBuffers.set(sessionId, buffer)
+                const hasMore = buffer.trim().length > 0
+                await sendMessage(toSend, hasMore)
+                continue
+              }
+              break
+            }
+          } else if (message.type === 'text_block_end') {
+            // flush remaining buffer when text block ends
+            const buffer = messageBuffers.get(sessionId) || ''
+            if (buffer.trim()) {
+              await sendMessage(buffer, false)
+              messageBuffers.delete(sessionId)
+            }
+          } else if (message.type === 'tool_use') {
+            // send tool use immediately with details
+            const inputStr = typeof message.input === 'string'
+              ? message.input
+              : JSON.stringify(message.input, null, 2)
+
+            // format based on tool type
+            let toolMessage = `🔧 **${message.name}**\n`
+
+            // show input details for common tools
+            if (message.name === 'bash') {
+              const cmd = (message.input as any)?.command
+              if (cmd) {
+                toolMessage += '```bash\n' + cmd.slice(0, 1900) + '\n```'
+              }
+            } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
+              const path = (message.input as any)?.path || (message.input as any)?.file_path
+              if (path) {
+                toolMessage += `\`${path}\``
+              }
+            } else {
+              // generic input display (truncated)
+              const shortInput = inputStr.slice(0, 500)
+              if (shortInput.includes('\n')) {
+                toolMessage += '```\n' + shortInput + (inputStr.length > 500 ? '\n...' : '') + '\n```'
+              } else {
+                toolMessage += `\`${shortInput}${inputStr.length > 500 ? '...' : ''}\``
+              }
+            }
+
+            const msg = await textChannel.send(toolMessage)
+            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name })
+          } else if (message.type === 'tool_result') {
+            // edit the original tool use message to show result
+            const toolInfo = toolMessages.get(message.tool_use_id)
+            if (toolInfo) {
+              try {
+                const msg = await textChannel.messages.fetch(toolInfo.messageId)
+                const status = message.is_error ? '❌' : '✅'
+                const resultPreview = message.content.slice(0, 300)
+                const hasMore = message.content.length > 300
+
+                let newContent = `${status} **${toolInfo.toolName}**\n`
+
+                // show result preview
+                if (message.is_error) {
+                  newContent += '```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
+                } else if (resultPreview.trim()) {
+                  newContent += '```\n' + resultPreview + (hasMore ? '\n...' : '') + '\n```'
+                }
+
+                await msg.edit(newContent.slice(0, 2000))
+                toolMessages.delete(message.tool_use_id)
+              } catch (err) {
+                console.error('failed to edit tool message:', err)
+              }
+            }
+          } else if (message.type === 'done') {
+            // flush remaining buffer
+            const buffer = messageBuffers.get(sessionId) || ''
             if (buffer.trim()) {
               await sendMessage(buffer, false)
             }
             messageBuffers.delete(sessionId)
             sendLocks.delete(sessionId)
-            return
-          }
-
-          // append new content to buffer
-          buffer += content
-          messageBuffers.set(sessionId, buffer)
-
-          // look for complete paragraphs to send (double newline)
-          while (true) {
-            const paraBreak = buffer.indexOf('\n\n')
-            if (paraBreak !== -1) {
-              const toSend = buffer.slice(0, paraBreak)
-              buffer = buffer.slice(paraBreak + 2)
-              messageBuffers.set(sessionId, buffer)
-              const hasMore = buffer.trim().length > 0
-              await sendMessage(toSend, hasMore)
-              continue
-            }
-
-            // no complete paragraph found, wait for more content
-            break
+          } else if (message.type === 'error') {
+            // send error message
+            await textChannel.send(`❌ Error: ${message.message}`)
           }
         } catch (err) {
           console.error(`discord output error:`, err)

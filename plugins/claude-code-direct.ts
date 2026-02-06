@@ -1,5 +1,5 @@
 import type { Plugin } from '../server/plugin.ts'
-import type { Tool, ToolResult, ToolContext } from '../server/types.ts'
+import type { Tool, ToolResult, ToolContext, Message } from '../server/types.ts'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -7,8 +7,24 @@ import { join } from 'path'
 const DATA_DIR = process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share')
 const LOG_DIR = join(DATA_DIR, 'toebeans', 'claude-code')
 
+interface ProcessInfo {
+  proc: ReturnType<typeof Bun.spawn>
+  pid: number
+  task: string
+}
+
 // track running processes by session id
-const runningProcesses = new Map<string, { proc: ReturnType<typeof Bun.spawn>; pid: number }>()
+const runningProcesses = new Map<string, ProcessInfo>()
+
+interface MetaFile {
+  sessionId: string
+  task: string
+  workingDir: string
+  startedAt: string
+  pid: number
+  exitCode?: number
+  endedAt?: string
+}
 
 async function ensureLogDir(): Promise<void> {
   await mkdir(LOG_DIR, { recursive: true })
@@ -26,11 +42,62 @@ function getLogPath(sessionId: string): string {
   return join(LOG_DIR, `${sessionId}.log`)
 }
 
-function createTools(): Tool[] {
-  return [
+function getMetaPath(sessionId: string): string {
+  return join(LOG_DIR, `${sessionId}.meta.json`)
+}
+
+async function readMeta(sessionId: string): Promise<MetaFile | null> {
+  try {
+    const file = Bun.file(getMetaPath(sessionId))
+    if (!(await file.exists())) return null
+    return await file.json()
+  } catch {
+    return null
+  }
+}
+
+async function writeMeta(meta: MetaFile): Promise<void> {
+  await Bun.write(getMetaPath(meta.sessionId), JSON.stringify(meta, null, 2))
+}
+
+interface QueuedMessage {
+  sessionId: string
+  message: Message
+}
+
+export default function createClaudeCodeDirectPlugin(): Plugin {
+  const messageQueue: QueuedMessage[] = []
+  let resolveWaiter: (() => void) | null = null
+
+  function queueNotification(text: string) {
+    messageQueue.push({
+      sessionId: 'claude-code-direct',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text }],
+      },
+    })
+    if (resolveWaiter) {
+      resolveWaiter()
+      resolveWaiter = null
+    }
+  }
+
+  async function* inputGenerator(): AsyncGenerator<QueuedMessage> {
+    while (true) {
+      while (messageQueue.length > 0) {
+        yield messageQueue.shift()!
+      }
+      await new Promise<void>(resolve => {
+        resolveWaiter = resolve
+      })
+    }
+  }
+
+  const tools: Tool[] = [
     {
       name: 'spawn_claude_code',
-      description: 'Spawn a new Claude Code session with a one-shot task. Returns session ID and log file path.',
+      description: 'Spawn a new Claude Code session with a one-shot task. Returns session ID and log file path. You will be notified when the task completes.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -48,59 +115,46 @@ function createTools(): Tool[] {
         const cwd = workingDir ?? context.workingDir
 
         try {
-          const logFile = Bun.file(logPath)
-          const writer = logFile.writer()
+          // write metadata
+          const meta: MetaFile = {
+            sessionId,
+            task,
+            workingDir: cwd,
+            startedAt: new Date().toISOString(),
+            pid: 0, // updated after spawn
+          }
 
-          // write header
-          const header = `# Claude Code Session: ${sessionId}\n# Started: ${new Date().toISOString()}\n# Task: ${task}\n# Working Dir: ${cwd}\n\n`
-          writer.write(header)
-
+          // spawn claude with stdout/stderr redirected to log file via shell
+          // this way claude writes directly to the file — survives toebeans dying
           const proc = Bun.spawn(
-            ['claude', '-p', '--dangerously-skip-permissions', '--output-format', 'json', task],
+            ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
             {
               cwd,
-              stdout: 'pipe',
-              stderr: 'pipe',
+              env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: logPath },
+              stdout: 'ignore',
+              stderr: 'ignore',
             }
           )
 
-          runningProcesses.set(sessionId, { proc, pid: proc.pid })
+          meta.pid = proc.pid
+          await writeMeta(meta)
 
-          // stream stdout to log file
-          ;(async () => {
-            const reader = proc.stdout.getReader()
-            try {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                writer.write(value)
-              }
-            } finally {
-              reader.releaseLock()
-            }
-          })()
+          runningProcesses.set(sessionId, { proc, pid: proc.pid, task })
 
-          // stream stderr to log file
-          ;(async () => {
-            const reader = proc.stderr.getReader()
-            try {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                writer.write(new TextEncoder().encode(`[stderr] `))
-                writer.write(value)
-              }
-            } finally {
-              reader.releaseLock()
-            }
-          })()
-
-          // cleanup when process exits
+          // notify when done (best-effort — only works if toebeans is still alive)
           proc.exited.then(async (code) => {
-            const footer = `\n# Exited with code: ${code}\n# Ended: ${new Date().toISOString()}\n`
-            writer.write(footer)
-            await writer.end()
             runningProcesses.delete(sessionId)
+
+            // update meta with exit info
+            meta.exitCode = code ?? 1
+            meta.endedAt = new Date().toISOString()
+            await writeMeta(meta)
+
+            const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
+            const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
+            queueNotification(
+              `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+            )
           })
 
           return {
@@ -134,60 +188,70 @@ function createTools(): Tool[] {
 
         try {
           const files = await readdir(LOG_DIR)
-          const logFiles = files.filter(f => f.endsWith('.log'))
+          const metaFiles = files.filter(f => f.endsWith('.meta.json'))
 
-          // get stats and sort by mtime
           const sessions = await Promise.all(
-            logFiles.map(async (file) => {
-              const sessionId = file.replace('.log', '')
-              const logPath = join(LOG_DIR, file)
-              const fileStat = await stat(logPath)
+            metaFiles.map(async (file) => {
+              const sessionId = file.replace('.meta.json', '')
+              const meta = await readMeta(sessionId)
+              if (!meta) return null
 
-              // check if process is still running
-              const running = runningProcesses.get(sessionId)
+              const logPath = getLogPath(sessionId)
+              const logFile = Bun.file(logPath)
+              const logExists = await logFile.exists()
+
+              // determine status
               let status = 'completed'
-              let pid: number | undefined
-
-              if (running) {
-                // check if process is actually still alive
-                try {
-                  process.kill(running.pid, 0) // signal 0 just checks if process exists
-                  status = 'running'
-                  pid = running.pid
-                } catch {
-                  status = 'completed'
-                  runningProcesses.delete(sessionId)
+              if (meta.endedAt) {
+                status = meta.exitCode === 0 ? 'completed' : 'failed'
+              } else {
+                // no endedAt — check if process is still running
+                const running = runningProcesses.get(sessionId)
+                if (running) {
+                  try {
+                    process.kill(running.pid, 0)
+                    status = 'running'
+                  } catch {
+                    status = 'unknown'
+                    runningProcesses.delete(sessionId)
+                  }
+                } else {
+                  // not tracked in memory — check if pid is alive
+                  try {
+                    process.kill(meta.pid, 0)
+                    status = 'running'
+                  } catch {
+                    status = 'unknown'
+                  }
                 }
               }
 
-              // read last few lines for status
-              const content = await Bun.file(logPath).text()
-              const lines = content.trim().split('\n')
-              const lastLines = lines.slice(-3).join('\n')
+              let size = 0
+              let mtime = new Date(meta.startedAt)
+              if (logExists) {
+                const logStat = await stat(logPath)
+                size = logStat.size
+                mtime = logStat.mtime
+              }
 
               return {
                 sessionId,
                 status,
-                pid,
-                mtime: fileStat.mtime,
-                size: fileStat.size,
-                lastLines,
+                exitCode: meta.exitCode,
+                task: meta.task.slice(0, 100) + (meta.task.length > 100 ? '...' : ''),
+                startedAt: meta.startedAt,
+                endedAt: meta.endedAt,
+                pid: meta.pid,
+                logSizeBytes: size,
+                mtime,
               }
             })
           )
 
-          // sort by mtime descending
-          sessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+          const valid = sessions.filter(Boolean) as NonNullable<(typeof sessions)[number]>[]
+          valid.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
 
-          const result = sessions.slice(0, limit).map(s => ({
-            sessionId: s.sessionId,
-            status: s.status,
-            pid: s.pid,
-            modified: s.mtime.toISOString(),
-            sizeBytes: s.size,
-            preview: s.lastLines.slice(0, 200) + (s.lastLines.length > 200 ? '...' : ''),
-          }))
-
+          const result = valid.slice(0, limit).map(({ mtime, ...rest }) => rest)
           return { content: JSON.stringify(result, null, 2) }
         } catch (err: unknown) {
           const error = err as { message?: string }
@@ -198,7 +262,7 @@ function createTools(): Tool[] {
 
     {
       name: 'read_claude_code_output',
-      description: 'Read output from a Claude Code session log.',
+      description: 'Read output from a Claude Code session log (raw stream-json output).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -214,7 +278,7 @@ function createTools(): Tool[] {
         const file = Bun.file(logPath)
 
         if (!(await file.exists())) {
-          return { content: `Session not found: ${sessionId}`, is_error: true }
+          return { content: `Session log not found: ${sessionId}`, is_error: true }
         }
 
         try {
@@ -234,17 +298,20 @@ function createTools(): Tool[] {
       },
     },
   ]
-}
 
-export default function createClaudeCodeDirectPlugin(): Plugin {
   return {
     name: 'claude-code-direct',
-    description: `Spawn one-shot Claude Code tasks and monitor their output:
+    description: `Spawn one-shot Claude Code tasks and monitor their output.
+You will be automatically notified when spawned tasks complete.
+Log files contain raw claude stream-json output; metadata is in separate .meta.json files.
+
+Tools:
 - spawn_claude_code: Start a new task, returns session ID
 - list_claude_code_sessions: List recent sessions with status
 - read_claude_code_output: Read output from a session log`,
 
-    tools: createTools(),
+    tools,
+    input: inputGenerator(),
 
     async init() {
       await ensureLogDir()

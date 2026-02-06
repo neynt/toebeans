@@ -113,12 +113,14 @@ export async function runAgentTurn(
 
     const assistantContent: ContentBlock[] = []
     let hasToolUse = false
+    let hasText = false
 
     // stream response
     for await (const chunk of provider.stream({ messages, system, tools: toolDefs })) {
       switch (chunk.type) {
         case 'text':
           onChunk?.({ type: 'text', text: chunk.text })
+          hasText = true
           // accumulate text into last text block or create new one
           const lastBlock = assistantContent[assistantContent.length - 1]
           if (lastBlock?.type === 'text') {
@@ -129,6 +131,11 @@ export async function runAgentTurn(
           break
 
         case 'tool_use':
+          // signal end of text block before tool use (flush any buffered text)
+          if (hasText) {
+            onChunk?.({ type: 'text_block_end' })
+            hasText = false
+          }
           hasToolUse = true
           onChunk?.({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input })
           assistantContent.push({
@@ -154,6 +161,10 @@ export async function runAgentTurn(
     await appendMessage(sessionId, assistantMessage)
 
     if (!hasToolUse) {
+      // signal end of text block before finishing (flush any buffered text)
+      if (hasText) {
+        onChunk?.({ type: 'text_block_end' })
+      }
       // no tool calls, we're done
       onChunk?.({ type: 'done', usage: totalUsage })
       break
