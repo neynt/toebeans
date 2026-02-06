@@ -75,6 +75,8 @@ export default function createDiscordPlugin(): Plugin {
 
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
+  // lock to prevent concurrent sends per session
+  const sendLocks = new Map<string, Promise<void>>()
 
   function queueMessage(channelId: string, content: string, author: string, isDM: boolean) {
     const channelContext = isDM
@@ -253,76 +255,78 @@ Messages include [channel_id: X] - use this if you need to call discord tools.`,
       const channelId = sessionId
       if (!channelId) return
 
-      // special marker to flush remaining buffer
-      const shouldFlush = content === '__FLUSH__'
+      // serialize sends per session to prevent out-of-order messages
+      const prevLock = sendLocks.get(sessionId) || Promise.resolve()
+      const currentLock = prevLock.then(async () => {
+        // special marker to flush remaining buffer
+        const shouldFlush = content === '__FLUSH__'
 
-      try {
-        const channel = await client.channels.fetch(channelId)
-        if (!channel?.isTextBased()) return
-        const textChannel = channel as TextChannel | DMChannel
+        try {
+          const channel = await client!.channels.fetch(channelId)
+          if (!channel?.isTextBased()) return
+          const textChannel = channel as TextChannel | DMChannel
 
-        // helper to send a message, splitting if over 2000 chars
-        const sendMessage = async (text: string) => {
-          const trimmed = text.trim()
-          if (!trimmed) return
+          // helper to send a message with human-like delay, splitting if over 2000 chars
+          const sendMessage = async (text: string, moreToFollow: boolean) => {
+            const trimmed = text.trim()
+            if (!trimmed) return
 
-          let remaining = trimmed
-          while (remaining.length > 0) {
-            const chunk = remaining.slice(0, 2000)
-            await textChannel.send(chunk)
-            remaining = remaining.slice(2000)
-          }
-        }
+            // human-like delay: 300ms + 10ms per character, max 1s
+            const delay = Math.min(1000, 300 + trimmed.length * 10)
+            await new Promise(resolve => setTimeout(resolve, delay))
 
-        // get or create buffer for this session
-        let buffer = messageBuffers.get(sessionId) || ''
+            let remaining = trimmed
+            while (remaining.length > 0) {
+              const chunk = remaining.slice(0, 2000)
+              await textChannel.send(chunk)
+              remaining = remaining.slice(2000)
+            }
 
-        if (shouldFlush) {
-          // send any remaining buffer
-          if (buffer.trim()) {
-            await sendMessage(buffer)
-          }
-          messageBuffers.delete(sessionId)
-          return
-        }
-
-        // append new content to buffer
-        buffer += content
-        messageBuffers.set(sessionId, buffer)
-
-        // look for complete sentences/paragraphs to send
-        // send on: paragraph break (double newline) or sentence end followed by space/newline
-        while (true) {
-          // check for paragraph break first
-          const paraBreak = buffer.indexOf('\n\n')
-          if (paraBreak !== -1) {
-            const toSend = buffer.slice(0, paraBreak)
-            buffer = buffer.slice(paraBreak + 2)
-            messageBuffers.set(sessionId, buffer)
-            await sendMessage(toSend)
-            continue
-          }
-
-          // check for sentence end (. ! ?) followed by space or newline
-          const sentenceMatch = buffer.match(/[.!?][\s\n]/)
-          if (sentenceMatch && sentenceMatch.index !== undefined) {
-            // only send if we have more content after (to avoid sending incomplete final sentence)
-            const endIdx = sentenceMatch.index + 1
-            if (buffer.length > endIdx + 1) {
-              const toSend = buffer.slice(0, endIdx)
-              buffer = buffer.slice(endIdx).trimStart()
-              messageBuffers.set(sessionId, buffer)
-              await sendMessage(toSend)
-              continue
+            // show typing indicator if more content is coming
+            if (moreToFollow) {
+              textChannel.sendTyping().catch(() => {})
             }
           }
 
-          // no complete unit found, wait for more content
-          break
+          // get or create buffer for this session
+          let buffer = messageBuffers.get(sessionId) || ''
+
+          if (shouldFlush) {
+            // send any remaining buffer
+            if (buffer.trim()) {
+              await sendMessage(buffer, false)
+            }
+            messageBuffers.delete(sessionId)
+            sendLocks.delete(sessionId)
+            return
+          }
+
+          // append new content to buffer
+          buffer += content
+          messageBuffers.set(sessionId, buffer)
+
+          // look for complete paragraphs to send (double newline)
+          while (true) {
+            const paraBreak = buffer.indexOf('\n\n')
+            if (paraBreak !== -1) {
+              const toSend = buffer.slice(0, paraBreak)
+              buffer = buffer.slice(paraBreak + 2)
+              messageBuffers.set(sessionId, buffer)
+              const hasMore = buffer.trim().length > 0
+              await sendMessage(toSend, hasMore)
+              continue
+            }
+
+            // no complete paragraph found, wait for more content
+            break
+          }
+        } catch (err) {
+          console.error(`discord output error:`, err)
         }
-      } catch (err) {
-        console.error(`discord output error:`, err)
-      }
+      })
+
+      sendLocks.set(sessionId, currentLock)
+      await currentLock
     },
 
     async init(cfg: unknown) {

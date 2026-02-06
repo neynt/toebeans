@@ -180,6 +180,17 @@ export function createSessionManager(
         return newId
       }
 
+      // check if session is stale (inactive for too long) — compact before new message lands
+      const lastActivity = await getSessionLastActivity(sessionId)
+      if (lastActivity) {
+        const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
+        if (ageSeconds >= lifespanSeconds) {
+          console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes stale, compacting before new message`)
+          const newId = await compactSession(sessionId)
+          return newId
+        }
+      }
+
       return sessionId
     },
 
