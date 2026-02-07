@@ -45,6 +45,7 @@ export interface SessionManager {
 export function createSessionManager(
   provider: LlmProvider,
   config: Config,
+  routeOutput?: (target: string, message: any) => Promise<void>,
 ): SessionManager {
   const { compactAtTokens, lifespanSeconds } = config.session
 
@@ -177,6 +178,22 @@ export function createSessionManager(
 
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
+
+    // send compaction report to discord if routeOutput is available
+    if (routeOutput && config.notifyOnRestart) {
+      try {
+        const formattedBefore = beforeTokens.toLocaleString()
+        const formattedAfter = afterTokens.toLocaleString()
+        await routeOutput(config.notifyOnRestart, {
+          type: 'text',
+          text: `compacted: ${formattedBefore} → ${formattedAfter} tokens`
+        })
+        await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
+      } catch (err) {
+        console.error(`session-manager: failed to send compaction notification:`, err)
+      }
+    }
+
     return newId
   }
 

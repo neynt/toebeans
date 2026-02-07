@@ -54,29 +54,12 @@ async function main() {
     thinkingBudget: config.llm.thinkingBudget,
   })
 
-  // create session manager for handling main session and compaction
-  const sessionManager = createSessionManager(provider, config)
-
   const pluginManager = new PluginManager()
 
   // prepare server context for plugins (will be populated with routeOutput after it's defined)
   const serverContext = { routeOutput: null as any, config }
 
   pluginManager.setServerContext(serverContext)
-
-  // load plugins from config
-  for (const [name, pluginConfig] of Object.entries(config.plugins)) {
-    try {
-      // inject session manager into discord plugin config
-      const effectiveConfig = name === 'discord'
-        ? { ...(pluginConfig as object), sessionManager }
-        : pluginConfig
-      await pluginManager.loadPlugin(name, effectiveConfig)
-      console.log(`loaded plugin: ${name}`)
-    } catch (err) {
-      console.error(`failed to load plugin ${name}:`, err)
-    }
-  }
 
   // route output to a plugin by target string (format: 'pluginName:target')
   async function routeOutput(target: string, message: ServerMessage) {
@@ -105,6 +88,23 @@ async function main() {
 
   // populate routeOutput in server context now that it's defined
   serverContext.routeOutput = routeOutput
+
+  // create session manager with routeOutput available
+  const sessionManager = createSessionManager(provider, config, routeOutput)
+
+  // load plugins from config
+  for (const [name, pluginConfig] of Object.entries(config.plugins)) {
+    try {
+      // inject session manager into discord plugin config
+      const effectiveConfig = name === 'discord'
+        ? { ...(pluginConfig as object), sessionManager }
+        : pluginConfig
+      await pluginManager.loadPlugin(name, effectiveConfig)
+      console.log(`loaded plugin: ${name}`)
+    } catch (err) {
+      console.error(`failed to load plugin ${name}:`, err)
+    }
+  }
 
   // send restart notification if configured
   if (config.notifyOnRestart) {
