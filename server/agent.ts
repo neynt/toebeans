@@ -76,6 +76,7 @@ export interface AgentOptions {
   sessionId: string
   workingDir: string
   onChunk?: (chunk: ServerMessage) => void
+  checkInterrupts?: () => { text: string; outputTarget: string }[]
 }
 
 export async function runAgentTurn(
@@ -204,6 +205,23 @@ export async function runAgentTurn(
     const toolResultMessage: Message = { role: 'user', content: toolResults }
     messages.push(toolResultMessage)
     await appendMessage(sessionId, toolResultMessage)
+
+    // check for interrupt messages before next round
+    if (options.checkInterrupts) {
+      const interrupts = options.checkInterrupts()
+      if (interrupts.length > 0) {
+        console.log(`[agent] injecting ${interrupts.length} interrupt(s) into conversation`)
+        // inject interrupt messages into conversation
+        for (const interrupt of interrupts) {
+          const interruptMessage: Message = {
+            role: 'user',
+            content: [{ type: 'text', text: interrupt.text }],
+          }
+          messages.push(interruptMessage)
+          await appendMessage(sessionId, interruptMessage)
+        }
+      }
+    }
   }
 
   return { messages, usage: totalUsage }

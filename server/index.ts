@@ -15,6 +15,14 @@ interface WebSocketData {
 // track connections by session
 const sessionSubscribers = new Map<string, Set<ServerWebSocket<WebSocketData>>>()
 
+// track pending interrupt messages per session
+interface InterruptMessage {
+  text: string
+  outputTarget: string
+}
+const interruptBuffers = new Map<string, InterruptMessage[]>()
+const sessionBusy = new Map<string, boolean>()
+
 async function main() {
   console.log('toebeans server starting...')
 
@@ -126,6 +134,23 @@ async function main() {
             outputFn = (message) => routeOutput(effectiveOutputTarget, message)
           }
 
+          // check if session is busy (agent is currently processing)
+          if (sessionBusy.get(conversationSessionId)) {
+            // buffer this message as an interrupt
+            console.log(`[${name}] session ${conversationSessionId} busy, buffering interrupt`)
+            if (!interruptBuffers.has(conversationSessionId)) {
+              interruptBuffers.set(conversationSessionId, [])
+            }
+            interruptBuffers.get(conversationSessionId)!.push({
+              text,
+              outputTarget: effectiveOutputTarget || '',
+            })
+            continue
+          }
+
+          // mark session as busy
+          sessionBusy.set(conversationSessionId, true)
+
           try {
             await runAgentTurn(text, {
               provider,
@@ -141,6 +166,12 @@ async function main() {
                   await outputFn(chunk)
                 }
               },
+              checkInterrupts: () => {
+                // drain interrupt buffer and return messages
+                const buffer = interruptBuffers.get(conversationSessionId) || []
+                interruptBuffers.set(conversationSessionId, [])
+                return buffer
+              },
             })
 
             // check if session needs compaction
@@ -153,6 +184,9 @@ async function main() {
             if (outputFn) {
               await outputFn({ type: 'error', message: String(err) })
             }
+          } finally {
+            // mark session as not busy
+            sessionBusy.set(conversationSessionId, false)
           }
         }
       } catch (err) {
@@ -244,6 +278,22 @@ async function main() {
         const wsSessionId = await sessionManager.getSessionForMessage()
         console.log(`message for session ${wsSessionId}: ${msg.content.slice(0, 50)}...`)
 
+        // check if session is busy
+        if (sessionBusy.get(wsSessionId)) {
+          console.log(`[websocket] session ${wsSessionId} busy, buffering interrupt`)
+          if (!interruptBuffers.has(wsSessionId)) {
+            interruptBuffers.set(wsSessionId, [])
+          }
+          interruptBuffers.get(wsSessionId)!.push({
+            text: msg.content,
+            outputTarget: '',
+          })
+          break
+        }
+
+        // mark session as busy
+        sessionBusy.set(wsSessionId, true)
+
         try {
           await runAgentTurn(msg.content, {
             provider,
@@ -252,11 +302,18 @@ async function main() {
             sessionId: wsSessionId,
             workingDir: getWorkspaceDir(),
             onChunk: (chunk) => broadcast(wsSessionId, chunk),
+            checkInterrupts: () => {
+              const buffer = interruptBuffers.get(wsSessionId) || []
+              interruptBuffers.set(wsSessionId, [])
+              return buffer
+            },
           })
           await sessionManager.checkCompaction(wsSessionId)
         } catch (err) {
           console.error('agent error:', err)
           broadcast(wsSessionId, { type: 'error', message: String(err) })
+        } finally {
+          sessionBusy.set(wsSessionId, false)
         }
         break
       }
