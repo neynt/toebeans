@@ -6,6 +6,7 @@ import { promisify } from 'util'
 import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
+import { countTokens } from '@anthropic-ai/tokenizer'
 import https from 'https'
 import http from 'http'
 
@@ -135,17 +136,15 @@ export default function createDiscordPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
-  // helper to format bytes in human-friendly units
-  const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes}B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  // helper to format token counts
+  const formatTokens = (tokens: number): string => {
+    return `${tokens}tok`
   }
 
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them
-  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputBytes: number }>()
+  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
 
@@ -386,11 +385,11 @@ export default function createDiscordPlugin(): Plugin {
               messageBuffers.delete(sessionId)
             }
           } else if (message.type === 'tool_use') {
-            // calculate input bytes
+            // calculate input tokens
             const inputStr = typeof message.input === 'string'
               ? message.input
               : JSON.stringify(message.input)
-            const inputBytes = Buffer.byteLength(inputStr, 'utf8')
+            const inputTokens = countTokens(inputStr)
 
             // create concise single-line tool message
             let toolMessage = `🔧 ${message.name}`
@@ -445,29 +444,29 @@ export default function createDiscordPlugin(): Plugin {
               toolMessage += `: ${truncated}`
             }
 
-            // append byte count
-            toolMessage += ` (${formatBytes(inputBytes)} call)`
+            // append token count
+            toolMessage += ` (${formatTokens(inputTokens)} call)`
 
             const msg = await textChannel.send(`\`${toolMessage}\``)
-            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputBytes })
+            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
           } else if (message.type === 'tool_result') {
-            // swap emoji and add result byte count
+            // swap emoji and add result token count
             const toolInfo = toolMessages.get(message.tool_use_id)
             if (toolInfo) {
               try {
                 const msg = await textChannel.messages.fetch(toolInfo.messageId)
                 const status = message.is_error ? '❌' : '✅'
 
-                // calculate result bytes
+                // calculate result tokens
                 const resultStr = typeof message.content === 'string'
                   ? message.content
                   : JSON.stringify(message.content)
-                const resultBytes = Buffer.byteLength(resultStr, 'utf8')
+                const resultTokens = countTokens(resultStr)
 
-                // replace emoji and update byte info
+                // replace emoji and update token info
                 const newContent = toolInfo.originalContent
                   .replace(/^🔧/, status)
-                  .replace(/ \(.*? call\)$/, ` (${formatBytes(toolInfo.inputBytes)} call → ${formatBytes(resultBytes)} result)`)
+                  .replace(/ \(.*? call\)$/, ` (${formatTokens(toolInfo.inputTokens)} call → ${formatTokens(resultTokens)} result)`)
 
                 await msg.edit(`\`${newContent}\``)
                 toolMessages.delete(message.tool_use_id)
