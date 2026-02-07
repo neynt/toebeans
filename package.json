@@ -17,10 +17,12 @@
     "ink-text-input": "^6.0.0",
     "playwright": "^1.58.1",
     "react": "^19.2.4",
+    "turndown": "^7.2.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/turndown": "^5.0.6",
     "react-devtools-core": "^7.0.1"
   },
   "peerDependencies": {

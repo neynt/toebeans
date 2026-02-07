@@ -1,6 +1,16 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
-import { chromium } from 'playwright'
+import { chromium, type Browser } from 'playwright'
+import TurndownService from 'turndown'
+
+let browserPool: Browser | null = null
+
+async function getBrowser(): Promise<Browser> {
+  if (!browserPool) {
+    browserPool = await chromium.launch({ headless: true })
+  }
+  return browserPool
+}
 
 export default function createWebBrowsePlugin(): Plugin {
   return {
@@ -10,24 +20,36 @@ export default function createWebBrowsePlugin(): Plugin {
     tools: [
       {
         name: 'web_browse',
-        description: 'Load a web page with a headless browser and return clean text content.',
+        description: 'Load a web page with a headless browser and return markdown content.',
         inputSchema: {
           type: 'object',
           properties: {
             url: { type: 'string', description: 'The URL to browse' },
             selector: { type: 'string', description: 'Optional CSS selector to extract specific content' },
+            timeout: { type: 'number', description: 'Optional navigation timeout in milliseconds (default: 30000)' },
           },
           required: ['url'],
         },
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-          const { url, selector } = input as { url: string; selector?: string }
+          const { url, selector, timeout = 30000 } = input as { url: string; selector?: string; timeout?: number }
+
+          const browser = await getBrowser()
+          const browserContext = await browser.newContext()
+          const page = await browserContext.newPage()
 
           try {
-            const browser = await chromium.launch({ headless: true })
-            const page = await browser.newPage()
-
-            // navigate and wait for page to be fully loaded
-            await page.goto(url, { waitUntil: 'networkidle' })
+            // navigate with timeout, return partial content on timeout
+            try {
+              await page.goto(url, { waitUntil: 'networkidle', timeout })
+            } catch (err: unknown) {
+              const error = err as Error
+              if (error.message.includes('Timeout') || error.message.includes('timeout')) {
+                // timeout occurred, but continue with whatever loaded
+                console.warn(`navigation timeout for ${url}, using partial content`)
+              } else {
+                throw err
+              }
+            }
 
             // remove clutter elements
             await page.evaluate(() => {
@@ -37,26 +59,39 @@ export default function createWebBrowsePlugin(): Plugin {
               unwanted.forEach((el) => el.remove())
             })
 
-            // extract content
-            let content: string
+            // extract HTML content
+            let html: string
             if (selector) {
               const element = await page.$(selector)
               if (!element) {
-                await browser.close()
+                await browserContext.close()
                 return { content: `error: selector "${selector}" not found`, is_error: true }
               }
-              content = (await element.textContent()) || ''
+              html = (await element.innerHTML()) || ''
             } else {
-              content = await page.evaluate(() => document.body.textContent || '')
+              html = await page.evaluate(() => document.body.innerHTML || '')
             }
 
-            await browser.close()
+            await browserContext.close()
 
-            // clean up whitespace
+            // convert HTML to markdown
+            const turndownService = new TurndownService({
+              headingStyle: 'atx',
+              codeBlockStyle: 'fenced',
+            })
+            let content = turndownService.turndown(html)
+
+            // clean up excessive whitespace
             content = content
               .split('\n')
               .map((line) => line.trim())
-              .filter((line) => line.length > 0)
+              .filter((line, idx, arr) => {
+                // remove excessive blank lines (max 2 consecutive)
+                if (line.length === 0) {
+                  return idx === 0 || idx === arr.length - 1 || arr[idx - 1].length > 0 || arr[idx + 1]?.length > 0
+                }
+                return true
+              })
               .join('\n')
 
             // truncate if too long
@@ -67,11 +102,19 @@ export default function createWebBrowsePlugin(): Plugin {
 
             return { content }
           } catch (err: unknown) {
+            await browserContext.close()
             const error = err as Error
             return { content: `error: ${error.message}`, is_error: true }
           }
         },
       },
     ],
+
+    async destroy() {
+      if (browserPool) {
+        await browserPool.close()
+        browserPool = null
+      }
+    },
   }
 }
