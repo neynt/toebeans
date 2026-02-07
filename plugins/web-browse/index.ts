@@ -34,7 +34,9 @@ export default function createWebBrowsePlugin(): Plugin {
           const { url, selector, timeout = 30000 } = input as { url: string; selector?: string; timeout?: number }
 
           const browser = await getBrowser()
-          const browserContext = await browser.newContext()
+          const browserContext = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          })
           const page = await browserContext.newPage()
 
           try {
@@ -54,9 +56,13 @@ export default function createWebBrowsePlugin(): Plugin {
             // remove clutter elements
             await page.evaluate(() => {
               const unwanted = document.querySelectorAll(
-                'script, style, nav, header, footer, aside, iframe, noscript, [role="navigation"], [role="banner"], [role="complementary"]'
+                'script, style, nav, header, footer, aside, iframe, noscript, svg, canvas, map, [aria-hidden="true"], [role="navigation"], [role="banner"], [role="complementary"]'
               )
               unwanted.forEach((el) => el.remove())
+
+              // remove images with data URIs
+              const dataImages = document.querySelectorAll('img[src^="data:"]')
+              dataImages.forEach((el) => el.remove())
             })
 
             // extract HTML content
@@ -81,18 +87,22 @@ export default function createWebBrowsePlugin(): Plugin {
             })
             let content = turndownService.turndown(html)
 
-            // clean up excessive whitespace
+            // post-process markdown
             content = content
+              // remove image markdown with data URIs
+              .replace(/!\[([^\]]*)\]\(data:[^)]+\)/g, '')
+              // split into lines for further processing
               .split('\n')
               .map((line) => line.trim())
-              .filter((line, idx, arr) => {
-                // remove excessive blank lines (max 2 consecutive)
-                if (line.length === 0) {
-                  return idx === 0 || idx === arr.length - 1 || arr[idx - 1].length > 0 || arr[idx + 1]?.length > 0
-                }
-                return true
+              // remove empty list markers from stripped content
+              .filter((line) => {
+                const isEmptyMarker = /^\*(\s+\*)*\s*$/.test(line)
+                return !isEmptyMarker
               })
               .join('\n')
+
+            // collapse runs of 3+ blank lines into 2
+            content = content.replace(/\n\n\n+/g, '\n\n')
 
             // truncate if too long
             const maxLength = 50000
