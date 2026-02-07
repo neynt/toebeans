@@ -28,6 +28,13 @@ export class AnthropicProvider implements LlmProvider {
         switch (block.type) {
           case 'text':
             return { type: 'text', text: block.text }
+          case 'image': {
+            // skip images over 5MB (Anthropic limit)
+            if (block.source?.type === 'base64' && block.source.data.length > 5_000_000) {
+              return { type: 'text', text: '(image too large, removed)' }
+            }
+            return { type: 'image', source: block.source }
+          }
           case 'tool_use':
             return { type: 'tool_use', id: block.id, name: block.name, input: block.input }
           case 'tool_result':
@@ -37,6 +44,8 @@ export class AnthropicProvider implements LlmProvider {
               content: block.content,
               is_error: block.is_error,
             }
+          default:
+            return { type: 'text', text: `(unsupported block type: ${(block as { type: string }).type})` }
         }
       })
 

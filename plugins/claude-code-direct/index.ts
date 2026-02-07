@@ -145,7 +145,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
           // spawn claude with stdout/stderr redirected to log file via shell
           // this way claude writes directly to the file — survives toebeans dying
           const proc = Bun.spawn(
-            ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
+            ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model opus -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
             {
               cwd,
               env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: logPath },
