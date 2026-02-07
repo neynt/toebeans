@@ -24,6 +24,7 @@ interface DiscordConfig {
 interface QueuedMessage {
   sessionId: string
   message: Message
+  stopRequested?: boolean
 }
 
 async function downloadFile(url: string, outputPath: string): Promise<void> {
@@ -47,6 +48,66 @@ async function downloadFile(url: string, outputPath: string): Promise<void> {
       response.on('error', reject)
     }).on('error', reject)
   })
+}
+
+async function downloadImageAsBase64(url: string): Promise<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> {
+  const tmpInput = join('/tmp', `discord-img-${Date.now()}-input`)
+  const tmpOutput = join('/tmp', `discord-img-${Date.now()}-output`)
+
+  try {
+    // download to temp file
+    await downloadFile(url, tmpInput)
+
+    // check file size - if base64 would exceed ~4MB, resize
+    const stats = await Bun.file(tmpInput).size
+    const base64Size = Math.ceil((stats * 4) / 3) // estimate base64 size
+    const maxSize = 4 * 1024 * 1024 // 4MB
+
+    let finalPath = tmpInput
+    let media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' = 'image/jpeg'
+
+    // detect media type from file extension or content
+    const urlLower = url.toLowerCase()
+    if (urlLower.includes('.png')) media_type = 'image/png'
+    else if (urlLower.includes('.gif')) media_type = 'image/gif'
+    else if (urlLower.includes('.webp')) media_type = 'image/webp'
+
+    if (base64Size > maxSize) {
+      console.log(`discord: image too large (${Math.round(base64Size / 1024 / 1024)}MB), resizing...`)
+
+      // use imagemagick to resize - preserve format by using appropriate extension
+      const ext = media_type === 'image/png' ? 'png' : 'jpg'
+      const outputPath = `${tmpOutput}.${ext}`
+
+      const proc = Bun.spawn(['magick', tmpInput, '-resize', '2048x2048>', '-quality', '85', outputPath], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+
+      const exitCode = await proc.exited
+      if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text()
+        throw new Error(`magick failed: ${stderr}`)
+      }
+
+      finalPath = outputPath
+      // convert gif/webp to jpeg for simplicity after resize
+      if (media_type === 'image/gif' || media_type === 'image/webp') {
+        media_type = 'image/jpeg'
+      }
+    }
+
+    // read and encode
+    const buffer = await Bun.file(finalPath).arrayBuffer()
+    const base64 = Buffer.from(buffer).toString('base64')
+
+    return { media_type, data: base64 }
+  } finally {
+    // cleanup temp files
+    try { await unlink(tmpInput) } catch {}
+    try { await unlink(tmpOutput + '.png') } catch {}
+    try { await unlink(tmpOutput + '.jpg') } catch {}
+  }
 }
 
 async function transcribeAudio(audioPath: string): Promise<string> {
@@ -88,16 +149,25 @@ export default function createDiscordPlugin(): Plugin {
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
 
-  function queueMessage(channelId: string, content: string, author: string, isDM: boolean) {
+  function queueMessage(channelId: string, content: string, author: string, isDM: boolean, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []) {
     const channelContext = isDM
       ? `[DM from ${author}, channel_id: ${channelId}]`
       : `[#channel ${channelId}, from ${author}]`
+
+    const contentBlocks: Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string } }> = [
+      { type: 'text', text: `${channelContext}\n${content}` }
+    ]
+
+    // add image blocks after text
+    for (const img of images) {
+      contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } })
+    }
 
     const msg: QueuedMessage = {
       sessionId: `discord:${channelId}`,
       message: {
         role: 'user',
-        content: [{ type: 'text', text: `${channelContext}\n${content}` }],
+        content: contentBlocks,
       },
     }
     messageQueue.push(msg)
@@ -470,27 +540,63 @@ export default function createDiscordPlugin(): Plugin {
           }
         }
 
+        // handle /stop command (control command, not queued)
+        if (msg.content.trim() === '/stop') {
+          const stopMessage: QueuedMessage = {
+            sessionId: `discord:${msg.channelId}`,
+            message: { role: 'user', content: [] },
+            stopRequested: true,
+          }
+          messageQueue.push(stopMessage)
+          if (resolveWaiter) {
+            resolveWaiter()
+            resolveWaiter = null
+          }
+          return
+        }
+
         // start typing immediately
         const typingChannel = msg.channel as TextChannel | DMChannel
         typingChannel.sendTyping().catch(() => {})
 
         let content = msg.content
+        const images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []
 
-        // handle voice messages / audio attachments
-        if (config!.transcribeVoice !== false && msg.attachments.size > 0) {
+        // handle attachments
+        if (msg.attachments.size > 0) {
+          console.log(`discord: attachments count: ${msg.attachments.size}, types: ${[...msg.attachments.values()].map(a => a.contentType).join(", ")}`)
           for (const attachment of msg.attachments.values()) {
+            // check if it's an image
+            const isImage = attachment.contentType?.startsWith('image/') &&
+                           (attachment.contentType === 'image/png' ||
+                            attachment.contentType === 'image/jpeg' ||
+                            attachment.contentType === 'image/jpg' ||
+                            attachment.contentType === 'image/gif' ||
+                            attachment.contentType === 'image/webp')
+
+            if (isImage) {
+              try {
+                const imageData = await downloadImageAsBase64(attachment.url)
+                images.push(imageData)
+              } catch (err) {
+                console.error('Failed to download image:', err)
+                content += `\n\n[Image attachment - download failed]`
+              }
+              continue
+            }
+
             // check if it's an audio file
-            const isAudio = attachment.contentType?.startsWith('audio/') || 
+            const isAudio = attachment.contentType?.startsWith('audio/') ||
                            /\.(mp3|wav|ogg|m4a|opus|webm)$/i.test(attachment.name || '')
-            
-            if (isAudio) {
+
+            if (isAudio && config!.transcribeVoice !== false) {
               try {
                 const audioDir = join(getDataDir(), 'discord')
                 await mkdir(audioDir, { recursive: true })
                 const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
                 await downloadFile(attachment.url, audioFile)
                 const transcription = await transcribeAudio(audioFile)
-                
+
                 content += `\n\n[Voice message transcription: ${transcription}]`
               } catch (err) {
                 console.error('Failed to transcribe audio:', err)
@@ -500,7 +606,7 @@ export default function createDiscordPlugin(): Plugin {
           }
         }
 
-        queueMessage(msg.channelId, content, msg.author.username, isDM)
+        queueMessage(msg.channelId, content, msg.author.username, isDM, images)
       })
 
       client.on(Events.ClientReady, async () => {

@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from 'bun'
-import type { ClientMessage, ServerMessage, Tool } from './types.ts'
+import type { ClientMessage, ServerMessage, Tool, ContentBlock } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
 import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir, getWorkspaceDir, setLastOutputTarget, getLastOutputTarget, getCurrentSessionId } from './session.ts'
@@ -17,11 +17,12 @@ const sessionSubscribers = new Map<string, Set<ServerWebSocket<WebSocketData>>>(
 
 // track pending interrupt messages per session
 interface InterruptMessage {
-  text: string
+  content: ContentBlock[]
   outputTarget: string
 }
 const interruptBuffers = new Map<string, InterruptMessage[]>()
 const sessionBusy = new Map<string, boolean>()
+const sessionAbort = new Map<string, boolean>()
 
 async function main() {
   console.log('toebeans server starting...')
@@ -152,7 +153,8 @@ async function main() {
         sessionBusy.set(sessionId, true)
 
         try {
-          await runAgentTurn('server restarted successfully. continuing from where you left off.', {
+          sessionAbort.set(sessionId, false)
+          await runAgentTurn([{ type: 'text', text: 'server restarted successfully. continuing from where you left off.' }], {
             provider,
             system: buildSystemPrompt,
             tools: getTools,
@@ -166,6 +168,9 @@ async function main() {
               const buffer = interruptBuffers.get(sessionId) || []
               interruptBuffers.set(sessionId, [])
               return buffer
+            },
+            checkAbort: () => {
+              return sessionAbort.get(sessionId) || false
             },
           })
 
@@ -195,16 +200,28 @@ async function main() {
     ;(async () => {
       try {
         console.log(`[server] entering input loop for plugin: ${name}`)
-        for await (const { sessionId: pluginSessionId, message, outputTarget } of loaded.plugin.input!) {
+        for await (const queuedMsg of loaded.plugin.input!) {
+          const { sessionId: pluginSessionId, message, outputTarget } = queuedMsg as any
           const mainSessionId = await sessionManager.getSessionForMessage()
           const conversationSessionId = mainSessionId
 
+          // handle stop request
+          if ((queuedMsg as any).stopRequested) {
+            console.log(`[${name}] stop requested for session ${conversationSessionId}`)
+            sessionAbort.set(conversationSessionId, true)
+
+            // send confirmation back to the plugin
+            const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
+            if (effectiveOutputTarget) {
+              await routeOutput(effectiveOutputTarget, { type: 'text', text: 'stopped ✋' })
+              await routeOutput(effectiveOutputTarget, { type: 'text_block_end' })
+            }
+            continue
+          }
+
           console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || pluginSessionId})`)
-          const text = message.content
-            .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-            .map(b => b.text)
-            .join('\n')
-          if (!text.trim()) continue
+          const content = message.content
+          if (content.length === 0) continue
 
           // determine output function and target
           const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
@@ -221,14 +238,15 @@ async function main() {
               interruptBuffers.set(conversationSessionId, [])
             }
             interruptBuffers.get(conversationSessionId)!.push({
-              text,
+              content,
               outputTarget: effectiveOutputTarget || '',
             })
             continue
           }
 
-          // mark session as busy
+          // mark session as busy and clear any previous abort flag
           sessionBusy.set(conversationSessionId, true)
+          sessionAbort.set(conversationSessionId, false)
 
           // track output target for auto-resume after restart
           if (effectiveOutputTarget) {
@@ -236,7 +254,7 @@ async function main() {
           }
 
           try {
-            await runAgentTurn(text, {
+            await runAgentTurn(content, {
               provider,
               system: buildSystemPrompt,
               tools: getTools,
@@ -256,6 +274,9 @@ async function main() {
                 interruptBuffers.set(conversationSessionId, [])
                 return buffer
               },
+              checkAbort: () => {
+                return sessionAbort.get(conversationSessionId) || false
+              },
             })
 
             // check if session needs compaction
@@ -269,8 +290,9 @@ async function main() {
               await outputFn({ type: 'error', message: String(err) })
             }
           } finally {
-            // mark session as not busy
+            // mark session as not busy and clear abort flag
             sessionBusy.set(conversationSessionId, false)
+            sessionAbort.set(conversationSessionId, false)
           }
         }
       } catch (err) {
@@ -369,20 +391,21 @@ async function main() {
             interruptBuffers.set(wsSessionId, [])
           }
           interruptBuffers.get(wsSessionId)!.push({
-            text: msg.content,
+            content: [{ type: 'text', text: msg.content }],
             outputTarget: '',
           })
           break
         }
 
-        // mark session as busy
+        // mark session as busy and clear any previous abort flag
         sessionBusy.set(wsSessionId, true)
+        sessionAbort.set(wsSessionId, false)
 
         // clear output target for websocket messages (no auto-resume needed)
         await setLastOutputTarget(null)
 
         try {
-          await runAgentTurn(msg.content, {
+          await runAgentTurn([{ type: 'text', text: msg.content }], {
             provider,
             system: buildSystemPrompt,
             tools: getTools,
@@ -394,6 +417,9 @@ async function main() {
               interruptBuffers.set(wsSessionId, [])
               return buffer
             },
+            checkAbort: () => {
+              return sessionAbort.get(wsSessionId) || false
+            },
           })
           await sessionManager.checkCompaction(wsSessionId)
         } catch (err) {
@@ -401,6 +427,7 @@ async function main() {
           broadcast(wsSessionId, { type: 'error', message: String(err) })
         } finally {
           sessionBusy.set(wsSessionId, false)
+          sessionAbort.set(wsSessionId, false)
         }
         break
       }

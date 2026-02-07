@@ -2,6 +2,7 @@
 
 export type ContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'url'; url: string } | { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
 
@@ -78,4 +79,5 @@ export interface AgentResult {
     cacheRead?: number
     cacheWrite?: number
   }
+  aborted?: boolean
 }

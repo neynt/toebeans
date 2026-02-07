@@ -76,11 +76,12 @@ export interface AgentOptions {
   sessionId: string
   workingDir: string
   onChunk?: (chunk: ServerMessage) => void
-  checkInterrupts?: () => { text: string; outputTarget: string }[]
+  checkInterrupts?: () => { content: ContentBlock[]; outputTarget: string }[]
+  checkAbort?: () => boolean
 }
 
 export async function runAgentTurn(
-  userContent: string,
+  userContent: ContentBlock[],
   options: AgentOptions
 ): Promise<AgentResult> {
   const { provider, system: getSystem, tools: getTools, sessionId, workingDir, onChunk } = options
@@ -91,7 +92,7 @@ export async function runAgentTurn(
   // add user message
   const userMessage: Message = {
     role: 'user',
-    content: [{ type: 'text', text: userContent }],
+    content: userContent,
   }
   messages.push(userMessage)
   await appendMessage(sessionId, userMessage)
@@ -215,12 +216,19 @@ export async function runAgentTurn(
         for (const interrupt of interrupts) {
           const interruptMessage: Message = {
             role: 'user',
-            content: [{ type: 'text', text: interrupt.text }],
+            content: interrupt.content,
           }
           messages.push(interruptMessage)
           await appendMessage(sessionId, interruptMessage)
         }
       }
+    }
+
+    // check if abort was requested
+    if (options.checkAbort?.()) {
+      console.log(`[agent] abort requested for session ${sessionId}`)
+      onChunk?.({ type: 'done', usage: totalUsage })
+      return { messages, usage: totalUsage, aborted: true }
     }
   }
 
