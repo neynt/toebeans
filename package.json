@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/tokenizer": "^0.0.4",
     "@types/react": "^19.2.10",
     "discord.js": "^14.25.1",
     "ink": "^6.6.0",

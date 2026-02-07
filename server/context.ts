@@ -1,3 +1,4 @@
+import { countTokens } from '@anthropic-ai/tokenizer'
 import type { Message, CacheHint } from './types.ts'
 import { loadSession, appendMessage, generateSessionId } from './session.ts'
 
@@ -84,22 +85,11 @@ export class ContextManager {
   }
 
   /**
-   * Rough token estimation (4 chars per token)
+   * Token estimation using official Anthropic tokenizer
    */
   private estimateTokens(): number {
-    let chars = 0
-    for (const msg of this.messages) {
-      for (const block of msg.content) {
-        if (block.type === 'text') {
-          chars += block.text.length
-        } else if (block.type === 'tool_result') {
-          chars += block.content.length
-        } else if (block.type === 'tool_use') {
-          chars += JSON.stringify(block.input).length + block.name.length
-        }
-      }
-    }
-    return Math.ceil(chars / 4)
+    const json = JSON.stringify(this.messages)
+    return countTokens(json)
   }
 
   getSessionId(): string {

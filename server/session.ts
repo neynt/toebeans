@@ -1,14 +1,12 @@
 import { mkdir } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
+import { countTokens } from '@anthropic-ai/tokenizer'
 import type { Message, SessionInfo } from './types.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
 const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
 const STATE_PATH = join(TOEBEANS_DIR, 'state.json')
-
-// rough estimate: 4 chars per token
-const CHARS_PER_TOKEN = 4
 
 interface SessionState {
   currentSessionId: string | null
@@ -179,7 +177,7 @@ export async function isSessionFinished(sessionId: string): Promise<boolean> {
 export async function estimateSessionTokens(sessionId: string): Promise<number> {
   const messages = await loadSession(sessionId)
   const json = JSON.stringify(messages)
-  return Math.ceil(json.length / CHARS_PER_TOKEN)
+  return countTokens(json)
 }
 
 // get session creation time from file mtime (first message)
