@@ -7,7 +7,7 @@ import { mkdir } from 'node:fs/promises'
 
 const TEMPLATE_PATH = new URL('../template/index.ts', import.meta.url).pathname
 
-export default function createPluginsPlugin(): Plugin {
+export default function createPluginsPlugin(serverContext?: { routeOutput: (target: string, message: any) => Promise<void>, config: { notifyOnRestart?: string } }): Plugin {
   return {
     name: 'plugins',
     description: `Create, enable, and disable plugins. User plugins live in ~/.toebeans/plugins/.`,
@@ -96,6 +96,18 @@ export default function createPluginsPlugin(): Plugin {
         },
         async execute(): Promise<ToolResult> {
           console.log('restart_server: exiting...')
+
+          // send shutdown notification if configured
+          if (serverContext?.routeOutput && serverContext?.config?.notifyOnRestart) {
+            try {
+              console.log(`[restart_server] sending shutdown notification to: ${serverContext.config.notifyOnRestart}`)
+              await serverContext.routeOutput(serverContext.config.notifyOnRestart, { type: 'text', text: 'restarting...' })
+              await serverContext.routeOutput(serverContext.config.notifyOnRestart, { type: 'text_block_end' })
+            } catch (err) {
+              console.error(`[restart_server] failed to send shutdown notification:`, err)
+            }
+          }
+
           setTimeout(() => process.exit(0), 100)
           return { content: 'Server is restarting...' }
         },

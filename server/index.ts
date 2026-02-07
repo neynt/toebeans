@@ -2,7 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir, getWorkspaceDir } from './session.ts'
+import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir, getWorkspaceDir, setLastOutputTarget, getLastOutputTarget, getCurrentSessionId } from './session.ts'
 import { join } from 'path'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
@@ -58,6 +58,11 @@ async function main() {
 
   const pluginManager = new PluginManager()
 
+  // prepare server context for plugins (will be populated with routeOutput after it's defined)
+  const serverContext = { routeOutput: null as any, config }
+
+  pluginManager.setServerContext(serverContext)
+
   // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
     try {
@@ -97,6 +102,9 @@ async function main() {
     await targetPlugin.plugin.output(pluginTarget, message)
   }
 
+  // populate routeOutput in server context now that it's defined
+  serverContext.routeOutput = routeOutput
+
   // send restart notification if configured
   if (config.notifyOnRestart) {
     console.log(`[server] sending restart notification to: ${config.notifyOnRestart}`)
@@ -105,6 +113,77 @@ async function main() {
       await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
     } catch (err) {
       console.error(`[server] failed to send restart notification:`, err)
+    }
+  }
+
+  // check if we should auto-continue after restart
+  const lastOutputTarget = await getLastOutputTarget()
+  if (lastOutputTarget) {
+    console.log(`[server] checking for auto-continue (last output target: ${lastOutputTarget})`)
+    try {
+      const sessionId = await getCurrentSessionId()
+      const messages = await loadSession(sessionId)
+
+      // check if last assistant message had restart_server tool call
+      let shouldResume = false
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]
+        if (msg?.role === 'assistant') {
+          // check if this assistant message has a restart_server tool use
+          for (const block of msg.content) {
+            if (block.type === 'tool_use' && block.name === 'restart_server') {
+              shouldResume = true
+              break
+            }
+          }
+          break // only check the last assistant message
+        }
+      }
+
+      if (shouldResume) {
+        console.log(`[server] auto-continuing session ${sessionId} on output target ${lastOutputTarget}`)
+        // clear the last output target so we don't auto-resume again
+        await setLastOutputTarget(null)
+
+        // trigger a new agent turn with a system message
+        const outputFn = (message: ServerMessage) => routeOutput(lastOutputTarget, message)
+
+        // mark session as busy
+        sessionBusy.set(sessionId, true)
+
+        try {
+          await runAgentTurn('server restarted successfully. continuing from where you left off.', {
+            provider,
+            system: buildSystemPrompt,
+            tools: getTools,
+            sessionId,
+            workingDir: getWorkspaceDir(),
+            onChunk: async (chunk) => {
+              broadcast(sessionId, chunk)
+              await outputFn(chunk)
+            },
+            checkInterrupts: () => {
+              const buffer = interruptBuffers.get(sessionId) || []
+              interruptBuffers.set(sessionId, [])
+              return buffer
+            },
+          })
+
+          await sessionManager.checkCompaction(sessionId)
+        } catch (err) {
+          console.error(`[server] auto-continue error:`, err)
+          broadcast(sessionId, { type: 'error', message: String(err) })
+          await outputFn({ type: 'error', message: String(err) })
+        } finally {
+          sessionBusy.set(sessionId, false)
+        }
+      } else {
+        console.log(`[server] no restart_server tool call found in last assistant message, not auto-continuing`)
+        await setLastOutputTarget(null)
+      }
+    } catch (err) {
+      console.error(`[server] error checking for auto-continue:`, err)
+      await setLastOutputTarget(null)
     }
   }
 
@@ -150,6 +229,11 @@ async function main() {
 
           // mark session as busy
           sessionBusy.set(conversationSessionId, true)
+
+          // track output target for auto-resume after restart
+          if (effectiveOutputTarget) {
+            await setLastOutputTarget(effectiveOutputTarget)
+          }
 
           try {
             await runAgentTurn(text, {
@@ -293,6 +377,9 @@ async function main() {
 
         // mark session as busy
         sessionBusy.set(wsSessionId, true)
+
+        // clear output target for websocket messages (no auto-resume needed)
+        await setLastOutputTarget(null)
 
         try {
           await runAgentTurn(msg.content, {

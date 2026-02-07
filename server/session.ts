@@ -13,6 +13,7 @@ const CHARS_PER_TOKEN = 4
 interface SessionState {
   currentSessionId: string | null
   finishedSessions: string[]  // session IDs that are finished
+  lastOutputTarget?: string  // last output target for auto-resume after restart
 }
 
 async function loadState(): Promise<SessionState> {
@@ -212,4 +213,21 @@ export async function setCurrentSessionId(sessionId: string): Promise<void> {
   const state = await loadState()
   state.currentSessionId = sessionId
   await saveState(state)
+}
+
+// set the last output target (for auto-resume after restart)
+export async function setLastOutputTarget(outputTarget: string | null): Promise<void> {
+  const state = await loadState()
+  if (outputTarget) {
+    state.lastOutputTarget = outputTarget
+  } else {
+    delete state.lastOutputTarget
+  }
+  await saveState(state)
+}
+
+// get the last output target
+export async function getLastOutputTarget(): Promise<string | null> {
+  const state = await loadState()
+  return state.lastOutputTarget || null
 }

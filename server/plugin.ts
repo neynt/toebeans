@@ -54,7 +54,7 @@ export interface LoadedPlugin {
   config: unknown
 }
 
-const BUILTIN_PLUGINS: Record<string, () => Plugin> = {
+const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'bash': createBashPlugin,
   'memory': createMemoryPlugin,
   'discord': createDiscordPlugin,
@@ -67,6 +67,11 @@ const BUILTIN_PLUGINS: Record<string, () => Plugin> = {
 
 export class PluginManager {
   private plugins = new Map<string, LoadedPlugin>()
+  private serverContext?: any
+
+  setServerContext(context: any) {
+    this.serverContext = context
+  }
 
   // discover all available plugin names (builtins + user plugins dir)
   async discoverAll(): Promise<string[]> {
@@ -97,7 +102,7 @@ export class PluginManager {
       // fall back to builtin
       const factory = BUILTIN_PLUGINS[name]
       if (factory) {
-        plugin = factory()
+        plugin = factory(this.serverContext)
       } else {
         throw new Error(`Plugin not found: ${name}`)
       }
