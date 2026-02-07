@@ -136,11 +136,6 @@ export default function createDiscordPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
-  // helper to format token counts
-  const formatTokens = (tokens: number): string => {
-    return `${tokens}tok`
-  }
-
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them
@@ -445,7 +440,7 @@ export default function createDiscordPlugin(): Plugin {
             }
 
             // append token count
-            toolMessage += ` (${formatTokens(inputTokens)} call)`
+            toolMessage += ` (${inputTokens} tokens)`
 
             const msg = await textChannel.send(`\`${toolMessage}\``)
             toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
@@ -466,7 +461,7 @@ export default function createDiscordPlugin(): Plugin {
                 // replace emoji and update token info
                 const newContent = toolInfo.originalContent
                   .replace(/^🔧/, status)
-                  .replace(/ \(.*? call\)$/, ` (${formatTokens(toolInfo.inputTokens)} call → ${formatTokens(resultTokens)} result)`)
+                  .replace(/ \(.*? tokens\)$/, ` (${toolInfo.inputTokens} + ${resultTokens} tokens)`)
 
                 await msg.edit(`\`${newContent}\``)
                 toolMessages.delete(message.tool_use_id)
