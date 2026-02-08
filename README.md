@@ -4,8 +4,6 @@
 
 ## quick start
 
-(WIP)
-
 1. clone this repo
 2. `bun run server`
 
