@@ -1,8 +1,7 @@
 # toebeans
 
-<img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png" width="400px">
-
-a simple extensible personal assistant, inspired by [openclaw](https://github.com/openclaw/openclaw).
+<p align="center"><img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png" width="400px"></p>
+<p align="center">a simple extensible personal assistant</p>
 
 ## core concepts
 
