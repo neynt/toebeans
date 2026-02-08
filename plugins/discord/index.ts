@@ -17,7 +17,7 @@ interface DiscordConfig {
   token: string
   allowedUsers: string[]  // user IDs allowed to interact (required for safety)
   channels?: string[]  // channel IDs to listen to (empty = all accessible)
-  respondToMentions?: boolean  // only respond when mentioned
+  onlyRespondToMentions?: boolean  // in guilds, only process messages that @mention the bot
   allowDMs?: boolean  // respond to direct messages (default: true)
   transcribeVoice?: boolean  // transcribe voice messages (default: true)
   sessionManager?: any  // session manager instance for slash commands
@@ -565,7 +565,7 @@ export default function createDiscordPlugin(): Plugin {
           }
 
           // filter by mentions if configured
-          if (config!.respondToMentions && client?.user && !msg.mentions.has(client.user.id)) {
+          if (config!.onlyRespondToMentions && client?.user && !msg.mentions.has(client.user.id)) {
             return
           }
         }
