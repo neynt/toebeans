@@ -7,6 +7,7 @@ import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
+import { countToolResultTokens } from '../../server/tokens.ts'
 import https from 'https'
 import http from 'http'
 
@@ -23,8 +24,8 @@ interface DiscordConfig {
 }
 
 interface QueuedMessage {
-  sessionId: string
   message: Message
+  outputTarget?: string
   stopRequested?: boolean
 }
 
@@ -158,11 +159,11 @@ export default function createDiscordPlugin(): Plugin {
     }
 
     const msg: QueuedMessage = {
-      sessionId: `discord:${channelId}`,
       message: {
         role: 'user',
         content: contentBlocks,
       },
+      outputTarget: `discord:${channelId}`,
     }
     messageQueue.push(msg)
     if (resolveWaiter) {
@@ -490,11 +491,8 @@ export default function createDiscordPlugin(): Plugin {
                 const msg = await textChannel.messages.fetch(toolInfo.messageId)
                 const status = message.is_error ? '❌' : '✅'
 
-                // calculate result tokens
-                const resultStr = typeof message.content === 'string'
-                  ? message.content
-                  : JSON.stringify(message.content)
-                const resultTokens = countTokens(resultStr)
+                // calculate result tokens (image-aware)
+                const resultTokens = countToolResultTokens(message.content)
 
                 // replace emoji and update token info
                 const newContent = toolInfo.originalContent
@@ -575,8 +573,8 @@ export default function createDiscordPlugin(): Plugin {
         // handle /stop command (control command, not queued)
         if (msg.content.trim() === '/stop') {
           const stopMessage: QueuedMessage = {
-            sessionId: `discord:${msg.channelId}`,
             message: { role: 'user', content: [] },
+            outputTarget: `discord:${msg.channelId}`,
             stopRequested: true,
           }
           messageQueue.push(stopMessage)
