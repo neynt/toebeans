@@ -17,6 +17,7 @@ import createGoogleCalendarPlugin from '../plugins/google-calendar/index.ts'
 import createNanoBananaPlugin from '../plugins/nano-banana/index.ts'
 import createOpenAICodexPlugin from '../plugins/openai-codex/index.ts'
 import createViewImagePlugin from '../plugins/view-image/index.ts'
+import createGmailPlugin from '../plugins/gmail/index.ts'
 
 export interface Session {
   id: string
@@ -73,6 +74,7 @@ const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'nano-banana': createNanoBananaPlugin,
   'openai-codex': createOpenAICodexPlugin,
   'view-image': createViewImagePlugin,
+  'gmail': createGmailPlugin,
 }
 
 export class PluginManager {
