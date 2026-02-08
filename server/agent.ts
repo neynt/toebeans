@@ -1,8 +1,10 @@
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message, ContentBlock, Tool, ToolContext, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
+import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
 import { loadSession, appendMessage } from './session.ts'
+import { countTokens } from '@anthropic-ai/tokenizer'
 
 const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
+const MAX_TOOL_RESULT_TOKENS = 10_000
 
 // repair message history to handle interrupted tool calls
 // ensures every tool_use has a matching tool_result
@@ -60,13 +62,67 @@ export function repairMessages(messages: Message[]): Message[] {
   return repaired
 }
 
-function truncateToolResult(content: string): string {
+function truncateString(content: string): string {
   if (content.length <= MAX_TOOL_RESULT_LENGTH) {
     return content
   }
   const half = Math.floor(MAX_TOOL_RESULT_LENGTH / 2)
   const truncatedBytes = content.length - MAX_TOOL_RESULT_LENGTH
   return content.slice(0, half) + `\n\n... [truncated ${truncatedBytes} characters] ...\n\n` + content.slice(-half)
+}
+
+function truncateToolResult(content: ToolResultContent): ToolResultContent {
+  if (typeof content === 'string') {
+    return truncateString(content)
+  }
+  // for rich content, truncate text blocks only
+  return content.map(block => {
+    if (block.type === 'text') {
+      return { ...block, text: truncateString(block.text) }
+    }
+    return block
+  })
+}
+
+function toolResultText(content: ToolResultContent): string {
+  if (typeof content === 'string') return content
+  return content
+    .filter(b => b.type === 'text')
+    .map(b => (b as { type: 'text'; text: string }).text)
+    .join('\n')
+}
+
+function truncateStringByTokens(text: string, tokenCount: number): string {
+  if (tokenCount <= MAX_TOOL_RESULT_TOKENS) return text
+  // estimate char cutoff — ~4 chars/token, trim conservatively then verify
+  let cutoff = Math.floor(text.length * (MAX_TOOL_RESULT_TOKENS / tokenCount) * 0.9)
+  let trimmed = text.slice(0, cutoff)
+  // expand slightly if we undershot
+  while (countTokens(trimmed) < MAX_TOOL_RESULT_TOKENS && cutoff < text.length) {
+    cutoff = Math.min(cutoff + 500, text.length)
+    trimmed = text.slice(0, cutoff)
+  }
+  // shrink if we overshot
+  while (countTokens(trimmed) > MAX_TOOL_RESULT_TOKENS && cutoff > 0) {
+    cutoff -= 200
+    trimmed = text.slice(0, cutoff)
+  }
+  return trimmed + `\n\n[truncated — result was ${tokenCount} tokens, limit is ${MAX_TOOL_RESULT_TOKENS}]`
+}
+
+function truncateToolResultByTokens(content: ToolResultContent): ToolResultContent {
+  const text = toolResultText(content)
+  const tokens = countTokens(text)
+  if (tokens <= MAX_TOOL_RESULT_TOKENS) return content
+
+  if (typeof content === 'string') {
+    return truncateStringByTokens(content, tokens)
+  }
+  // for rich content, truncate text blocks proportionally
+  // simple approach: concatenate all text, truncate, return as single text block + keep image blocks
+  const truncatedText = truncateStringByTokens(text, tokens)
+  const nonTextBlocks = content.filter(b => b.type !== 'text')
+  return [{ type: 'text' as const, text: truncatedText }, ...nonTextBlocks]
 }
 
 export interface AgentOptions {
@@ -179,7 +235,7 @@ export async function runAgentTurn(
     for (const block of assistantContent) {
       if (block.type === 'tool_use') {
         const tool = toolMap.get(block.name)
-        let result: { content: string; is_error?: boolean }
+        let result: { content: ToolResultContent; is_error?: boolean }
 
         if (!tool) {
           result = { content: `Unknown tool: ${block.name}`, is_error: true }
@@ -187,6 +243,7 @@ export async function runAgentTurn(
           try {
             result = await tool.execute(block.input, toolContext)
             result.content = truncateToolResult(result.content)
+            result.content = truncateToolResultByTokens(result.content)
           } catch (err) {
             result = { content: `Tool error: ${err}`, is_error: true }
           }
