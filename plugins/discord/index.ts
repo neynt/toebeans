@@ -276,6 +276,44 @@ export default function createDiscordPlugin(): Plugin {
       },
     },
     {
+      name: 'discord_send_image',
+      description: 'Send an image file to a Discord channel.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID to send to' },
+          image_path: { type: 'string', description: 'Path to the image file to send' },
+          message: { type: 'string', description: 'Optional message text to include with the image' },
+        },
+        required: ['channel_id', 'image_path'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, image_path, message } = input as { channel_id: string; image_path: string; message?: string }
+        try {
+          const file = Bun.file(image_path)
+          if (!(await file.exists())) {
+            return { content: `image file not found: ${image_path}`, is_error: true }
+          }
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+          const buffer = Buffer.from(await file.arrayBuffer())
+          const filename = image_path.split('/').pop() || 'image.png'
+          await (channel as TextChannel | DMChannel).send({
+            content: message || undefined,
+            files: [{ attachment: buffer, name: filename }],
+          })
+          return { content: `image sent to channel ${channel_id}` }
+        } catch (err) {
+          return { content: `Failed to send image: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
       name: 'discord_list_channels',
       description: 'List accessible text channels in all guilds.',
       inputSchema: {
@@ -408,7 +446,7 @@ export default function createDiscordPlugin(): Plugin {
                 const truncated = task.length > 50 ? task.slice(0, 47) + '...' : task
                 toolMessage += `: ${truncated}`
               }
-            } else if (message.name === 'discord_send' || message.name === 'discord_read_history' || message.name === 'discord_react') {
+            } else if (message.name === 'discord_send' || message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react') {
               // just the tool name, no params
             } else if (message.name === 'remember' || message.name === 'recall') {
               const topic = (message.input as any)?.topic || (message.input as any)?.query
