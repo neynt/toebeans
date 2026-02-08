@@ -221,6 +221,7 @@ export async function getSessionCreatedAt(sessionId: string): Promise<Date | nul
 export async function getSessionLastActivity(sessionId: string): Promise<Date | null> {
   const path = getSessionPath(sessionId)
   const file = Bun.file(path)
+  if (!(await file.exists())) return null
   const stat = await file.stat()
   return stat ? new Date(stat.mtime) : null
 }
