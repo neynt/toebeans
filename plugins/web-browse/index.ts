@@ -1,10 +1,10 @@
 import type { Plugin } from '../../server/plugin.ts'
-import type { ToolResult, ToolContext } from '../../server/types.ts'
+import type { ToolResult, ToolContext, ToolResultContent } from '../../server/types.ts'
 import { getDataDir, getWorkspaceDir } from '../../server/session.ts'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import TurndownService from 'turndown'
 import { join } from 'path'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, unlink } from 'node:fs/promises'
 
 // --- cookie persistence ---
 
@@ -177,6 +177,32 @@ async function takeScreenshot(page: Page): Promise<string> {
   return filepath
 }
 
+const MAX_SCREENSHOT_WIDTH = 1024
+
+async function screenshotToBase64(filepath: string): Promise<{ media_type: 'image/png' | 'image/jpeg'; data: string }> {
+  const resized = filepath.replace(/\.png$/, '-resized.png')
+  try {
+    // resize to max width, preserving aspect ratio
+    const proc = Bun.spawn(['magick', filepath, '-resize', `${MAX_SCREENSHOT_WIDTH}x>`, resized], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text()
+      console.warn(`magick resize failed: ${stderr}, using original`)
+      // fall back to original
+      const buffer = await Bun.file(filepath).arrayBuffer()
+      return { media_type: 'image/png', data: Buffer.from(buffer).toString('base64') }
+    }
+
+    const buffer = await Bun.file(resized).arrayBuffer()
+    return { media_type: 'image/png', data: Buffer.from(buffer).toString('base64') }
+  } finally {
+    try { await unlink(resized) } catch {}
+  }
+}
+
 // --- plugin ---
 
 export default function createWebBrowsePlugin(): Plugin {
@@ -331,12 +357,12 @@ export default function createWebBrowsePlugin(): Plugin {
             await saveCookies(context)
             touchSession(id)
 
-            const content = await extractPageMarkdown(page)
+            const markdownContent = await extractPageMarkdown(page)
             const result: Record<string, any> = {
               session_id: id,
               url: page.url(),
               title: await page.title(),
-              content,
+              content: markdownContent,
             }
             if (screenshots.length > 0) result.screenshots = screenshots
             if (evalResults.length > 0) result.eval_results = evalResults
@@ -376,7 +402,13 @@ export default function createWebBrowsePlugin(): Plugin {
             try {
               const path = await takeScreenshot(session.page)
               await saveCookies(session.context)
-              return { content: JSON.stringify({ session_id, path, url: session.page.url() }) }
+              const imageData = await screenshotToBase64(path)
+              return {
+                content: [
+                  { type: 'text', text: JSON.stringify({ session_id, path, url: session.page.url() }) },
+                  { type: 'image', source: { type: 'base64', media_type: imageData.media_type, data: imageData.data } },
+                ],
+              }
             } catch (err: unknown) {
               return { content: `error: ${(err as Error).message}`, is_error: true }
             }
@@ -403,7 +435,13 @@ export default function createWebBrowsePlugin(): Plugin {
               const path = await takeScreenshot(page)
               await saveCookies(context)
               await context.close()
-              return { content: JSON.stringify({ path, url }) }
+              const imageData = await screenshotToBase64(path)
+              return {
+                content: [
+                  { type: 'text', text: JSON.stringify({ path, url }) },
+                  { type: 'image', source: { type: 'base64', media_type: imageData.media_type, data: imageData.data } },
+                ],
+              }
             } catch (err: unknown) {
               await context.close()
               return { content: `error: ${(err as Error).message}`, is_error: true }
