@@ -122,7 +122,8 @@ async function main() {
   if (lastOutputTarget) {
     console.log(`[server] checking for auto-continue (last output target: ${lastOutputTarget})`)
     try {
-      const sessionId = await getCurrentSessionId()
+      const resumeRoute = lastOutputTarget  // route = outputTarget string
+      const sessionId = await getCurrentSessionId(resumeRoute)
       const messages = await loadSession(sessionId)
 
       // check if last assistant message had restart_server tool call
@@ -174,7 +175,7 @@ async function main() {
             },
           })
 
-          await sessionManager.checkCompaction(sessionId)
+          await sessionManager.checkCompaction(sessionId, resumeRoute)
         } catch (err) {
           console.error(`[server] auto-continue error:`, err)
           broadcast(sessionId, { type: 'error', message: String(err) })
@@ -202,8 +203,10 @@ async function main() {
         console.log(`[server] entering input loop for plugin: ${name}`)
         for await (const queuedMsg of loaded.plugin.input!) {
           const { message, outputTarget } = queuedMsg as any
-          const mainSessionId = await sessionManager.getSessionForMessage()
-          const conversationSessionId = mainSessionId
+          // route = outputTarget (e.g. "discord:1466679760976609393")
+          // this ensures each channel/DM/source gets its own session
+          const route = outputTarget || name
+          const conversationSessionId = await sessionManager.getSessionForMessage(route)
 
           // handle stop request
           if ((queuedMsg as any).stopRequested) {
@@ -218,7 +221,7 @@ async function main() {
             continue
           }
 
-          console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || 'none'})`)
+          console.log(`[${name}] message -> session: ${conversationSessionId} (route: ${route})`)
           const content = message.content
           if (content.length === 0) continue
 
@@ -279,7 +282,7 @@ async function main() {
             })
 
             // check if session needs compaction
-            await sessionManager.checkCompaction(conversationSessionId)
+            await sessionManager.checkCompaction(conversationSessionId, route)
           } catch (err) {
             console.error(`agent error for ${conversationSessionId}:`, err)
             broadcast(conversationSessionId, { type: 'error', message: String(err) })
@@ -379,8 +382,9 @@ async function main() {
       }
 
       case 'message': {
-        // use main session for websocket messages too
-        const wsSessionId = await sessionManager.getSessionForMessage()
+        // websocket messages get their own route
+        const wsRoute = 'ws'
+        const wsSessionId = await sessionManager.getSessionForMessage(wsRoute)
         console.log(`message for session ${wsSessionId}: ${msg.content.slice(0, 50)}...`)
 
         // check if session is busy
@@ -420,7 +424,7 @@ async function main() {
               return sessionAbort.get(wsSessionId) || false
             },
           })
-          await sessionManager.checkCompaction(wsSessionId)
+          await sessionManager.checkCompaction(wsSessionId, wsRoute)
         } catch (err) {
           console.error('agent error:', err)
           broadcast(wsSessionId, { type: 'error', message: String(err) })
@@ -454,18 +458,21 @@ async function main() {
         return new Response('ok')
       }
 
-      // get current main session (for TUI to connect to)
+      // get current session for a route (for TUI to connect to)
+      // optional ?route= param, defaults to 'ws'
       if (url.pathname === '/session/current') {
-        const sessionId = await sessionManager.getSessionForMessage()
-        return new Response(JSON.stringify({ sessionId }), {
+        const route = url.searchParams.get('route') || 'ws'
+        const sessionId = await sessionManager.getSessionForMessage(route)
+        return new Response(JSON.stringify({ sessionId, route }), {
           headers: { 'content-type': 'application/json' },
         })
       }
 
       // legacy: /session/new now returns current session
       if (url.pathname === '/session/new') {
-        const sessionId = await sessionManager.getSessionForMessage()
-        return new Response(JSON.stringify({ sessionId }), {
+        const route = url.searchParams.get('route') || 'ws'
+        const sessionId = await sessionManager.getSessionForMessage(route)
+        return new Response(JSON.stringify({ sessionId, route }), {
           headers: { 'content-type': 'application/json' },
         })
       }
