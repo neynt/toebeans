@@ -15,6 +15,7 @@ import createPluginsPlugin from '../plugins/plugins/index.ts'
 import createGoogleSheetsPlugin from '../plugins/google-sheets/index.ts'
 import createNanoBananaPlugin from '../plugins/nano-banana/index.ts'
 import createOpenAICodexPlugin from '../plugins/openai-codex/index.ts'
+import createViewImagePlugin from '../plugins/view-image/index.ts'
 
 export interface Session {
   id: string
@@ -69,6 +70,7 @@ const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'google-sheets': createGoogleSheetsPlugin,
   'nano-banana': createNanoBananaPlugin,
   'openai-codex': createOpenAICodexPlugin,
+  'view-image': createViewImagePlugin,
 }
 
 export class PluginManager {
