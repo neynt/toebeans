@@ -402,13 +402,7 @@ export default function createWebBrowsePlugin(): Plugin {
             try {
               const path = await takeScreenshot(session.page)
               await saveCookies(session.context)
-              const imageData = await screenshotToBase64(path)
-              return {
-                content: [
-                  { type: 'text', text: JSON.stringify({ session_id, path, url: session.page.url() }) },
-                  { type: 'image', source: { type: 'base64', media_type: imageData.media_type, data: imageData.data } },
-                ],
-              }
+              return { content: JSON.stringify({ session_id, path, url: session.page.url() }) }
             } catch (err: unknown) {
               return { content: `error: ${(err as Error).message}`, is_error: true }
             }
@@ -435,13 +429,7 @@ export default function createWebBrowsePlugin(): Plugin {
               const path = await takeScreenshot(page)
               await saveCookies(context)
               await context.close()
-              const imageData = await screenshotToBase64(path)
-              return {
-                content: [
-                  { type: 'text', text: JSON.stringify({ path, url }) },
-                  { type: 'image', source: { type: 'base64', media_type: imageData.media_type, data: imageData.data } },
-                ],
-              }
+              return { content: JSON.stringify({ path, url }) }
             } catch (err: unknown) {
               await context.close()
               return { content: `error: ${(err as Error).message}`, is_error: true }
