@@ -12,6 +12,8 @@ import createTimersPlugin from '../plugins/timers/index.ts'
 import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct/index.ts'
 import createWebBrowsePlugin from '../plugins/web-browse/index.ts'
 import createPluginsPlugin from '../plugins/plugins/index.ts'
+import createGoogleSheetsPlugin from '../plugins/google-sheets/index.ts'
+import createNanoBananaPlugin from '../plugins/nano-banana/index.ts'
 
 export interface Session {
   id: string
@@ -63,6 +65,8 @@ const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'claude-code-direct': createClaudeCodeDirectPlugin,
   'web-browse': createWebBrowsePlugin,
   'plugins': createPluginsPlugin,
+  'google-sheets': createGoogleSheetsPlugin,
+  'nano-banana': createNanoBananaPlugin,
 }
 
 export class PluginManager {
