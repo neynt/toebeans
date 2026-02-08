@@ -33,24 +33,24 @@ included plugins:
 
 ## manifesto
 
-i tried [openclaw](https://github.com/openclaw/openclaw) but quickly ran into
-dissatisfaction. there was a focus on scope over quality that pervaded my every
-interaction with it. the very polished onboarding script gave you the
-invigorating rush of *creating life*, but after that wore off, it felt clunky
-and impenetrable. the discord plugin had a bug where it wouldn't send you any
-messages until the full agent turn was done, and then it'd give you a firehose
-of everything all at once. tts failed to work, and when it did was robotic, and
-it only offered APIs and low-quality local options -- not qwen3-tts, which felt
-like it'd be trivial to set up. and somehow it chewed through hundreds of
-dollars of API credits in the blink of an eye. it insisted on DIYing code and
-its tools for spawning headless coding agents felt quite undercooked. browser
-integration was also messy -- why do i need an extension into an existing
-browser when you can just playwright everything? it had two systems for
-scheduling events -- heartbeats and cron -- which felt at once uninspectable
-and wholly unnecessary. before long its workspace directory was a mess. i had
-no idea what was feeding into the context window at any given point in time, or
-when it would decide to compact, or create a new session. and of course the
-nest of bitcoin jackers on molthub was terrifying.
+i tried [openclaw](https://github.com/openclaw/openclaw) -- it is an incredible
+concept, but i quickly ran into issues. there was a focus on scope over quality
+that pervaded my every interaction with it. the very polished onboarding script
+gave you the invigorating rush of *creating life*, but after that wore off, it
+felt clunky and impenetrable. the discord plugin had a bug where it wouldn't
+send you any messages until the full agent turn was done, and then it'd give
+you a firehose of everything all at once. tts failed to work, and when it did
+was robotic, and it only offered APIs and low-quality local options -- not
+qwen3-tts, which felt like it'd be trivial to set up. and somehow it chewed
+through hundreds of dollars of API credits in the blink of an eye. it insisted
+on DIYing code and its tools for spawning headless coding agents felt quite
+undercooked. browser integration was also messy -- why do i need an extension
+into an existing browser when you can just playwright everything? it had two
+systems for scheduling events -- heartbeats and cron -- which felt at once
+uninspectable and wholly unnecessary. before long its workspace directory was a
+mess. i had no idea what was feeding into the context window at any given point
+in time, or when it would decide to compact, or create a new session. and of
+course the nest of bitcoin jackers on molthub was terrifying.
 
 [nanoclaw](https://github.com/gavrielc/nanoclaw.git) seemed like a step in the
 right direction. i admire its simplicity. but i think it goes a little too far.
