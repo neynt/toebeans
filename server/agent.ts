@@ -2,6 +2,7 @@ import type { LlmProvider } from './llm-provider.ts'
 import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
 import { loadSession, appendMessage } from './session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
+import { estimateImageTokens } from './tokens.ts'
 
 const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
 const MAX_TOOL_RESULT_TOKENS = 10_000
@@ -92,35 +93,47 @@ function toolResultText(content: ToolResultContent): string {
     .join('\n')
 }
 
-function truncateStringByTokens(text: string, tokenCount: number): string {
-  if (tokenCount <= MAX_TOOL_RESULT_TOKENS) return text
+function truncateStringByTokens(text: string, tokenCount: number, maxTokens: number = MAX_TOOL_RESULT_TOKENS): string {
+  if (tokenCount <= maxTokens) return text
   // estimate char cutoff — ~4 chars/token, trim conservatively then verify
-  let cutoff = Math.floor(text.length * (MAX_TOOL_RESULT_TOKENS / tokenCount) * 0.9)
+  let cutoff = Math.floor(text.length * (maxTokens / tokenCount) * 0.9)
   let trimmed = text.slice(0, cutoff)
   // expand slightly if we undershot
-  while (countTokens(trimmed) < MAX_TOOL_RESULT_TOKENS && cutoff < text.length) {
+  while (countTokens(trimmed) < maxTokens && cutoff < text.length) {
     cutoff = Math.min(cutoff + 500, text.length)
     trimmed = text.slice(0, cutoff)
   }
   // shrink if we overshot
-  while (countTokens(trimmed) > MAX_TOOL_RESULT_TOKENS && cutoff > 0) {
+  while (countTokens(trimmed) > maxTokens && cutoff > 0) {
     cutoff -= 200
     trimmed = text.slice(0, cutoff)
   }
-  return trimmed + `\n\n[truncated — result was ${tokenCount} tokens, limit is ${MAX_TOOL_RESULT_TOKENS}]`
+  return trimmed + `\n\n[truncated — result was ${tokenCount} tokens, limit is ${maxTokens}]`
 }
 
 function truncateToolResultByTokens(content: ToolResultContent): ToolResultContent {
   const text = toolResultText(content)
-  const tokens = countTokens(text)
-  if (tokens <= MAX_TOOL_RESULT_TOKENS) return content
+  const textTokens = countTokens(text)
+
+  // calculate image tokens from any image blocks
+  let imageTokens = 0
+  if (typeof content !== 'string') {
+    for (const block of content) {
+      if (block.type === 'image') {
+        imageTokens += estimateImageTokens(block.source)
+      }
+    }
+  }
+
+  const totalTokens = textTokens + imageTokens
+  if (totalTokens <= MAX_TOOL_RESULT_TOKENS) return content
 
   if (typeof content === 'string') {
-    return truncateStringByTokens(content, tokens)
+    return truncateStringByTokens(content, textTokens)
   }
-  // for rich content, truncate text blocks proportionally
-  // simple approach: concatenate all text, truncate, return as single text block + keep image blocks
-  const truncatedText = truncateStringByTokens(text, tokens)
+  // for rich content, give text the remaining budget after image tokens
+  const textBudget = Math.max(100, MAX_TOOL_RESULT_TOKENS - imageTokens)
+  const truncatedText = truncateStringByTokens(text, textTokens, textBudget)
   const nonTextBlocks = content.filter(b => b.type !== 'text')
   return [{ type: 'text' as const, text: truncatedText }, ...nonTextBlocks]
 }
