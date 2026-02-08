@@ -1,6 +1,6 @@
-import { countTokens } from '@anthropic-ai/tokenizer'
 import type { Message, CacheHint } from './types.ts'
 import { loadSession, appendMessage, generateSessionId } from './session.ts'
+import { countMessagesTokens } from './tokens.ts'
 
 const CACHE_EXPIRY_MS = 5 * 60 * 1000 // 5 minutes (Anthropic cache lifetime)
 const CACHE_REFRESH_BUFFER_MS = 30 * 1000 // refresh 30s before expiry
@@ -84,12 +84,8 @@ export class ContextManager {
     return newSessionId
   }
 
-  /**
-   * Token estimation using official Anthropic tokenizer
-   */
   private estimateTokens(): number {
-    const json = JSON.stringify(this.messages)
-    return countTokens(json)
+    return countMessagesTokens(this.messages)
   }
 
   getSessionId(): string {

@@ -203,8 +203,7 @@ export async function isSessionFinished(sessionId: string): Promise<boolean> {
 // estimate token count for a session
 export async function estimateSessionTokens(sessionId: string): Promise<number> {
   const messages = await loadSession(sessionId)
-  const json = JSON.stringify(messages)
-  return countTokens(json)
+  return countMessagesTokens(messages)
 }
 
 // get session creation time from file mtime (first message)
