@@ -1,15 +1,18 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { Tool, ToolResult, ToolContext, Message } from '../../server/types.ts'
-import { mkdir, readdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, stat, symlink, access } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 
 const LOG_DIR = join(homedir(), '.toebeans', 'claude-code')
+const WORKTREE_BASE = join(homedir(), 'code', 'toebeans-wt')
 
 interface ProcessInfo {
   proc: ReturnType<typeof Bun.spawn>
   pid: number
   task: string
+  worktree?: string
+  originalWorkingDir?: string
 }
 
 // track running processes by session id
@@ -23,6 +26,8 @@ interface MetaFile {
   pid: number
   exitCode?: number
   endedAt?: string
+  worktree?: string
+  originalWorkingDir?: string
 }
 
 async function ensureLogDir(): Promise<void> {
@@ -68,6 +73,54 @@ interface ClaudeCodeDirectConfig {
   notifyTarget?: string
 }
 
+/**
+ * After a worktree task completes, merge the branch back and clean up.
+ * If there's a conflict, spawn a new claude code session to resolve it.
+ * Returns the notification message to queue.
+ */
+async function handleWorktreeMerge(
+  worktree: string,
+  originalWorkingDir: string,
+  sessionId: string,
+  taskPreview: string,
+  logPath: string,
+  taskStatus: string,
+  spawnConflictResolver?: (task: string, cwd: string) => void,
+): Promise<string> {
+  const worktreePath = join(WORKTREE_BASE, worktree)
+
+  // attempt merge
+  const mergeResult = Bun.spawnSync(
+    ['git', 'merge', worktree],
+    { cwd: originalWorkingDir }
+  )
+
+  if (mergeResult.exitCode === 0) {
+    // merge succeeded — clean up worktree and branch
+    console.log(`[claude-code-direct] merge of ${worktree} succeeded, cleaning up`)
+
+    Bun.spawnSync(['git', 'worktree', 'remove', worktreePath], { cwd: originalWorkingDir })
+    Bun.spawnSync(['git', 'branch', '-d', worktree], { cwd: originalWorkingDir })
+
+    return `[Claude Code task ${taskStatus} — worktree merged successfully]\nSession: ${sessionId}\nTask: ${taskPreview}\nBranch "${worktree}" merged and cleaned up.\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+  }
+
+  // merge failed — likely conflict
+  const mergeStderr = mergeResult.stderr.toString().trim()
+  const mergeStdout = mergeResult.stdout.toString().trim()
+  const conflictOutput = [mergeStdout, mergeStderr].filter(Boolean).join('\n')
+
+  console.log(`[claude-code-direct] merge of ${worktree} failed, spawning conflict resolver`)
+
+  const conflictTask = `There's a merge conflict from branch "${worktree}". Resolve it, keeping changes from both sides where possible. Run \`git add\` on resolved files and \`git commit\` to complete the merge.\n\nConflict output:\n${conflictOutput}`
+
+  if (spawnConflictResolver) {
+    spawnConflictResolver(conflictTask, originalWorkingDir)
+  }
+
+  return `[Claude Code task ${taskStatus} — merge conflict]\nSession: ${sessionId}\nTask: ${taskPreview}\nBranch "${worktree}" had merge conflicts. A conflict resolution session has been spawned in ${originalWorkingDir}.\nThe worktree at ${worktreePath} has NOT been removed (branch still exists for reference).\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+}
+
 export default function createClaudeCodeDirectPlugin(): Plugin {
   let config: ClaudeCodeDirectConfig | null = null
   const messageQueue: QueuedMessage[] = []
@@ -90,6 +143,55 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
     } else {
       console.log('[claude-code-direct] no waiter to resolve')
     }
+  }
+
+  /** Fire-and-forget spawn of a claude code session (used for conflict resolution). */
+  function spawnClaudeCode(task: string, cwd: string) {
+    const sid = generateSessionId()
+    const lp = getLogPath(sid)
+
+    ensureLogDir().then(async () => {
+      const meta: MetaFile = {
+        sessionId: sid,
+        task,
+        workingDir: cwd,
+        startedAt: new Date().toISOString(),
+        pid: 0,
+      }
+
+      const proc = Bun.spawn(
+        ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model opus -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
+        {
+          cwd,
+          env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: lp },
+          stdout: 'ignore',
+          stderr: 'ignore',
+        }
+      )
+
+      meta.pid = proc.pid
+      await writeMeta(meta)
+      runningProcesses.set(sid, { proc, pid: proc.pid, task })
+
+      console.log(`[claude-code-direct] spawned conflict resolver session ${sid} (pid ${proc.pid})`)
+
+      proc.exited.then(async (code) => {
+        runningProcesses.delete(sid)
+        meta.exitCode = code ?? 1
+        meta.endedAt = new Date().toISOString()
+        await writeMeta(meta)
+
+        const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
+        const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
+        queueNotification(
+          `[Claude Code conflict resolution ${status}]\nSession: ${sid}\nTask: ${taskPreview}\nLog: ${lp}\n\nUse read_claude_code_output to review the results.`
+        )
+      }).catch((err) => {
+        console.error(`[claude-code-direct] conflict resolver proc.exited rejected for ${sid}:`, err)
+      })
+    }).catch((err) => {
+      console.error(`[claude-code-direct] failed to spawn conflict resolver:`, err)
+    })
   }
 
   async function* inputGenerator(): AsyncGenerator<QueuedMessage> {
@@ -119,18 +221,56 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
         properties: {
           task: { type: 'string', description: 'The task/prompt to send to Claude Code' },
           workingDir: { type: 'string', description: 'Working directory for the claude code process (optional)' },
+          worktree: { type: 'string', description: 'Branch/task name for git worktree isolation. When provided with workingDir, creates a git worktree and runs the task there. The branch is merged back on completion.' },
         },
         required: ['task'],
       },
       async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-        const { task, workingDir } = input as { task: string; workingDir?: string }
+        const { task, workingDir, worktree } = input as { task: string; workingDir?: string; worktree?: string }
 
         await ensureLogDir()
         const sessionId = generateSessionId()
         const logPath = getLogPath(sessionId)
-        const cwd = workingDir ?? context.workingDir
+        const originalCwd = workingDir ?? context.workingDir
+        let cwd = originalCwd
 
         try {
+          // set up git worktree if requested
+          if (worktree) {
+            if (!workingDir) {
+              return { content: 'worktree requires workingDir to be set (need a git repo to branch from)', is_error: true }
+            }
+
+            const worktreePath = join(WORKTREE_BASE, worktree)
+            await mkdir(WORKTREE_BASE, { recursive: true })
+
+            // create the worktree + branch
+            const wtResult = Bun.spawnSync(
+              ['git', 'worktree', 'add', worktreePath, '-b', worktree],
+              { cwd: workingDir }
+            )
+
+            if (wtResult.exitCode !== 0) {
+              const stderr = wtResult.stderr.toString().trim()
+              return { content: `Failed to create git worktree: ${stderr}`, is_error: true }
+            }
+
+            // symlink node_modules if the repo has a package.json
+            const worktreePkg = Bun.file(join(worktreePath, 'package.json'))
+            const originalNodeModules = join(workingDir, 'node_modules')
+            if (await worktreePkg.exists()) {
+              try {
+                await access(originalNodeModules)
+                await symlink(originalNodeModules, join(worktreePath, 'node_modules'))
+              } catch {
+                // no node_modules in original — skip
+              }
+            }
+
+            cwd = worktreePath
+            console.log(`[claude-code-direct] created worktree at ${worktreePath} for branch ${worktree}`)
+          }
+
           // write metadata
           const meta: MetaFile = {
             sessionId,
@@ -138,6 +278,8 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
             workingDir: cwd,
             startedAt: new Date().toISOString(),
             pid: 0, // updated after spawn
+            worktree: worktree,
+            originalWorkingDir: worktree ? originalCwd : undefined,
           }
 
           // spawn claude with stdout/stderr redirected to log file via shell
@@ -155,7 +297,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
           meta.pid = proc.pid
           await writeMeta(meta)
 
-          runningProcesses.set(sessionId, { proc, pid: proc.pid, task })
+          runningProcesses.set(sessionId, { proc, pid: proc.pid, task, worktree, originalWorkingDir: worktree ? originalCwd : undefined })
 
           // notify when done (best-effort — only works if toebeans is still alive)
           console.log(`[claude-code-direct] registering exit handler for session ${sessionId}`)
@@ -173,12 +315,24 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
 
               const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
               const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
-              queueNotification(
-                `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
-              )
+
+              // handle worktree merge if applicable
+              if (worktree && meta.originalWorkingDir) {
+                const mergeMsg = await handleWorktreeMerge(
+                  worktree, meta.originalWorkingDir, sessionId, taskPreview, logPath, status,
+                  (conflictTask, conflictCwd) => {
+                    // spawn a new claude code session to resolve the conflict
+                    spawnClaudeCode(conflictTask, conflictCwd)
+                  },
+                )
+                queueNotification(mergeMsg)
+              } else {
+                queueNotification(
+                  `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+                )
+              }
             } catch (err) {
               console.error(`[claude-code-direct] error in exit handler for ${sessionId}:`, err)
-              // still try to queue notification even if meta write failed
               try {
                 const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
                 const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
@@ -193,14 +347,18 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
             console.error(`[claude-code-direct] proc.exited promise rejected for ${sessionId}:`, err)
           })
 
-          return {
-            content: JSON.stringify({
-              sessionId,
-              logPath,
-              pid: proc.pid,
-              status: 'started',
-            }, null, 2)
+          const result: Record<string, unknown> = {
+            sessionId,
+            logPath,
+            pid: proc.pid,
+            status: 'started',
           }
+          if (worktree) {
+            result.worktree = worktree
+            result.worktreePath = cwd
+          }
+
+          return { content: JSON.stringify(result, null, 2) }
         } catch (err: unknown) {
           const error = err as { message?: string }
           return { content: `Failed to spawn claude code: ${error.message}`, is_error: true }
