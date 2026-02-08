@@ -30,9 +30,9 @@ New facts learned about the user (preferences, environment, projects, communicat
 Be brief but don't lose anything you'd regret forgetting.`
 
 export interface SessionManager {
-  getSessionForMessage(): Promise<string>
-  checkCompaction(sessionId: string): Promise<void>
-  forceCompact(sessionId: string): Promise<string>
+  getSessionForMessage(route?: string): Promise<string>
+  checkCompaction(sessionId: string, route?: string): Promise<void>
+  forceCompact(sessionId: string, route?: string): Promise<string>
   getSessionInfo(sessionId: string): Promise<{
     id: string
     messageCount: number
@@ -145,16 +145,16 @@ export function createSessionManager(
     }
   }
 
-  async function compactSession(sessionId: string): Promise<string> {
+  async function compactSession(sessionId: string, route?: string): Promise<string> {
     const beforeTokens = await estimateSessionTokens(sessionId)
-    console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens)`)
+    console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens, route: ${route || '_default'})`)
 
     const rawMessages = await loadSession(sessionId)
     if (rawMessages.length === 0) {
       // nothing to compact, just create new session
-      const newId = await generateSessionId()
+      const newId = await generateSessionId(route)
       await markSessionFinished(sessionId)
-      await setCurrentSessionId(newId)
+      await setCurrentSessionId(newId, route)
       return newId
     }
 
@@ -176,8 +176,8 @@ export function createSessionManager(
     // mark old session as finished
     await markSessionFinished(sessionId)
 
-    // create new session with summary as context
-    const newId = await generateSessionId()
+    // create new session with summary as context (same route)
+    const newId = await generateSessionId(route)
     const summaryMessage: Message = {
       role: 'user',
       content: [{
@@ -186,7 +186,7 @@ export function createSessionManager(
       }],
     }
     await writeSession(newId, [summaryMessage])
-    await setCurrentSessionId(newId)
+    await setCurrentSessionId(newId, route)
 
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
@@ -210,14 +210,14 @@ export function createSessionManager(
   }
 
   return {
-    async getSessionForMessage(): Promise<string> {
-      const sessionId = await getCurrentSessionId()
+    async getSessionForMessage(route?: string): Promise<string> {
+      const sessionId = await getCurrentSessionId(route)
 
       // check if session is finished
       if (await isSessionFinished(sessionId)) {
-        // create new session
-        const newId = await generateSessionId()
-        await setCurrentSessionId(newId)
+        // create new session for this route
+        const newId = await generateSessionId(route)
+        await setCurrentSessionId(newId, route)
         return newId
       }
 
@@ -227,7 +227,7 @@ export function createSessionManager(
         const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
         if (ageSeconds >= lifespanSeconds) {
           console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes stale, compacting before new message`)
-          const newId = await compactSession(sessionId)
+          const newId = await compactSession(sessionId, route)
           return newId
         }
       }
@@ -235,12 +235,12 @@ export function createSessionManager(
       return sessionId
     },
 
-    async checkCompaction(sessionId: string): Promise<void> {
+    async checkCompaction(sessionId: string, route?: string): Promise<void> {
       // check token count
       const tokens = await estimateSessionTokens(sessionId)
       if (tokens >= compactAtTokens) {
         console.log(`session-manager: session ${sessionId} has ${tokens} tokens, compacting`)
-        await compactSession(sessionId)
+        await compactSession(sessionId, route)
         return
       }
 
@@ -250,15 +250,15 @@ export function createSessionManager(
         const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
         if (ageSeconds >= lifespanSeconds) {
           console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes old, compacting`)
-          await compactSession(sessionId)
+          await compactSession(sessionId, route)
           return
         }
       }
     },
 
-    async forceCompact(sessionId: string): Promise<string> {
+    async forceCompact(sessionId: string, route?: string): Promise<string> {
       console.log(`session-manager: forcing compaction of session ${sessionId}`)
-      return await compactSession(sessionId)
+      return await compactSession(sessionId, route)
     },
 
     async getSessionInfo(sessionId: string) {
