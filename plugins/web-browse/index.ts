@@ -1,10 +1,10 @@
 import type { Plugin } from '../../server/plugin.ts'
-import type { ToolResult, ToolContext, ToolResultContent } from '../../server/types.ts'
+import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { getDataDir, getWorkspaceDir } from '../../server/session.ts'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import TurndownService from 'turndown'
 import { join } from 'path'
-import { mkdir, unlink } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 
 // --- cookie persistence ---
 
@@ -175,32 +175,6 @@ async function takeScreenshot(page: Page): Promise<string> {
   const filepath = join(dir, filename)
   await page.screenshot({ path: filepath, fullPage: false })
   return filepath
-}
-
-const MAX_SCREENSHOT_WIDTH = 1024
-
-async function screenshotToBase64(filepath: string): Promise<{ media_type: 'image/png' | 'image/jpeg'; data: string }> {
-  const resized = filepath.replace(/\.png$/, '-resized.png')
-  try {
-    // resize to max width, preserving aspect ratio
-    const proc = Bun.spawn(['magick', filepath, '-resize', `${MAX_SCREENSHOT_WIDTH}x>`, resized], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const exitCode = await proc.exited
-    if (exitCode !== 0) {
-      const stderr = await new Response(proc.stderr).text()
-      console.warn(`magick resize failed: ${stderr}, using original`)
-      // fall back to original
-      const buffer = await Bun.file(filepath).arrayBuffer()
-      return { media_type: 'image/png', data: Buffer.from(buffer).toString('base64') }
-    }
-
-    const buffer = await Bun.file(resized).arrayBuffer()
-    return { media_type: 'image/png', data: Buffer.from(buffer).toString('base64') }
-  } finally {
-    try { await unlink(resized) } catch {}
-  }
 }
 
 // --- plugin ---
