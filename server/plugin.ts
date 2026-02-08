@@ -13,6 +13,7 @@ import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct/index.ts
 import createWebBrowsePlugin from '../plugins/web-browse/index.ts'
 import createPluginsPlugin from '../plugins/plugins/index.ts'
 import createGoogleSheetsPlugin from '../plugins/google-sheets/index.ts'
+import createGoogleCalendarPlugin from '../plugins/google-calendar/index.ts'
 import createNanoBananaPlugin from '../plugins/nano-banana/index.ts'
 import createOpenAICodexPlugin from '../plugins/openai-codex/index.ts'
 import createViewImagePlugin from '../plugins/view-image/index.ts'
@@ -68,6 +69,7 @@ const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'web-browse': createWebBrowsePlugin,
   'plugins': createPluginsPlugin,
   'google-sheets': createGoogleSheetsPlugin,
+  'google-calendar': createGoogleCalendarPlugin,
   'nano-banana': createNanoBananaPlugin,
   'openai-codex': createOpenAICodexPlugin,
   'view-image': createViewImagePlugin,
