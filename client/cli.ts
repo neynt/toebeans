@@ -62,16 +62,21 @@ function connect() {
         console.log(`\n[tool: ${msg.name}]`)
         break
 
-      case 'tool_result':
+      case 'tool_result': {
+        const contentStr = typeof msg.content === 'string'
+          ? msg.content
+          : msg.content.filter(b => b.type === 'text').map(b => b.type === 'text' ? b.text : '').join('\n')
         if (msg.is_error) {
-          console.log(`\n[error: ${msg.content.slice(0, 100)}...]`)
+          console.log(`\n[error: ${contentStr.slice(0, 100)}...]`)
         } else {
-          const preview = msg.content.length > 100
-            ? msg.content.slice(0, 100) + '...'
-            : msg.content
-          console.log(`\n[result: ${preview}]`)
+          const hasImages = Array.isArray(msg.content) && msg.content.some(b => b.type === 'image')
+          const preview = contentStr.length > 100
+            ? contentStr.slice(0, 100) + '...'
+            : contentStr
+          console.log(`\n[result: ${preview}]${hasImages ? ' (+ image)' : ''}`)
         }
         break
+      }
 
       case 'done':
         console.log(`\n[tokens: ${msg.usage.input}↓ ${msg.usage.output}↑` +

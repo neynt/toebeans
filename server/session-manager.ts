@@ -56,9 +56,21 @@ export function createSessionManager(
       role: msg.role,
       content: msg.content.map(block => {
         if (block.type === 'tool_result') {
-          const trimmed = block.content.length > 200
-            ? block.content.slice(0, 200) + '... (truncated)'
-            : block.content
+          if (typeof block.content === 'string') {
+            const trimmed = block.content.length > 200
+              ? block.content.slice(0, 200) + '... (truncated)'
+              : block.content
+            return { ...block, content: trimmed }
+          }
+          // rich content: trim text blocks, drop images entirely for compaction
+          const trimmed = block.content
+            .filter(b => b.type === 'text')
+            .map(b => {
+              if (b.type === 'text' && b.text.length > 200) {
+                return { ...b, text: b.text.slice(0, 200) + '... (truncated)' }
+              }
+              return b
+            })
           return { ...block, content: trimmed }
         }
         return block

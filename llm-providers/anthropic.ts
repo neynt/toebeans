@@ -37,13 +37,24 @@ export class AnthropicProvider implements LlmProvider {
           }
           case 'tool_use':
             return { type: 'tool_use', id: block.id, name: block.name, input: block.input }
-          case 'tool_result':
+          case 'tool_result': {
+            let content = block.content
+            // filter oversized images in rich content
+            if (Array.isArray(content)) {
+              content = content.map(b => {
+                if (b.type === 'image' && b.source?.type === 'base64' && b.source.data.length > 5_000_000) {
+                  return { type: 'text' as const, text: '(image too large, removed)' }
+                }
+                return b
+              })
+            }
             return {
               type: 'tool_result',
               tool_use_id: block.tool_use_id,
-              content: block.content,
+              content,
               is_error: block.is_error,
             }
+          }
           default:
             return { type: 'text', text: `(unsupported block type: ${(block as { type: string }).type})` }
         }

@@ -1,10 +1,17 @@
 // Anthropic-compatible message types
 
+export type ImageSource = { type: 'url'; url: string } | { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }
+
+// rich content for tool results — array of text/image blocks
+export type ToolResultContent =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: 'image'; source: ImageSource }>
+
 export type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'url'; url: string } | { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string } }
+  | { type: 'image'; source: ImageSource }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }
 
 export interface Message {
   role: 'user' | 'assistant'
@@ -38,7 +45,7 @@ export interface ToolContext {
 
 // Tool result
 export interface ToolResult {
-  content: string
+  content: ToolResultContent
   is_error?: boolean
 }
 
@@ -59,7 +66,7 @@ export type ServerMessage =
   | { type: 'text'; text: string }
   | { type: 'text_block_end' }  // signals end of a text content block (flush buffer)
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }
   | { type: 'done'; usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number } }
   | { type: 'error'; message: string }
 

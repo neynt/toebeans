@@ -9,7 +9,7 @@ a simple extensible personal assistant, inspired by [openclaw](https://github.co
 | path | function |
 |-|-|
 | `server/` | the core agent loop. runs on your box |
-| `client/` | a basic CLI |
+| `client/` | a basic CLI. you probably won't need it |
 | `llm-providers/` | common interface for LLM APIs |
 | `plugins/` | pluggable units of functionality |
 
