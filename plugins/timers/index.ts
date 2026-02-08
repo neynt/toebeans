@@ -1,11 +1,10 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { Tool, ToolResult, Message } from '../../server/types.ts'
-import { getDataDir, generateSessionId } from '../../server/session.ts'
+import { getDataDir } from '../../server/session.ts'
 import { join } from 'path'
 import { mkdir } from 'node:fs/promises'
 
 interface QueuedMessage {
-  sessionId: string
   message: Message
   outputTarget?: string
 }
@@ -146,11 +145,7 @@ export default function createTimersPlugin(): Plugin {
   async function queueTimerMessage(filename: string, content: string) {
     const { frontmatter, body } = parseFrontmatter(content)
 
-    // use session from frontmatter or generate a new one
-    const sessionId = frontmatter.session || await generateSessionId()
-
     const msg: QueuedMessage = {
-      sessionId,
       message: {
         role: 'user',
         content: [{ type: 'text', text: `[Timer fired: ${filename}]\n\n${body}` }],

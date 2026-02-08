@@ -43,7 +43,7 @@ export interface Plugin {
   // for channel plugins: yields incoming messages
   // outputTarget is optional - if provided, routes output to that target instead of back to this plugin
   // format: 'pluginName:target' (e.g., 'discord:channelId')
-  input?: AsyncIterable<{ sessionId: string; message: Message; outputTarget?: string }>
+  input?: AsyncIterable<{ message: Message; outputTarget?: string }>
 
   // for channel plugins: send a response back
   // receives ServerMessage events (text, tool_use, tool_result, done, error)

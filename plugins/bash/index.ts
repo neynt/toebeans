@@ -46,12 +46,11 @@ async function readLastLines(filePath: string, lineCount: number): Promise<strin
 }
 
 export default function createBashPlugin(): Plugin {
-  const messageQueue: { sessionId: string; message: Message; outputTarget?: string }[] = []
+  const messageQueue: { message: Message; outputTarget?: string }[] = []
   let resolveWaiter: (() => void) | null = null
 
   function queueNotification(text: string) {
     messageQueue.push({
-      sessionId: 'bash-spawn',
       message: {
         role: 'user',
         content: [{ type: 'text', text }],
@@ -63,7 +62,7 @@ export default function createBashPlugin(): Plugin {
     }
   }
 
-  async function* inputGenerator(): AsyncGenerator<{ sessionId: string; message: Message; outputTarget?: string }> {
+  async function* inputGenerator(): AsyncGenerator<{ message: Message; outputTarget?: string }> {
     while (true) {
       while (messageQueue.length > 0) {
         const msg = messageQueue.shift()!

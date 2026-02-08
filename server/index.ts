@@ -201,7 +201,7 @@ async function main() {
       try {
         console.log(`[server] entering input loop for plugin: ${name}`)
         for await (const queuedMsg of loaded.plugin.input!) {
-          const { sessionId: pluginSessionId, message, outputTarget } = queuedMsg as any
+          const { message, outputTarget } = queuedMsg as any
           const mainSessionId = await sessionManager.getSessionForMessage()
           const conversationSessionId = mainSessionId
 
@@ -211,20 +211,19 @@ async function main() {
             sessionAbort.set(conversationSessionId, true)
 
             // send confirmation back to the plugin
-            const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
-            if (effectiveOutputTarget) {
-              await routeOutput(effectiveOutputTarget, { type: 'text', text: 'stopped ✋' })
-              await routeOutput(effectiveOutputTarget, { type: 'text_block_end' })
+            if (outputTarget) {
+              await routeOutput(outputTarget, { type: 'text', text: 'stopped ✋' })
+              await routeOutput(outputTarget, { type: 'text_block_end' })
             }
             continue
           }
 
-          console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || pluginSessionId})`)
+          console.log(`[${name}] message -> session: ${conversationSessionId} (output: ${outputTarget || 'none'})`)
           const content = message.content
           if (content.length === 0) continue
 
           // determine output function and target
-          const effectiveOutputTarget = outputTarget || (loaded.plugin.output ? `${name}:${pluginSessionId.split(':')[1] || pluginSessionId}` : null)
+          const effectiveOutputTarget = outputTarget || null
           let outputFn: ((message: ServerMessage) => Promise<void>) | null = null
           if (effectiveOutputTarget) {
             outputFn = (message) => routeOutput(effectiveOutputTarget, message)

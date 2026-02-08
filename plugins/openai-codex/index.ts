@@ -60,7 +60,6 @@ async function writeMeta(meta: MetaFile): Promise<void> {
 }
 
 interface QueuedMessage {
-  sessionId: string
   message: Message
   outputTarget?: string
 }
@@ -77,7 +76,6 @@ export default function createOpenAICodexPlugin(): Plugin {
   function queueNotification(text: string) {
     console.log('[openai-codex] queueNotification called:', text.slice(0, 100))
     messageQueue.push({
-      sessionId: 'openai-codex',
       message: {
         role: 'user',
         content: [{ type: 'text', text }],
