@@ -669,14 +669,15 @@ export default function createDiscordPlugin(): Plugin {
         }
 
         try {
+          const route = `discord:${interaction.channelId}`
           if (interaction.commandName === 'compact') {
             await interaction.deferReply()
-            const sessionId = await config!.sessionManager.getSessionForMessage()
-            const newId = await config!.sessionManager.forceCompact(sessionId)
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const newId = await config!.sessionManager.forceCompact(sessionId, route)
             await interaction.editReply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
           } else if (interaction.commandName === 'session') {
             await interaction.deferReply()
-            const sessionId = await config!.sessionManager.getSessionForMessage()
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const info = await config!.sessionManager.getSessionInfo(sessionId)
 
             const createdStr = info.createdAt ? info.createdAt.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
