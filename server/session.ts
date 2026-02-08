@@ -1,15 +1,16 @@
 import { mkdir } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import { countTokens } from '@anthropic-ai/tokenizer'
 import type { Message, SessionInfo } from './types.ts'
+import { countMessagesTokens } from './tokens.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
 const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
 const STATE_PATH = join(TOEBEANS_DIR, 'state.json')
 
 interface SessionState {
-  currentSessionId: string | null
+  currentSessionId: string | null  // legacy, migrated to routeSessions
+  routeSessions: Record<string, string>  // route -> current session ID
   finishedSessions: string[]  // session IDs that are finished
   lastOutputTarget?: string  // last output target for auto-resume after restart
 }
@@ -23,7 +24,7 @@ async function loadState(): Promise<SessionState> {
       // corrupted state, reset
     }
   }
-  return { currentSessionId: null, finishedSessions: [] }
+  return { currentSessionId: null, routeSessions: {}, finishedSessions: [] }
 }
 
 async function saveState(state: SessionState): Promise<void> {
@@ -41,16 +42,23 @@ function getSessionPath(sessionId: string): string {
   return join(SESSIONS_DIR, `${sessionId}.jsonl`)
 }
 
-export async function generateSessionId(): Promise<string> {
+// sanitize a route string for use in filenames
+// "discord:1466679760976609393" -> "discord-1466679760976609393"
+export function sanitizeRoute(route: string): string {
+  return route.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+export async function generateSessionId(route?: string): Promise<string> {
   const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD
-  const prefix = `${today}-`
+  const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
+  const prefix = `${routePrefix}${today}-`
 
   const glob = new Bun.Glob('*.jsonl')
   const usedNumbers = new Set<number>()
 
   for await (const path of glob.scan(SESSIONS_DIR)) {
     const sessionId = path.replace('.jsonl', '')
-    // only look at sessions with today's date prefix
+    // only look at sessions with this prefix
     if (sessionId.startsWith(prefix)) {
       const numPart = sessionId.slice(prefix.length) // extract NNNN part
       const num = parseInt(numPart, 10)
@@ -68,7 +76,7 @@ export async function generateSessionId(): Promise<string> {
   }
 
   // all 10000 slots taken (unlikely)
-  throw new Error(`all session IDs exhausted for ${today} (0000-9999)`)
+  throw new Error(`all session IDs exhausted for ${prefix} (0000-9999)`)
 }
 
 export async function loadSession(sessionId: string): Promise<Message[]> {
@@ -141,17 +149,30 @@ export function getSoulPath(): string {
   return join(TOEBEANS_DIR, 'SOUL.md')
 }
 
-// get the current main session, creating one if needed
-export async function getCurrentSessionId(): Promise<string> {
+// get the current session for a route, creating one if needed
+export async function getCurrentSessionId(route?: string): Promise<string> {
   const state = await loadState()
 
-  if (state.currentSessionId && !state.finishedSessions.includes(state.currentSessionId)) {
-    return state.currentSessionId
+  // migrate legacy global session to default route
+  if (state.currentSessionId && !state.routeSessions) {
+    state.routeSessions = {}
   }
 
-  // create new session
-  const newId = await generateSessionId()
-  state.currentSessionId = newId
+  const routeKey = route || '_default'
+
+  // check route-specific session first
+  const routeSession = state.routeSessions[routeKey]
+  if (routeSession && !state.finishedSessions.includes(routeSession)) {
+    return routeSession
+  }
+
+  // create new session for this route
+  const newId = await generateSessionId(route)
+  state.routeSessions[routeKey] = newId
+  // keep legacy field in sync for backwards compat with external tools
+  if (!route || route === '_default') {
+    state.currentSessionId = newId
+  }
   await saveState(state)
   return newId
 }
@@ -164,6 +185,12 @@ export async function markSessionFinished(sessionId: string): Promise<void> {
   }
   if (state.currentSessionId === sessionId) {
     state.currentSessionId = null
+  }
+  // remove from any route mappings
+  for (const [route, sid] of Object.entries(state.routeSessions)) {
+    if (sid === sessionId) {
+      delete state.routeSessions[route]
+    }
   }
   await saveState(state)
 }
@@ -206,10 +233,16 @@ export async function writeSession(sessionId: string, messages: Message[]): Prom
   await Bun.write(path, lines)
 }
 
-// set the current session ID (used after compaction)
-export async function setCurrentSessionId(sessionId: string): Promise<void> {
+// set the current session ID for a route (used after compaction)
+export async function setCurrentSessionId(sessionId: string, route?: string): Promise<void> {
   const state = await loadState()
-  state.currentSessionId = sessionId
+  const routeKey = route || '_default'
+  if (!state.routeSessions) state.routeSessions = {}
+  state.routeSessions[routeKey] = sessionId
+  // keep legacy field in sync
+  if (!route || route === '_default') {
+    state.currentSessionId = sessionId
+  }
   await saveState(state)
 }
 
