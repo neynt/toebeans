@@ -5,27 +5,21 @@
   "private": true,
   "scripts": {
     "server": "bun run server/index.ts",
-    "client": "bun run client/tui.tsx",
-    "client:simple": "bun run client/cli.ts",
-    "debug": "bun run debug/index.ts"
+    "cli": "bun run cli/cli.ts",
+    "debug": "bun run cli/debug/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@anthropic-ai/tokenizer": "^0.0.4",
-    "@types/react": "^19.2.10",
     "discord.js": "^14.25.1",
     "googleapis": "^171.4.0",
-    "ink": "^6.6.0",
-    "ink-text-input": "^6.0.0",
     "playwright": "^1.58.1",
-    "react": "^19.2.4",
     "turndown": "^7.2.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/turndown": "^5.0.6",
-    "react-devtools-core": "^7.0.1"
+    "@types/turndown": "^5.0.6"
   },
   "peerDependencies": {
     "typescript": "^5"

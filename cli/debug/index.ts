@@ -25,7 +25,7 @@ switch (command) {
     break
   }
   case 'list-sessions': {
-    const { listSessions } = await import('../server/session.ts')
+    const { listSessions } = await import('../../server/session.ts')
     const sessions = await listSessions()
     for (const s of sessions) {
       console.log(`${s.id}  (last active: ${s.lastActiveAt.toISOString()})`)

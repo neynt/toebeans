@@ -1,6 +1,6 @@
-import { PluginManager } from '../server/plugin.ts'
-import { loadConfig } from '../server/config.ts'
-import { getSoulPath } from '../server/session.ts'
+import { PluginManager } from '../../server/plugin.ts'
+import { loadConfig } from '../../server/config.ts'
+import { getSoulPath } from '../../server/session.ts'
 
 export default async function printSystem() {
   const config = await loadConfig()

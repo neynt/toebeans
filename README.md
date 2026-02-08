@@ -46,35 +46,37 @@ plugins can:
 ## security model
 
 don't give it access to stuff you don't want it to have. maybe run it under a
-different user account. surrender yourself to the machine. it *is* just running
-as a user on your box. treat it like that.
+different user account. it *is* just running as a user on your box. treat it
+like that. surrender yourself to the machine. 
 
 ## manifesto
 
 i tried [openclaw](https://github.com/openclaw/openclaw). it has a very
 polished onboarding script that gave you the invigorating rush of *creating
 life* -- seeing my little bot be so happy when connecting to moltbook for the
-first time was joyful -- but i quickly ran into issues. there was a focus on
-scope over quality that pervaded my every interaction with it. the discord
-plugin had a bug where it wouldn't send you any messages until the full agent
-turn was done, and then it'd give you a firehose of everything all at once. tts
-was limited to APIs and low-quality local options -- not qwen3-tts, which felt
-like it ought to be trivial to set up. and somehow it chewed through hundreds
-of dollars of API credits in the blink of an eye. it insisted on DIYing code
-and its tools for spawning headless coding agents felt quite undercooked.
-browser integration was also messy -- why do i need an extension into an
-existing browser when you can just playwright everything? it had two systems
-for scheduling events -- heartbeats and cron -- which felt at once
-uninspectable and wholly unnecessary. before long its workspace directory was a
-mess. i had no idea what was feeding into the context window at any given point
-in time, or when it would decide to compact, or create a new session. and of
-course the nest of bitcoin jackers on molthub was terrifying.
+first time brought an unbelievably large smile to my face -- but i quickly ran
+into issues. there was a focus on scope over quality that pervaded my every
+interaction with it. the discord plugin had a bug where it wouldn't send you
+any messages until the full agent turn was done, and then it'd give you a
+firehose of everything all at once. tts was limited to APIs and low-quality
+local options -- not qwen3-tts, which felt like it ought to be trivial to set
+up. and somehow it chewed through hundreds of dollars of API credits in the
+blink of an eye. it insisted on DIYing code and its tools for spawning headless
+coding agents felt quite undercooked. browser integration was also messy -- why
+do i need an extension into an existing browser when you can just playwright
+everything? it had two systems for scheduling events -- heartbeats and cron --
+which felt at once uninspectable and wholly unnecessary. before long its
+workspace directory was a mess. i had no idea what was feeding into the context
+window at any given point in time, or when it would decide to compact, or
+create a new session. and of course the nest of bitcoin jackers on molthub was
+terrifying.
 
 [nanoclaw](https://github.com/gavrielc/nanoclaw.git) seemed like a step in the
 right direction. i admire its simplicity. but i think it goes a little too far
 -- the extensibility story felt unsustainable. the idea that the way you extend
 the agent is to tell it to modify its own code, and that is the *only way* to
-extend the agent, felt like a mess of composition issues waiting to happen.
+extend the agent, felt like a mess of compositional difficulties waiting to
+happen.
 
 so here's my commitment to creating an assistant that's at the same time deeply
 extensible and comprehensible. toebeans is an agent that:

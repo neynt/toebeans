@@ -1,6 +1,6 @@
-import { PluginManager } from '../server/plugin.ts'
-import { loadConfig } from '../server/config.ts'
-import { loadSession, getSoulPath, listSessions } from '../server/session.ts'
+import { PluginManager } from '../../server/plugin.ts'
+import { loadConfig } from '../../server/config.ts'
+import { loadSession, getSoulPath, listSessions } from '../../server/session.ts'
 
 export default async function printLlmQuery() {
   const sessionId = process.argv[3]

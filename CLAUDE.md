@@ -8,12 +8,15 @@ AI agent harness with unified plugin system. Server/client architecture over Web
 # start server (default port 3000)
 bun run server
 
-# start client
-bun run client
+# start CLI client
+bun run cli
+
+# debug tools
+bun run debug <command>
 
 # or with custom port
 PORT=3001 bun run server
-TOEBEANS_SERVER=ws://localhost:3001/ws bun run client
+TOEBEANS_SERVER=ws://localhost:3001/ws bun run cli
 ```
 
 ## Data location
@@ -27,9 +30,9 @@ All user data is stored in `~/.toebeans/`:
 ## Architecture
 
 - `server/` - WebSocket server, agent loop, plugin system
-- `client/` - CLI client
+- `cli/` - CLI client and debug tools
 - `llm-providers/` - LLM provider implementations (anthropic)
-- `plugins/` - built-in plugins (tools, memory, core, write-plugin)
+- `plugins/` - built-in plugins
 
 ## Bun
 
