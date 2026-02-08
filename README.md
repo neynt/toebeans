@@ -13,9 +13,9 @@
 
 | path | function |
 |-|-|
-| `server/` | the core agent loop. runs on your box |
-| `client/` | a basic CLI. you probably won't need it |
-| `llm-providers/` | common interface for LLM APIs |
+| `server/` | serves the core agent loop. runs on your box |
+| `cli/` | some CLI commands. for bootstrapping before you've connected to chat, and debugging |
+| `llm-providers/` | common interface for LLM APIs. currently only claude |
 | `plugins/` | pluggable units of functionality |
 
 ## plugins
@@ -41,13 +41,12 @@ plugins can:
 
 ## configuration and files
 
-`~/.toebeans/config.json` is where your config goes. plugins typically store stuff in `~/.toebeans/$plugin_name`
+`~/.toebeans/config.json` is where your config goes. plugins typically store
+stuff in `~/.toebeans/$plugin_name`
 
 ## security model
 
-don't give it access to stuff you don't want it to have. maybe run it under a
-different user account. it *is* just running as a user on your box. treat it
-like that. surrender yourself to the machine. 
+don't give it access to stuff you don't want it to have
 
 ## manifesto
 
@@ -79,7 +78,7 @@ extend the agent, felt like a mess of compositional difficulties waiting to
 happen.
 
 so here's my commitment to creating an assistant that's at the same time deeply
-extensible and comprehensible. toebeans is an agent that:
+extensible and comprehensible. toebeans will be an agent that:
 
 - **has a solid, minimal core**. the main agent loop seldom needs to change and
   provides little functionality on its own.
@@ -87,12 +86,13 @@ extensible and comprehensible. toebeans is an agent that:
   extension points in the agent loop and extend functionality. concepts that
   other assistants treat as part of the core, such as memory and timers, are
   interchangeable modules you can swap in and out.
-- **is inspectable and auditable**. every action and message is logged in
+- **has high quality built-in plugins**. i have exacting standards for my
+  software and will polish the hell out of whatever i actually use.
+- **is debuggable and auditable**. every action and message is logged in
   `~/.toebeans/`. every active timer, recurring or one-shot, is just a markdown
-  file. every session is just a jsonl file.
-- **is debuggable**. yeah it's nice when the agent can fix itself but sometimes
-  it doesn't and you do want to peel back the layers of abstraction. you should
-  always be able to ask inspectability questions like, "ok but what exactly is
-  in my context window at this point in time", without going through an llm.
+  file. knowledge is just markdown files. every session is just a jsonl file.
+  you should always be able to peel back the layers of abstraction and ask
+  qustions like "ok, but what exactly is in the context window at this point in
+  time", without going through an llm.
 - **is thrifty**. maintain a thoughtfully curated context window. be respectful
   of the user's wallet.
