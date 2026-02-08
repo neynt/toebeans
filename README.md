@@ -1,7 +1,7 @@
 <p align="center"><img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png" width="400px"></p>
 <p align="center">a simple extensible personal assistant</p>
 
-everything in this file is human-written.
+*everything in this README file is human-written.*
 
 ## quick start
 
