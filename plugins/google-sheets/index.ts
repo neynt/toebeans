@@ -172,6 +172,56 @@ const tools: Tool[] = [
     },
   },
   {
+    name: 'google_sheets_append',
+    description: 'Append rows to the end of a sheet in a Google Spreadsheet.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        spreadsheet_id: {
+          type: 'string',
+          description: 'The spreadsheet ID from the Google Sheets URL',
+        },
+        sheet: {
+          type: 'string',
+          description: 'Sheet/tab name to append to (default: "Sheet1")',
+        },
+        rows: {
+          type: 'array',
+          items: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          description: 'Array of rows to append, where each row is an array of cell values',
+        },
+      },
+      required: ['spreadsheet_id', 'rows'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { spreadsheet_id, sheet = 'Sheet1', rows } = input as {
+        spreadsheet_id: string
+        sheet?: string
+        rows: string[][]
+      }
+
+      try {
+        const sheets = await getSheets()
+        const res = await sheets.spreadsheets.values.append({
+          spreadsheetId: spreadsheet_id,
+          range: `${sheet}!A1`,
+          valueInputOption: 'USER_ENTERED',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: rows },
+        })
+
+        const updatedRange = res.data.updates?.updatedRange ?? 'unknown range'
+        return { content: `appended ${rows.length} row${rows.length === 1 ? '' : 's'} to ${updatedRange}` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to append to sheet: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
     name: 'google_sheets_list',
     description: 'List all sheet/tab names in a Google Spreadsheet.',
     inputSchema: {
