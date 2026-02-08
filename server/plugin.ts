@@ -97,7 +97,8 @@ export class PluginManager {
     const pluginPath = join(getPluginsDir(), name, 'index.ts')
     try {
       const mod = await import(pluginPath)
-      plugin = mod.default as Plugin
+      const exported = mod.default
+      plugin = typeof exported === 'function' ? exported(this.serverContext) : exported
     } catch {
       // fall back to builtin
       const factory = BUILTIN_PLUGINS[name]
