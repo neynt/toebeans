@@ -27,30 +27,40 @@ export default function createViewImagePlugin(): Plugin {
             return { content: `File not found: ${absPath}`, is_error: true }
           }
 
-          // use imagemagick to resize (if wider than 1024px) and convert to png
-          // -resize 1024x> means: only shrink if wider than 1024, preserve aspect ratio
-          // -write info:/dev/stderr outputs "WxH" dimensions to stderr
-          const proc = Bun.spawn(
-            ['magick', absPath, '-resize', '1024x>', '-format', '%wx%h', '-write', 'info:/dev/stderr', 'png:-'],
+          // get original dimensions via identify
+          const idProc = Bun.spawn(
+            ['magick', 'identify', '-format', '%wx%h', absPath],
             { stdout: 'pipe', stderr: 'pipe' }
           )
+          const [idExit, idOut, idErr] = await Promise.all([
+            idProc.exited,
+            new Response(idProc.stdout).text(),
+            new Response(idProc.stderr).text(),
+          ])
+          if (idExit !== 0) {
+            return {
+              content: `ImageMagick identify failed (exit ${idExit}): ${idErr}`,
+              is_error: true,
+            }
+          }
+          const dimensions = idOut.trim() || '?x?'
 
+          // resize (if wider than 1024px) and convert to png
+          const proc = Bun.spawn(
+            ['magick', absPath, '-resize', '1024x>', 'png:-'],
+            { stdout: 'pipe', stderr: 'pipe' }
+          )
           const [exitCode, pngBytes, stderrText] = await Promise.all([
             proc.exited,
             new Response(proc.stdout).arrayBuffer(),
             new Response(proc.stderr).text(),
           ])
-
           if (exitCode !== 0) {
             return {
               content: `ImageMagick failed (exit ${exitCode}): ${stderrText}`,
               is_error: true,
             }
           }
-
-          // stderr contains dimensions (e.g. "1024x768"), possibly with extra warnings
-          const dimMatch = stderrText.match(/(\d+x\d+)/)
-          const dimensions = dimMatch ? dimMatch[1] : '?x?'
           const filename = absPath.split('/').pop() ?? absPath
           const data = Buffer.from(pngBytes).toString('base64')
 
