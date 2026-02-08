@@ -76,7 +76,7 @@ extend the agent, felt like a mess of compositional difficulties waiting to
 happen.
 
 so here's my commitment to creating an assistant that's at the same time deeply
-extensible and comprehensible. toebeans will be an agent that:
+extensible and comprehensible. my goal is that toebeans:
 
 - **has a solid, minimal core**. the main agent loop seldom needs to change and
   provides little functionality on its own.
