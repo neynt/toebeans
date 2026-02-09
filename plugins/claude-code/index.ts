@@ -69,7 +69,7 @@ interface QueuedMessage {
   outputTarget?: string
 }
 
-interface ClaudeCodeDirectConfig {
+interface ClaudeCodeConfig {
   notifyTarget?: string
 }
 
@@ -97,7 +97,7 @@ async function handleWorktreeMerge(
 
   if (mergeResult.exitCode === 0) {
     // merge succeeded — clean up worktree and branch
-    console.log(`[claude-code-direct] merge of ${worktree} succeeded, cleaning up`)
+    console.log(`[claude-code] merge of ${worktree} succeeded, cleaning up`)
 
     Bun.spawnSync(['git', 'worktree', 'remove', worktreePath], { cwd: originalWorkingDir })
     Bun.spawnSync(['git', 'branch', '-d', worktree], { cwd: originalWorkingDir })
@@ -110,7 +110,7 @@ async function handleWorktreeMerge(
   const mergeStdout = mergeResult.stdout.toString().trim()
   const conflictOutput = [mergeStdout, mergeStderr].filter(Boolean).join('\n')
 
-  console.log(`[claude-code-direct] merge of ${worktree} failed, spawning conflict resolver`)
+  console.log(`[claude-code] merge of ${worktree} failed, spawning conflict resolver`)
 
   const conflictTask = `There's a merge conflict from branch "${worktree}". Resolve it, keeping changes from both sides where possible. Run \`git add\` on resolved files and \`git commit\` to complete the merge.\n\nConflict output:\n${conflictOutput}`
 
@@ -121,13 +121,13 @@ async function handleWorktreeMerge(
   return `[Claude Code task ${taskStatus} — merge conflict]\nSession: ${sessionId}\nTask: ${taskPreview}\nBranch "${worktree}" had merge conflicts. A conflict resolution session has been spawned in ${originalWorkingDir}.\nThe worktree at ${worktreePath} has NOT been removed (branch still exists for reference).\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
 }
 
-export default function createClaudeCodeDirectPlugin(): Plugin {
-  let config: ClaudeCodeDirectConfig | null = null
+export default function createClaudeCodePlugin(): Plugin {
+  let config: ClaudeCodeConfig | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
   function queueNotification(text: string) {
-    console.log('[claude-code-direct] queueNotification called:', text.slice(0, 100))
+    console.log('[claude-code] queueNotification called:', text.slice(0, 100))
     messageQueue.push({
       message: {
         role: 'user',
@@ -135,13 +135,13 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
       },
       outputTarget: config?.notifyTarget,
     })
-    console.log('[claude-code-direct] messageQueue.length:', messageQueue.length)
+    console.log('[claude-code] messageQueue.length:', messageQueue.length)
     if (resolveWaiter) {
-      console.log('[claude-code-direct] resolving waiter')
+      console.log('[claude-code] resolving waiter')
       resolveWaiter()
       resolveWaiter = null
     } else {
-      console.log('[claude-code-direct] no waiter to resolve')
+      console.log('[claude-code] no waiter to resolve')
     }
   }
 
@@ -173,7 +173,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
       await writeMeta(meta)
       runningProcesses.set(sid, { proc, pid: proc.pid, task })
 
-      console.log(`[claude-code-direct] spawned conflict resolver session ${sid} (pid ${proc.pid})`)
+      console.log(`[claude-code] spawned conflict resolver session ${sid} (pid ${proc.pid})`)
 
       proc.exited.then(async (code) => {
         runningProcesses.delete(sid)
@@ -187,28 +187,28 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
           `[Claude Code conflict resolution ${status}]\nSession: ${sid}\nTask: ${taskPreview}\nLog: ${lp}\n\nUse read_claude_code_output to review the results.`
         )
       }).catch((err) => {
-        console.error(`[claude-code-direct] conflict resolver proc.exited rejected for ${sid}:`, err)
+        console.error(`[claude-code] conflict resolver proc.exited rejected for ${sid}:`, err)
       })
     }).catch((err) => {
-      console.error(`[claude-code-direct] failed to spawn conflict resolver:`, err)
+      console.error(`[claude-code] failed to spawn conflict resolver:`, err)
     })
   }
 
   async function* inputGenerator(): AsyncGenerator<QueuedMessage> {
-    console.log('[claude-code-direct] inputGenerator started')
+    console.log('[claude-code] inputGenerator started')
     while (true) {
       while (messageQueue.length > 0) {
         const msg = messageQueue.shift()!
         const firstContent = msg.message.content[0]
         const preview = firstContent && 'text' in firstContent ? firstContent.text.slice(0, 100) : '(no text)'
-        console.log('[claude-code-direct] yielding message:', preview)
+        console.log('[claude-code] yielding message:', preview)
         yield msg
       }
-      console.log('[claude-code-direct] waiting for next message')
+      console.log('[claude-code] waiting for next message')
       await new Promise<void>(resolve => {
         resolveWaiter = resolve
       })
-      console.log('[claude-code-direct] waiter resolved, checking queue')
+      console.log('[claude-code] waiter resolved, checking queue')
     }
   }
 
@@ -268,7 +268,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
             }
 
             cwd = worktreePath
-            console.log(`[claude-code-direct] created worktree at ${worktreePath} for branch ${worktree}`)
+            console.log(`[claude-code] created worktree at ${worktreePath} for branch ${worktree}`)
           }
 
           // write metadata
@@ -300,9 +300,9 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
           runningProcesses.set(sessionId, { proc, pid: proc.pid, task, worktree, originalWorkingDir: worktree ? originalCwd : undefined })
 
           // notify when done (best-effort — only works if toebeans is still alive)
-          console.log(`[claude-code-direct] registering exit handler for session ${sessionId}`)
+          console.log(`[claude-code] registering exit handler for session ${sessionId}`)
           proc.exited.then(async (code) => {
-            console.log(`[claude-code-direct] proc.exited fired for ${sessionId}, exit code: ${code}`)
+            console.log(`[claude-code] proc.exited fired for ${sessionId}, exit code: ${code}`)
 
             try {
               runningProcesses.delete(sessionId)
@@ -311,7 +311,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
               meta.exitCode = code ?? 1
               meta.endedAt = new Date().toISOString()
               await writeMeta(meta)
-              console.log(`[claude-code-direct] wrote meta for ${sessionId}`)
+              console.log(`[claude-code] wrote meta for ${sessionId}`)
 
               const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
               const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
@@ -332,7 +332,7 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
                 )
               }
             } catch (err) {
-              console.error(`[claude-code-direct] error in exit handler for ${sessionId}:`, err)
+              console.error(`[claude-code] error in exit handler for ${sessionId}:`, err)
               try {
                 const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
                 const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
@@ -340,11 +340,11 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
                   `[Claude Code task ${status}]\nSession: ${sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
                 )
               } catch (notifyErr) {
-                console.error(`[claude-code-direct] failed to queue notification for ${sessionId}:`, notifyErr)
+                console.error(`[claude-code] failed to queue notification for ${sessionId}:`, notifyErr)
               }
             }
           }).catch((err) => {
-            console.error(`[claude-code-direct] proc.exited promise rejected for ${sessionId}:`, err)
+            console.error(`[claude-code] proc.exited promise rejected for ${sessionId}:`, err)
           })
 
           const result: Record<string, unknown> = {
@@ -548,15 +548,15 @@ export default function createClaudeCodeDirectPlugin(): Plugin {
   ]
 
   return {
-    name: 'claude-code-direct',
+    name: 'claude-code',
     description: `Spawn one-shot Claude Code tasks and monitor their output. You are automatically notified when tasks complete.`,
 
     tools,
     input: inputGenerator(),
 
     async init(cfg: unknown) {
-      config = cfg as ClaudeCodeDirectConfig
-      console.log('[claude-code-direct] initialized with config:', config)
+      config = cfg as ClaudeCodeConfig
+      console.log('[claude-code] initialized with config:', config)
       await ensureLogDir()
     },
   }
