@@ -38,7 +38,10 @@ let browserPool: Browser | null = null
 
 async function getBrowser(): Promise<Browser> {
   if (!browserPool) {
-    browserPool = await chromium.launch({ headless: true })
+    browserPool = await chromium.launch({
+      headless: true,
+      args: ['--remote-debugging-port=9222'],
+    })
   }
   return browserPool
 }
