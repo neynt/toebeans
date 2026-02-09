@@ -55,7 +55,7 @@ the way plugins work is they:
 - inject **messages**
 - **hook** into the agent loop at a thoughtful set of extension points
 
-see [`interface Plugin` in plugin.ts](server/plugin.ts#L26)
+see [`interface Plugin` in plugin.ts](server/plugin.ts#L13)
 
 ## configuration and files
 
