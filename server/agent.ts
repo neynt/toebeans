@@ -272,27 +272,27 @@ export async function runAgentTurn(
       }
     }
 
-    // add tool results as user message
-    const toolResultMessage: Message = { role: 'user', content: toolResults }
-    messages.push(toolResultMessage)
-    await appendMessage(sessionId, toolResultMessage)
-
-    // check for interrupt messages before next round
+    // check for interrupt messages before saving tool results
+    // interrupts must be merged into the tool result message to maintain
+    // alternating user/assistant message structure required by the API
+    let interruptBlocks: ContentBlock[] = []
     if (options.checkInterrupts) {
       const interrupts = options.checkInterrupts()
       if (interrupts.length > 0) {
         console.log(`[agent] injecting ${interrupts.length} interrupt(s) into conversation`)
-        // inject interrupt messages into conversation
         for (const interrupt of interrupts) {
-          const interruptMessage: Message = {
-            role: 'user',
-            content: interrupt.content,
-          }
-          messages.push(interruptMessage)
-          await appendMessage(sessionId, interruptMessage)
+          interruptBlocks.push(...interrupt.content)
         }
       }
     }
+
+    // add tool results (+ any interrupt content) as a single user message
+    const toolResultMessage: Message = {
+      role: 'user',
+      content: [...toolResults, ...interruptBlocks],
+    }
+    messages.push(toolResultMessage)
+    await appendMessage(sessionId, toolResultMessage)
 
     // check if abort was requested
     if (options.checkAbort?.()) {
