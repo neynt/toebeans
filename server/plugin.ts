@@ -1,22 +1,9 @@
 import type { Tool, Message, AgentResult, ServerMessage } from './types.ts'
 import { getPluginsDir } from './session.ts'
-import { join } from 'path'
+import { join, resolve, dirname } from 'path'
 import { readdir } from 'node:fs/promises'
 
-// builtin plugin imports
-import createBashPlugin from '../plugins/bash/index.ts'
-import createMemoryPlugin from '../plugins/memory/index.ts'
-import createDiscordPlugin from '../plugins/discord/index.ts'
-import createTimersPlugin from '../plugins/timers/index.ts'
-import createClaudeCodePlugin from '../plugins/claude-code/index.ts'
-import createWebBrowsePlugin from '../plugins/web-browse/index.ts'
-import createPluginsPlugin from '../plugins/plugins/index.ts'
-import createGoogleSheetsPlugin from '../plugins/google-sheets/index.ts'
-import createGoogleCalendarPlugin from '../plugins/google-calendar/index.ts'
-import createNanoBananaPlugin from '../plugins/nano-banana/index.ts'
-import createOpenAICodexPlugin from '../plugins/openai-codex/index.ts'
-import createViewImagePlugin from '../plugins/view-image/index.ts'
-import createGmailPlugin from '../plugins/gmail/index.ts'
+const BUILTIN_PLUGINS_DIR = resolve(dirname(import.meta.dir), 'plugins')
 
 export interface Session {
   id: string
@@ -59,22 +46,6 @@ export interface LoadedPlugin {
   config: unknown
 }
 
-const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
-  'bash': createBashPlugin,
-  'memory': createMemoryPlugin,
-  'discord': createDiscordPlugin,
-  'timers': createTimersPlugin,
-  'claude-code': createClaudeCodePlugin,
-  'web-browse': createWebBrowsePlugin,
-  'plugins': createPluginsPlugin,
-  'google-sheets': createGoogleSheetsPlugin,
-  'google-calendar': createGoogleCalendarPlugin,
-  'nano-banana': createNanoBananaPlugin,
-  'openai-codex': createOpenAICodexPlugin,
-  'view-image': createViewImagePlugin,
-  'gmail': createGmailPlugin,
-}
-
 export class PluginManager {
   private plugins = new Map<string, LoadedPlugin>()
   private serverContext?: any
@@ -85,50 +56,50 @@ export class PluginManager {
 
   // discover all available plugin names (builtins + user plugins dir)
   async discoverAll(): Promise<string[]> {
-    const names = new Set(Object.keys(BUILTIN_PLUGINS))
-    const userDir = getPluginsDir()
-    try {
-      const entries = await readdir(userDir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          names.add(entry.name)
+    const names = new Set<string>()
+    for (const dir of [BUILTIN_PLUGINS_DIR, getPluginsDir()]) {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            names.add(entry.name)
+          }
         }
+      } catch {
+        // dir might not exist
       }
-    } catch {
-      // dir might not exist
     }
     return [...names].sort()
   }
 
   async loadPlugin(name: string, config?: unknown, { skipInit = false } = {}): Promise<void> {
-    let plugin: Plugin
+    // try user plugins dir first (allows overriding builtins), then builtins
+    const candidates = [
+      join(getPluginsDir(), name, 'index.ts'),
+      join(BUILTIN_PLUGINS_DIR, name, 'index.ts'),
+    ]
 
-    // try user plugins dir first (allows overriding builtins)
-    const pluginPath = join(getPluginsDir(), name, 'index.ts')
-    try {
-      const mod = await import(pluginPath)
-      const exported = mod.default
-      plugin = typeof exported === 'function' ? exported(this.serverContext) : exported
-    } catch {
-      // fall back to builtin
-      const factory = BUILTIN_PLUGINS[name]
-      if (factory) {
-        plugin = factory(this.serverContext)
-      } else {
-        throw new Error(`Plugin not found: ${name}`)
+    let plugin: Plugin | null = null
+    for (const path of candidates) {
+      try {
+        const mod = await import(path)
+        const exported = mod.default
+        plugin = typeof exported === 'function' ? exported(this.serverContext) : exported
+        break
+      } catch {
+        // try next
       }
     }
 
-    // initialize
+    if (!plugin) {
+      throw new Error(`Plugin not found: ${name}`)
+    }
+
     if (!skipInit && plugin.init) {
       await plugin.init(config)
     }
 
-    const loadedPlugin: LoadedPlugin = {
-      plugin,
-      config,
-    }
-    this.plugins.set(name, loadedPlugin)
+    this.plugins.set(name, { plugin, config })
   }
 
   getPlugin(name: string): LoadedPlugin | undefined {

@@ -5,7 +5,7 @@
 ## quick start
 
 1. clone this repo
-2. `bun run server`
+2. `while true; do bun run server; sleep 3; done`
 
 ## core concepts
 
@@ -20,22 +20,42 @@
 
 plugins extend the assistant's functionality.
 
-included plugins:
+core plugins:
 
 | plugin | function |
 |-|-|
 | `bash` | lets your agent run bash. go wild!! be free!! |
-| `discord` | lets you chat with your agent through discord |
 | `memory` | remember things |
 | `timers` | schedule repeating (cron-style) or one-off (at-style) wakeups |
 | `plugins` | add/remove plugins |
+
+chat plugins:
+
+| plugin | function |
+|-|-|
+| `discord` | lets you chat with your agent through discord |
+
+productive plugins:
+
+| plugin | function |
+|-|-|
 | `claude-code` | spawn little headless claude codes and check on them |
+| `openai-codex` | same but codex |
+| `view-image` | put visual inputs into your context window |
+| `web-browse` | browse the web in a persistent browser, using text or screenshots |
+| `gmail` | read your emails |
+| `google-calendar` | read and edit your calendar events |
+| `google-sheets` | read and edit your sheets |
+| `nano-banana` | generate images |
 
-plugins can:
+the way plugins work is they:
 
-- provide **tools** the llm can call
-- inject a little bit of **knowledge** into the system prompt
-- hook into the agent loop at a thoughtful set of lifecycle extension points
+- supply **tools** the llm can call
+- supply **knowledge** that is injected into the system prompt
+- inject **messages**
+- **hook** into the agent loop at a thoughtful set of extension points
+
+see [`interface Plugin` in plugin.ts](server/plugin.ts#L26)
 
 ## configuration and files
 
