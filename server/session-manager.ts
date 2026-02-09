@@ -198,7 +198,7 @@ export function createSessionManager(
         const formattedAfter = afterTokens.toLocaleString()
         await routeOutput(config.notifyOnRestart, {
           type: 'text',
-          text: `compacted: ${formattedBefore} → ${formattedAfter} tokens`
+          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens)`
         })
         await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
       } catch (err) {
