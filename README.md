@@ -1,5 +1,5 @@
 <p align="center"><img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png" width="400px"></p>
-<p align="center">a simple extensible personal assistant<br><i>everything in this README file is human-written.</i></p>
+<p align="center">a simple extensible assistant<br><i>everything in this README file is human-written.</i></p>
 
 
 ## quick start
@@ -29,7 +29,7 @@ included plugins:
 | `memory` | remember things |
 | `timers` | schedule repeating (cron-style) or one-off (at-style) wakeups |
 | `plugins` | add/remove plugins |
-| `claude-code-direct` | spawn little headless claude codes and check on them |
+| `claude-code` | spawn little headless claude codes and check on them |
 
 plugins can:
 

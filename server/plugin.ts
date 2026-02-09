@@ -7,9 +7,8 @@ import { readdir } from 'node:fs/promises'
 import createBashPlugin from '../plugins/bash/index.ts'
 import createMemoryPlugin from '../plugins/memory/index.ts'
 import createDiscordPlugin from '../plugins/discord/index.ts'
-import createClaudeCodeTmuxPlugin from '../plugins/claude-code-tmux/index.ts'
 import createTimersPlugin from '../plugins/timers/index.ts'
-import createClaudeCodeDirectPlugin from '../plugins/claude-code-direct/index.ts'
+import createClaudeCodePlugin from '../plugins/claude-code/index.ts'
 import createWebBrowsePlugin from '../plugins/web-browse/index.ts'
 import createPluginsPlugin from '../plugins/plugins/index.ts'
 import createGoogleSheetsPlugin from '../plugins/google-sheets/index.ts'
@@ -64,9 +63,8 @@ const BUILTIN_PLUGINS: Record<string, (serverContext?: any) => Plugin> = {
   'bash': createBashPlugin,
   'memory': createMemoryPlugin,
   'discord': createDiscordPlugin,
-  'claude-code-tmux': createClaudeCodeTmuxPlugin,
   'timers': createTimersPlugin,
-  'claude-code-direct': createClaudeCodeDirectPlugin,
+  'claude-code': createClaudeCodePlugin,
   'web-browse': createWebBrowsePlugin,
   'plugins': createPluginsPlugin,
   'google-sheets': createGoogleSheetsPlugin,
