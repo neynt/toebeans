@@ -243,6 +243,13 @@ async function main() {
               content,
               outputTarget: effectiveOutputTarget || '',
             })
+
+            // notify the sender that their message will be injected
+            if (effectiveOutputTarget) {
+              routeOutput(effectiveOutputTarget, { type: 'text', text: '(queued — will inject between tool calls)' })
+                .then(() => routeOutput(effectiveOutputTarget, { type: 'text_block_end' }))
+                .catch(() => {}) // best-effort notification
+            }
             continue
           }
 
@@ -397,6 +404,9 @@ async function main() {
             content: [{ type: 'text', text: msg.content }],
             outputTarget: '',
           })
+          // notify via websocket broadcast
+          broadcast(wsSessionId, { type: 'text', text: '(queued — will inject between tool calls)' })
+          broadcast(wsSessionId, { type: 'text_block_end' })
           break
         }
 
