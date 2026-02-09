@@ -155,25 +155,47 @@ async function main() {
 
         try {
           sessionAbort.set(sessionId, false)
+          const resumeOnChunk = async (chunk: ServerMessage) => {
+            broadcast(sessionId, chunk)
+            await outputFn(chunk)
+          }
+          const resumeCheckInterrupts = () => {
+            const buffer = interruptBuffers.get(sessionId) || []
+            interruptBuffers.set(sessionId, [])
+            return buffer
+          }
+          const resumeCheckAbort = () => {
+            return sessionAbort.get(sessionId) || false
+          }
+
           await runAgentTurn([{ type: 'text', text: 'server restarted successfully. continuing from where you left off.' }], {
             provider,
             system: buildSystemPrompt,
             tools: getTools,
             sessionId,
             workingDir: getWorkspaceDir(),
-            onChunk: async (chunk) => {
-              broadcast(sessionId, chunk)
-              await outputFn(chunk)
-            },
-            checkInterrupts: () => {
-              const buffer = interruptBuffers.get(sessionId) || []
-              interruptBuffers.set(sessionId, [])
-              return buffer
-            },
-            checkAbort: () => {
-              return sessionAbort.get(sessionId) || false
-            },
+            onChunk: resumeOnChunk,
+            checkInterrupts: resumeCheckInterrupts,
+            checkAbort: resumeCheckAbort,
           })
+
+          // drain remaining interrupts as new turns
+          while (true) {
+            const remaining = resumeCheckInterrupts()
+            if (remaining.length === 0) break
+            console.log(`[server] draining ${remaining.length} remaining interrupt(s) as new turn`)
+            const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+            await runAgentTurn(interruptContent, {
+              provider,
+              system: buildSystemPrompt,
+              tools: getTools,
+              sessionId,
+              workingDir: getWorkspaceDir(),
+              onChunk: resumeOnChunk,
+              checkInterrupts: resumeCheckInterrupts,
+              checkAbort: resumeCheckAbort,
+            })
+          }
 
           await sessionManager.checkCompaction(sessionId, resumeRoute)
         } catch (err) {
@@ -263,30 +285,50 @@ async function main() {
           }
 
           try {
+            const agentOnChunk = async (chunk: ServerMessage) => {
+              broadcast(conversationSessionId, chunk)
+              if (outputFn) {
+                await outputFn(chunk)
+              }
+            }
+            const agentCheckInterrupts = () => {
+              const buffer = interruptBuffers.get(conversationSessionId) || []
+              interruptBuffers.set(conversationSessionId, [])
+              return buffer
+            }
+            const agentCheckAbort = () => {
+              return sessionAbort.get(conversationSessionId) || false
+            }
+
             await runAgentTurn(content, {
               provider,
               system: buildSystemPrompt,
               tools: getTools,
               sessionId: conversationSessionId,
               workingDir: getWorkspaceDir(),
-              onChunk: async (chunk) => {
-                broadcast(conversationSessionId, chunk)
-
-                // stream all chunks to output function
-                if (outputFn) {
-                  await outputFn(chunk)
-                }
-              },
-              checkInterrupts: () => {
-                // drain interrupt buffer and return messages
-                const buffer = interruptBuffers.get(conversationSessionId) || []
-                interruptBuffers.set(conversationSessionId, [])
-                return buffer
-              },
-              checkAbort: () => {
-                return sessionAbort.get(conversationSessionId) || false
-              },
+              onChunk: agentOnChunk,
+              checkInterrupts: agentCheckInterrupts,
+              checkAbort: agentCheckAbort,
             })
+
+            // drain any remaining interrupts that arrived during a no-tool-use response
+            // (checkInterrupts only runs between tool calls, so these would be stranded)
+            while (true) {
+              const remaining = agentCheckInterrupts()
+              if (remaining.length === 0) break
+              console.log(`[${name}] draining ${remaining.length} remaining interrupt(s) as new turn`)
+              const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+              await runAgentTurn(interruptContent, {
+                provider,
+                system: buildSystemPrompt,
+                tools: getTools,
+                sessionId: conversationSessionId,
+                workingDir: getWorkspaceDir(),
+                onChunk: agentOnChunk,
+                checkInterrupts: agentCheckInterrupts,
+                checkAbort: agentCheckAbort,
+              })
+            }
 
             // check if session needs compaction
             await sessionManager.checkCompaction(conversationSessionId, route)
@@ -418,22 +460,45 @@ async function main() {
         await setLastOutputTarget(null)
 
         try {
+          const wsOnChunk = (chunk: ServerMessage) => broadcast(wsSessionId, chunk)
+          const wsCheckInterrupts = () => {
+            const buffer = interruptBuffers.get(wsSessionId) || []
+            interruptBuffers.set(wsSessionId, [])
+            return buffer
+          }
+          const wsCheckAbort = () => {
+            return sessionAbort.get(wsSessionId) || false
+          }
+
           await runAgentTurn([{ type: 'text', text: msg.content }], {
             provider,
             system: buildSystemPrompt,
             tools: getTools,
             sessionId: wsSessionId,
             workingDir: getWorkspaceDir(),
-            onChunk: (chunk) => broadcast(wsSessionId, chunk),
-            checkInterrupts: () => {
-              const buffer = interruptBuffers.get(wsSessionId) || []
-              interruptBuffers.set(wsSessionId, [])
-              return buffer
-            },
-            checkAbort: () => {
-              return sessionAbort.get(wsSessionId) || false
-            },
+            onChunk: wsOnChunk,
+            checkInterrupts: wsCheckInterrupts,
+            checkAbort: wsCheckAbort,
           })
+
+          // drain remaining interrupts as new turns
+          while (true) {
+            const remaining = wsCheckInterrupts()
+            if (remaining.length === 0) break
+            console.log(`[websocket] draining ${remaining.length} remaining interrupt(s) as new turn`)
+            const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+            await runAgentTurn(interruptContent, {
+              provider,
+              system: buildSystemPrompt,
+              tools: getTools,
+              sessionId: wsSessionId,
+              workingDir: getWorkspaceDir(),
+              onChunk: wsOnChunk,
+              checkInterrupts: wsCheckInterrupts,
+              checkAbort: wsCheckAbort,
+            })
+          }
+
           await sessionManager.checkCompaction(wsSessionId, wsRoute)
         } catch (err) {
           console.error('agent error:', err)
