@@ -9,8 +9,12 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 const SERVICE_ACCOUNT_PATH = join(homedir(), '.toebeans', 'secrets', 'google-service-account.json')
-const DEFAULT_TIMEZONE = 'America/New_York'
 
+interface GoogleCalendarConfig {
+  timezone?: string
+}
+
+let pluginConfig: GoogleCalendarConfig = {}
 let calendarClient: calendar_v3.Calendar | null = null
 
 async function getCalendar() {
@@ -54,7 +58,7 @@ function buildEventDateTime(value: string): calendar_v3.Schema$EventDateTime {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return { date: value }
   }
-  return { dateTime: value, timeZone: DEFAULT_TIMEZONE }
+  return { dateTime: value, timeZone: pluginConfig.timezone ?? 'America/New_York' }
 }
 
 const tools: Tool[] = [
@@ -336,5 +340,9 @@ export default function create(): Plugin {
     name: 'google-calendar',
     description: 'read and manage google calendar events via service account',
     tools,
+
+    async init(cfg: unknown) {
+      pluginConfig = (cfg as GoogleCalendarConfig) ?? {}
+    },
   }
 }
