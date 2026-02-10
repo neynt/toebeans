@@ -11,6 +11,18 @@ import { mkdir } from 'node:fs/promises'
 
 chromium.use(StealthPlugin())
 
+// --- plugin config ---
+
+interface WebBrowseConfig {
+  locale?: string
+  timezone?: string
+  sessionTimeoutMs?: number
+  navigationTimeout?: number
+  maxContentLength?: number
+}
+
+let pluginConfig: WebBrowseConfig = {}
+
 // --- cookie persistence ---
 
 const COOKIE_PATH = join(getDataDir(), 'secrets', 'browser-cookies.json')
@@ -60,8 +72,8 @@ async function createContextWithCookies(browser: Browser): Promise<BrowserContex
   const context = await browser.newContext({
     userAgent: USER_AGENT,
     viewport: { width: 1920, height: 1080 },
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
+    locale: pluginConfig.locale ?? 'en-US',
+    timezoneId: pluginConfig.timezone ?? 'America/New_York',
   })
   const cookies = await loadCookies()
   if (cookies.length > 0) {
@@ -79,7 +91,6 @@ interface PageSession {
   expiryTimer: ReturnType<typeof setTimeout>
 }
 
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const sessions = new Map<string, PageSession>()
 let sessionCounter = 0
 
@@ -87,12 +98,16 @@ function generateSessionId(): string {
   return `browse-${++sessionCounter}-${Date.now().toString(36)}`
 }
 
+function getSessionTimeout(): number {
+  return pluginConfig.sessionTimeoutMs ?? 300000
+}
+
 function touchSession(id: string): void {
   const session = sessions.get(id)
   if (!session) return
   session.lastActivity = Date.now()
   clearTimeout(session.expiryTimer)
-  session.expiryTimer = setTimeout(() => expireSession(id), SESSION_TIMEOUT_MS)
+  session.expiryTimer = setTimeout(() => expireSession(id), getSessionTimeout())
 }
 
 async function expireSession(id: string): Promise<void> {
@@ -121,7 +136,7 @@ async function getOrCreateSession(sessionId?: string): Promise<{ id: string; ses
     context,
     page,
     lastActivity: Date.now(),
-    expiryTimer: setTimeout(() => expireSession(id), SESSION_TIMEOUT_MS),
+    expiryTimer: setTimeout(() => expireSession(id), getSessionTimeout()),
   }
   sessions.set(id, session)
   return { id, session }
@@ -145,7 +160,7 @@ function htmlToMarkdown(html: string): string {
 
   content = content.replace(/\n\n\n+/g, '\n\n')
 
-  const maxLength = 50000
+  const maxLength = pluginConfig.maxContentLength ?? 50000
   if (content.length > maxLength) {
     content = content.slice(0, maxLength) + '\n\n[... truncated, content too long]'
   }
@@ -200,6 +215,10 @@ export default function createWebBrowsePlugin(): Plugin {
     name: 'web-browse',
     description: 'Browse web pages with JavaScript rendering. Supports stateless browsing (web_browse), interactive sessions (web_interact), and screenshots (web_screenshot).',
 
+    async init(cfg: unknown) {
+      pluginConfig = (cfg as WebBrowseConfig) ?? {}
+    },
+
     tools: [
       // --- web_browse (existing, now with cookies) ---
       {
@@ -215,7 +234,8 @@ export default function createWebBrowsePlugin(): Plugin {
           required: ['url'],
         },
         async execute(input: unknown, _context: ToolContext): Promise<ToolResult> {
-          const { url, selector, timeout = 30000 } = input as { url: string; selector?: string; timeout?: number }
+          const navTimeout = pluginConfig.navigationTimeout ?? 30000
+          const { url, selector, timeout = navTimeout } = input as { url: string; selector?: string; timeout?: number }
 
           const browser = await getBrowser()
           const context = await createContextWithCookies(browser)
@@ -299,7 +319,7 @@ export default function createWebBrowsePlugin(): Plugin {
                 case 'goto':
                   if (!action.url) throw new Error('goto action requires url')
                   try {
-                    await page.goto(action.url, { waitUntil: 'networkidle', timeout: 30000 })
+                    await page.goto(action.url, { waitUntil: 'networkidle', timeout: pluginConfig.navigationTimeout ?? 30000 })
                   } catch (err: unknown) {
                     const error = err as Error
                     if (error.message.includes('Timeout') || error.message.includes('timeout')) {
@@ -327,7 +347,7 @@ export default function createWebBrowsePlugin(): Plugin {
                   break
                 case 'wait_for':
                   if (!action.selector) throw new Error('wait_for action requires selector')
-                  await page.waitForSelector(action.selector, { timeout: 30000 })
+                  await page.waitForSelector(action.selector, { timeout: pluginConfig.navigationTimeout ?? 30000 })
                   break
                 case 'evaluate':
                   if (!action.js) throw new Error('evaluate action requires js')
@@ -406,7 +426,7 @@ export default function createWebBrowsePlugin(): Plugin {
 
             try {
               try {
-                await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 })
+                await page.goto(url, { waitUntil: 'networkidle', timeout: pluginConfig.navigationTimeout ?? 30000 })
               } catch (err: unknown) {
                 const error = err as Error
                 if (error.message.includes('Timeout') || error.message.includes('timeout')) {
