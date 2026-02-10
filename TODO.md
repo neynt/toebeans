@@ -14,12 +14,15 @@
 - [x] session management
 - [x] manual compaction
 - [x] basic web browsing tool
-- [ ] qwen3-tts voice
-- [ ] see images
-- [ ] use a local llm?
-- [ ] visual web browser tool
+- [x] qwen3-tts voice
+- [x] see images
+- [x] more correct debug cli commands
+- [ ] knowledge revamp
+- [ ] lower effort claude by default
+- [ ] local llm support?
+- [x] visual web browser tool
 - [ ] scheduled wakeups
 - [ ] tui should display a full audit log, including a history of all tool calls
 - [ ] brave web search api
 - [ ] google local places api
-- [ ] knowledge revamp
+- [ ] browser stealth

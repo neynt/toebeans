@@ -1,6 +1,7 @@
 import type { LlmProvider } from './llm-provider.ts'
 import type { Message } from './types.ts'
 import type { Config } from './config.ts'
+import type { PluginManager } from './plugin.ts'
 import { repairMessages } from './agent.ts'
 import {
   getCurrentSessionId,
@@ -10,21 +11,11 @@ import {
   getSessionCreatedAt,
   writeSession,
   generateSessionId,
-  getKnowledgeDir,
 } from './session.ts'
-import { join } from 'path'
 
-const COMPACTION_PROMPT = `Summarize this conversation for your future self. You are being compacted — this summary will be the only context you have when the conversation continues.
+const DEFAULT_COMPACTION_PROMPT = `Summarize this conversation for your future self. You are being compacted — this summary will be the only context you have when the conversation continues.
 
-Write two sections:
-
-## Summary
-Concise summary of what happened. Include key topics, decisions, completed tasks, and any pending tasks. Preserve important details like IDs, names, and technical specifics you'll need.
-
-## User Knowledge
-New facts learned about the user (preferences, environment, projects, communication style). If nothing new was learned, write "nothing new".
-
-Be brief but don't lose anything you'd regret forgetting.`
+Be brief but don't lose anything you'd regret forgetting. Include key topics, decisions, completed tasks, pending tasks, and important details like IDs, names, and technical specifics.`
 
 export interface SessionManager {
   getSessionForMessage(route?: string): Promise<string>
@@ -43,11 +34,12 @@ export function createSessionManager(
   provider: LlmProvider,
   config: Config,
   routeOutput?: (target: string, message: any) => Promise<void>,
+  pluginManager?: PluginManager,
 ): SessionManager {
   const { compactAtTokens, lifespanSeconds } = config.session
+  const compactionPrompt = config.session.compactionPrompt || DEFAULT_COMPACTION_PROMPT
 
   // trim tool_result content to keep compaction cache-friendly
-  // the actual messages stay intact so the cache prefix hits
   function trimForCompaction(messages: Message[]): Message[] {
     return messages.map(msg => ({
       role: msg.role,
@@ -59,7 +51,6 @@ export function createSessionManager(
               : block.content
             return { ...block, content: trimmed }
           }
-          // rich content: trim text blocks, drop images entirely for compaction
           const trimmed = block.content
             .filter(b => b.type === 'text')
             .map(b => {
@@ -75,19 +66,16 @@ export function createSessionManager(
     }))
   }
 
-  async function compactAndExtract(messages: Message[]): Promise<{ summary: string; knowledge: string | null }> {
-    // send the actual session messages (cache-friendly!) with tool results trimmed,
-    // then append a user message asking for the summary
+  async function generateSummary(messages: Message[]): Promise<string> {
     const trimmed = trimForCompaction(messages)
 
-    // if last message is a user message, merge the prompt into it to avoid consecutive user messages
     const lastMsg = trimmed[trimmed.length - 1]
     if (lastMsg?.role === 'user') {
-      lastMsg.content.push({ type: 'text', text: COMPACTION_PROMPT })
+      lastMsg.content.push({ type: 'text', text: compactionPrompt })
     } else {
       trimmed.push({
         role: 'user',
-        content: [{ type: 'text', text: COMPACTION_PROMPT }],
+        content: [{ type: 'text', text: compactionPrompt }],
       })
     }
 
@@ -102,44 +90,7 @@ export function createSessionManager(
       }
     }
 
-    // parse out sections
-    const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Knowledge|$)/)
-    const knowledgeMatch = result.match(/## User Knowledge\s*\n([\s\S]*)/)
-
-    const summary = summaryMatch?.[1]?.trim() || result.trim()
-    const knowledgeRaw = knowledgeMatch?.[1]?.trim()
-    const knowledge = knowledgeRaw && !/^nothing new/i.test(knowledgeRaw) ? knowledgeRaw : null
-
-    return { summary, knowledge }
-  }
-
-  async function appendToKnowledge(content: string): Promise<void> {
-    const knowledgePath = join(getKnowledgeDir(), 'USER.md')
-    const file = Bun.file(knowledgePath)
-    const timestamp = new Date().toISOString().slice(0, 10)
-    const entry = `\n## ${timestamp}\n\n${content}\n`
-
-    if (await file.exists()) {
-      const existing = await file.text()
-      await Bun.write(knowledgePath, existing + entry)
-    } else {
-      await Bun.write(knowledgePath, `# About the user\n${entry}`)
-    }
-  }
-
-  async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
-    const today = new Date().toISOString().slice(0, 10)
-    const dailyLogPath = join(getKnowledgeDir(), `${today}.md`)
-    const file = Bun.file(dailyLogPath)
-    const timestamp = new Date().toISOString().slice(11, 19)
-    const entry = `\n### ${timestamp} (session ${sessionId})\n\n${content}\n`
-
-    if (await file.exists()) {
-      const existing = await file.text()
-      await Bun.write(dailyLogPath, existing + entry)
-    } else {
-      await Bun.write(dailyLogPath, `# Daily Log - ${today}\n${entry}`)
-    }
+    return result.trim()
   }
 
   async function compactSession(sessionId: string, route?: string): Promise<string> {
@@ -154,17 +105,13 @@ export function createSessionManager(
     // repair interrupted tool calls before sending to API
     const messages = repairMessages(rawMessages)
 
-    // generate summary + extract knowledge in one call (cache-friendly)
-    const { summary, knowledge } = await compactAndExtract(messages)
-
-    // write summary to daily log
-    await appendToDailyLog(summary, sessionId)
-
-    // write user knowledge to USER.md (only salient/permanent info)
-    if (knowledge) {
-      console.log(`session-manager: extracted knowledge`)
-      await appendToKnowledge(knowledge)
+    // fire pre-compaction hooks (plugins can extract knowledge, write logs, etc.)
+    if (pluginManager) {
+      await pluginManager.firePreCompaction({ sessionId, route, messages, provider })
     }
+
+    // generate summary
+    const summary = await generateSummary(messages)
 
     // create new session with summary as context (same route)
     const newId = await generateSessionId(route)
@@ -180,7 +127,7 @@ export function createSessionManager(
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
 
-    // send compaction report to discord if routeOutput is available
+    // send compaction report if routeOutput is available
     if (routeOutput && config.notifyOnRestart) {
       try {
         const formattedBefore = beforeTokens.toLocaleString()

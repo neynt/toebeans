@@ -9,6 +9,7 @@ const configSchema = z.object({
   session: z.object({
     compactAtTokens: z.number(),
     lifespanSeconds: z.number(),
+    compactionPrompt: z.string().optional(),
   }).passthrough(),
   plugins: z.record(z.string(), z.unknown()),
   llm: z.object({

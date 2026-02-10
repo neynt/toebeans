@@ -1,8 +1,73 @@
-import type { Plugin } from '../../server/plugin.ts'
-import type { Tool, ToolResult, ToolContext } from '../../server/types.ts'
+import type { Plugin, PreCompactionContext } from '../../server/plugin.ts'
+import type { Tool, ToolResult, Message } from '../../server/types.ts'
 import { getKnowledgeDir } from '../../server/session.ts'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import { $ } from 'bun'
+
+const EXTRACTION_PROMPT = `You are extracting knowledge from a conversation that is about to be compacted. Respond with two sections:
+
+## Summary
+Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.
+
+## User Knowledge
+New facts learned about the user (preferences, environment, projects, communication style). If nothing new was learned, write "nothing new".
+
+Be concise.`
+
+function trimForCompaction(messages: Message[]): Message[] {
+  return messages.map(msg => ({
+    role: msg.role,
+    content: msg.content.map(block => {
+      if (block.type === 'tool_result') {
+        if (typeof block.content === 'string') {
+          const trimmed = block.content.length > 200
+            ? block.content.slice(0, 200) + '... (truncated)'
+            : block.content
+          return { ...block, content: trimmed }
+        }
+        const trimmed = block.content
+          .filter(b => b.type === 'text')
+          .map(b => {
+            if (b.type === 'text' && b.text.length > 200) {
+              return { ...b, text: b.text.slice(0, 200) + '... (truncated)' }
+            }
+            return b
+          })
+        return { ...block, content: trimmed }
+      }
+      return block
+    }),
+  }))
+}
+
+async function appendToKnowledge(content: string): Promise<void> {
+  const knowledgePath = join(getKnowledgeDir(), 'USER.md')
+  const file = Bun.file(knowledgePath)
+  const timestamp = new Date().toISOString().slice(0, 10)
+  const entry = `\n## ${timestamp}\n\n${content}\n`
+
+  if (await file.exists()) {
+    const existing = await file.text()
+    await Bun.write(knowledgePath, existing + entry)
+  } else {
+    await Bun.write(knowledgePath, `# About the user\n${entry}`)
+  }
+}
+
+async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10)
+  const dailyLogPath = join(getKnowledgeDir(), `${today}.md`)
+  const file = Bun.file(dailyLogPath)
+  const timestamp = new Date().toISOString().slice(11, 19)
+  const entry = `\n### ${timestamp} (session ${sessionId})\n\n${content}\n`
+
+  if (await file.exists()) {
+    const existing = await file.text()
+    await Bun.write(dailyLogPath, existing + entry)
+  } else {
+    await Bun.write(dailyLogPath, `# Daily Log - ${today}\n${entry}`)
+  }
+}
 
 function createMemoryTools(): Tool[] {
   return [
@@ -109,5 +174,90 @@ export default function createMemoryPlugin(): Plugin {
     name: 'memory',
     description: `Long-term memory. Stored as markdown files in ~/.toebeans/knowledge/.`,
     tools: createMemoryTools(),
+
+    async onPreCompaction(context: PreCompactionContext) {
+      const { sessionId, messages, provider } = context
+
+      // trim tool results before sending to LLM
+      const trimmed = trimForCompaction(messages)
+
+      // append extraction prompt
+      const lastMsg = trimmed[trimmed.length - 1]
+      if (lastMsg?.role === 'user') {
+        lastMsg.content.push({ type: 'text', text: EXTRACTION_PROMPT })
+      } else {
+        trimmed.push({
+          role: 'user',
+          content: [{ type: 'text', text: EXTRACTION_PROMPT }],
+        })
+      }
+
+      let result = ''
+      for await (const chunk of provider.stream({
+        messages: trimmed,
+        system: 'You are extracting knowledge before compaction. Respond with the requested sections.',
+        tools: [],
+      })) {
+        if (chunk.type === 'text') {
+          result += chunk.text
+        }
+      }
+
+      // parse sections
+      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Knowledge|$)/)
+      const knowledgeMatch = result.match(/## User Knowledge\s*\n([\s\S]*)/)
+
+      const summary = summaryMatch?.[1]?.trim() || result.trim()
+      const knowledgeRaw = knowledgeMatch?.[1]?.trim()
+      const knowledge = knowledgeRaw && !/^nothing new/i.test(knowledgeRaw) ? knowledgeRaw : null
+
+      // write summary to daily log
+      await appendToDailyLog(summary, sessionId)
+
+      // write user knowledge to USER.md
+      if (knowledge) {
+        console.log(`memory: extracted knowledge from session ${sessionId}`)
+        await appendToKnowledge(knowledge)
+      }
+    },
+
+    async buildSystemPrompt() {
+      const parts: string[] = []
+      const knowledgeDir = getKnowledgeDir()
+
+      // user knowledge
+      const userKnowledgePath = join(knowledgeDir, 'USER.md')
+      const userKnowledgeFile = Bun.file(userKnowledgePath)
+      if (await userKnowledgeFile.exists()) {
+        const content = await userKnowledgeFile.text()
+        if (content.trim()) {
+          parts.push(content)
+        }
+      }
+
+      // recent daily logs (today and yesterday)
+      const recentLogs: string[] = []
+      const today = new Date()
+      const yesterday = new Date(today)
+      yesterday.setDate(yesterday.getDate() - 1)
+
+      for (const date of [today, yesterday]) {
+        const dateStr = date.toISOString().slice(0, 10)
+        const dailyLogPath = join(knowledgeDir, `${dateStr}.md`)
+        const dailyLogFile = Bun.file(dailyLogPath)
+        if (await dailyLogFile.exists()) {
+          const content = await dailyLogFile.text()
+          if (content.trim()) {
+            recentLogs.push(content)
+          }
+        }
+      }
+
+      if (recentLogs.length > 0) {
+        parts.push('## Recent Activity\n\n' + recentLogs.join('\n\n'))
+      }
+
+      return parts.length > 0 ? parts.join('\n\n') : null
+    },
   }
 }

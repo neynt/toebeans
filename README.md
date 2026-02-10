@@ -1,12 +1,11 @@
 <p align="center"><img src="https://github.com/neynt/toebeans/raw/refs/heads/main/toebeans.png" width="400px"></p>
 <p align="center">a simple extensible assistant<br><i>everything in this README file is human-written.</i></p>
 
-
 ## quick start
 
 1. clone this repo
 2. `while true; do bun run server; sleep 3; done`
-3. probably some config stuff TODO get back to this
+3. probably some config stuff? TODO get back to this, works for me tm
 4. if you like it, set up a systemd unit
 
 ## core concepts
@@ -95,6 +94,10 @@ workspace directory was a mess. i had no idea what was feeding into the context
 window at any given point in time, or when it would decide to compact, or
 create a new session. and of course the nest of bitcoin jackers on molthub was
 terrifying.
+
+i have plenty of grievances. but none of that should detract from my gratitude
+for openclaw existing in the first place -- it showed us all what's possible in
+an extraordinarily visceral way.
 
 [nanoclaw](https://github.com/gavrielc/nanoclaw.git) seemed like a step in the
 right direction. i admire its simplicity. but i think it goes a little too far

@@ -1,13 +1,16 @@
-import type { Tool, Message, AgentResult, ServerMessage } from './types.ts'
+import type { Tool, Message, ServerMessage } from './types.ts'
+import type { LlmProvider } from './llm-provider.ts'
 import { getPluginsDir } from './session.ts'
 import { join, resolve, dirname } from 'path'
 import { readdir } from 'node:fs/promises'
 
 const BUILTIN_PLUGINS_DIR = resolve(dirname(import.meta.dir), 'plugins')
 
-export interface Session {
-  id: string
+export interface PreCompactionContext {
+  sessionId: string
+  route?: string
   messages: Message[]
+  provider: LlmProvider
 }
 
 export interface Plugin {
@@ -18,14 +21,9 @@ export interface Plugin {
   // capabilities
   tools?: Tool[]
 
-  // lifecycle hooks
-  on?: {
-    'message:in'?: (msg: Message) => Message | Promise<Message>
-    'message:out'?: (msg: Message) => Message | Promise<Message>
-    'agent:start'?: (session: Session) => void | Promise<void>
-    'agent:end'?: (session: Session, result: AgentResult) => void | Promise<void>
-    'session:expire'?: (session: Session) => void | Promise<void>
-  }
+  // hooks
+  onPreCompaction?: (context: PreCompactionContext) => void | Promise<void>
+  buildSystemPrompt?: () => string | null | Promise<string | null>
 
   // for channel plugins: yields incoming messages
   // outputTarget is optional - if provided, routes output to that target instead of back to this plugin
@@ -132,6 +130,27 @@ export class PluginManager {
     }
 
     return sections.join('\n\n')
+  }
+
+  async firePreCompaction(context: PreCompactionContext): Promise<void> {
+    for (const [, loaded] of this.plugins) {
+      if (loaded.plugin.onPreCompaction) {
+        await loaded.plugin.onPreCompaction(context)
+      }
+    }
+  }
+
+  async buildSystemPrompts(): Promise<string[]> {
+    const results: string[] = []
+    for (const [, loaded] of this.plugins) {
+      if (loaded.plugin.buildSystemPrompt) {
+        const result = await loaded.plugin.buildSystemPrompt()
+        if (result) {
+          results.push(result)
+        }
+      }
+    }
+    return results
   }
 
   async destroy(): Promise<void> {

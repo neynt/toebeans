@@ -2,8 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { ClientMessage, ServerMessage, Tool, ContentBlock } from './types.ts'
 import { PluginManager } from './plugin.ts'
 import { loadConfig } from './config.ts'
-import { ensureDataDirs, loadSession, getSoulPath, listSessions, getKnowledgeDir, getWorkspaceDir, setLastOutputTarget, getLastOutputTarget, getCurrentSessionId } from './session.ts'
-import { join } from 'path'
+import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir, setLastOutputTarget, getLastOutputTarget, getCurrentSessionId } from './session.ts'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../llm-providers/anthropic.ts'
@@ -90,7 +89,7 @@ async function main() {
   serverContext.routeOutput = routeOutput
 
   // create session manager with routeOutput available
-  const sessionManager = createSessionManager(provider, config, routeOutput)
+  const sessionManager = createSessionManager(provider, config, routeOutput, pluginManager)
 
   // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {
@@ -358,42 +357,14 @@ async function main() {
     // soul first - sets the tone
     parts.push(soul)
 
-    // user knowledge (if exists)
-    const userKnowledgePath = join(getKnowledgeDir(), 'USER.md')
-    const userKnowledgeFile = Bun.file(userKnowledgePath)
-    if (await userKnowledgeFile.exists()) {
-      const userKnowledge = await userKnowledgeFile.text()
-      if (userKnowledge.trim()) {
-        parts.push(userKnowledge)
-      }
-    }
-
-    // recent daily logs (today and yesterday)
-    const recentLogs: string[] = []
-    const today = new Date()
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-
-    for (const date of [today, yesterday]) {
-      const dateStr = date.toISOString().slice(0, 10)
-      const dailyLogPath = join(getKnowledgeDir(), `${dateStr}.md`)
-      const dailyLogFile = Bun.file(dailyLogPath)
-      if (await dailyLogFile.exists()) {
-        const content = await dailyLogFile.text()
-        if (content.trim()) {
-          recentLogs.push(content)
-        }
-      }
-    }
-
-    if (recentLogs.length > 0) {
-      parts.push('## Recent Activity\n\n' + recentLogs.join('\n\n'))
-    }
+    // plugin-contributed prompts (memory, etc.)
+    const pluginPrompts = await pluginManager.buildSystemPrompts()
+    parts.push(...pluginPrompts)
 
     // then context
     parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
-    // then plugin instructions
+    // then plugin instructions (tool descriptions)
     const pluginSection = pluginManager.getSystemPromptSection()
     if (pluginSection) {
       parts.push(pluginSection)
