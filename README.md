@@ -16,11 +16,20 @@
 | `llm-providers/` | common interface for LLM APIs. currently only claude |
 | `plugins/` | pluggable units of functionality |
 
+## configuration and files
+
+| path | contents |
+|-|-|
+| `~/.toebeans/config.json` | main config file. a simple one will be created after first run |
+| `~/.toebeans/SOUL.md` | user-customizable start of the system message |
+| `~/.toebeans/secrets` | where plugins store shared secrets / API keys |
+| `~/.toebeans/$plugin_name` | typically where plugins store their data |
+
 ## plugins
 
 plugins extend the assistant's functionality.
 
-core plugins:
+### core plugins
 
 | plugin | function |
 |-|-|
@@ -29,26 +38,28 @@ core plugins:
 | `timers` | schedule repeating (cron-style) or one-off (at-style) wakeups |
 | `plugins` | add/remove plugins |
 
-chat plugins:
+### chat plugins
 
 | plugin | function |
 |-|-|
 | `discord` | lets you chat with your agent through discord |
 
-productive plugins:
+### productive plugins
 
 | plugin | function |
 |-|-|
 | `claude-code` | spawn little headless claude codes and check on them |
 | `openai-codex` | same but codex |
-| `view-image` | put visual inputs into your context window |
+| `view-image` | put images into your context window |
 | `web-browse` | browse the web in a persistent browser, using text or screenshots |
 | `gmail` | read your emails |
 | `google-calendar` | read and edit your calendar events |
 | `google-sheets` | read and edit your sheets |
 | `nano-banana` | generate images |
 
-the way plugins work is they:
+### the way plugins work
+
+plugins can:
 
 - supply **tools** the llm can call
 - supply **knowledge** that is injected into the system prompt
@@ -56,11 +67,6 @@ the way plugins work is they:
 - **hook** into the agent loop at a thoughtful set of extension points
 
 see [`interface Plugin` in plugin.ts](server/plugin.ts#L13)
-
-## configuration and files
-
-`~/.toebeans/config.json` is where your config goes. plugins typically store
-stuff in `~/.toebeans/$plugin_name`
 
 ## security model
 

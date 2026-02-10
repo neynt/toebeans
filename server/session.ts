@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, unlink } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message, SessionInfo } from './types.ts'
@@ -6,30 +6,7 @@ import { countMessagesTokens } from './tokens.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
 const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
-const STATE_PATH = join(TOEBEANS_DIR, 'state.json')
-
-interface SessionState {
-  currentSessionId: string | null  // legacy, migrated to routeSessions
-  routeSessions: Record<string, string>  // route -> current session ID
-  finishedSessions: string[]  // session IDs that are finished
-  lastOutputTarget?: string  // last output target for auto-resume after restart
-}
-
-async function loadState(): Promise<SessionState> {
-  const file = Bun.file(STATE_PATH)
-  if (await file.exists()) {
-    try {
-      return await file.json() as SessionState
-    } catch {
-      // corrupted state, reset
-    }
-  }
-  return { currentSessionId: null, routeSessions: {}, finishedSessions: [] }
-}
-
-async function saveState(state: SessionState): Promise<void> {
-  await Bun.write(STATE_PATH, JSON.stringify(state, null, 2))
-}
+const RESUME_PATH = join(TOEBEANS_DIR, 'resume.json')
 
 export async function ensureDataDirs(): Promise<void> {
   await mkdir(SESSIONS_DIR, { recursive: true })
@@ -115,7 +92,6 @@ export async function listSessions(): Promise<SessionInfo[]> {
     const fullPath = join(SESSIONS_DIR, path)
     const stat = await Bun.file(fullPath).stat()
 
-    // use file creation time for both timestamps
     const createdAt = stat ? new Date(stat.birthtime) : new Date()
     const lastActiveAt = stat ? new Date(stat.mtime) : createdAt
 
@@ -149,55 +125,36 @@ export function getSoulPath(): string {
   return join(TOEBEANS_DIR, 'SOUL.md')
 }
 
-// get the current session for a route, creating one if needed
+// get the current session for a route by finding the most recently modified session file
 export async function getCurrentSessionId(route?: string): Promise<string> {
-  const state = await loadState()
+  const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
 
-  // migrate legacy global session to default route
-  if (state.currentSessionId && !state.routeSessions) {
-    state.routeSessions = {}
-  }
+  const glob = new Bun.Glob('*.jsonl')
+  let latestId: string | null = null
+  let latestMtime = 0
 
-  const routeKey = route || '_default'
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const sessionId = path.replace('.jsonl', '')
 
-  // check route-specific session first
-  const routeSession = state.routeSessions[routeKey]
-  if (routeSession && !state.finishedSessions.includes(routeSession)) {
-    return routeSession
-  }
+    if (routePrefix) {
+      // routed session: must start with the prefix
+      if (!sessionId.startsWith(routePrefix)) continue
+    } else {
+      // default route: must start with a digit (date-prefixed, no route)
+      if (!/^\d/.test(sessionId)) continue
+    }
 
-  // create new session for this route
-  const newId = await generateSessionId(route)
-  state.routeSessions[routeKey] = newId
-  // keep legacy field in sync for backwards compat with external tools
-  if (!route || route === '_default') {
-    state.currentSessionId = newId
-  }
-  await saveState(state)
-  return newId
-}
-
-// mark a session as finished (no new messages allowed)
-export async function markSessionFinished(sessionId: string): Promise<void> {
-  const state = await loadState()
-  if (!state.finishedSessions.includes(sessionId)) {
-    state.finishedSessions.push(sessionId)
-  }
-  if (state.currentSessionId === sessionId) {
-    state.currentSessionId = null
-  }
-  // remove from any route mappings
-  for (const [route, sid] of Object.entries(state.routeSessions)) {
-    if (sid === sessionId) {
-      delete state.routeSessions[route]
+    const stat = await Bun.file(join(SESSIONS_DIR, path)).stat()
+    if (stat && stat.mtimeMs > latestMtime) {
+      latestMtime = stat.mtimeMs
+      latestId = sessionId
     }
   }
-  await saveState(state)
-}
 
-export async function isSessionFinished(sessionId: string): Promise<boolean> {
-  const state = await loadState()
-  return state.finishedSessions.includes(sessionId)
+  if (latestId) return latestId
+
+  // no session found, create a new ID
+  return await generateSessionId(route)
 }
 
 // estimate token count for a session
@@ -206,13 +163,12 @@ export async function estimateSessionTokens(sessionId: string): Promise<number> 
   return countMessagesTokens(messages)
 }
 
-// get session creation time from file mtime (first message)
+// get session creation time from file birthtime
 export async function getSessionCreatedAt(sessionId: string): Promise<Date | null> {
   const path = getSessionPath(sessionId)
   const file = Bun.file(path)
   if (!(await file.exists())) return null
 
-  // use file birthtime
   const stat = await file.stat()
   return stat ? new Date(stat.birthtime) : null
 }
@@ -233,32 +189,23 @@ export async function writeSession(sessionId: string, messages: Message[]): Prom
   await Bun.write(path, lines)
 }
 
-// set the current session ID for a route (used after compaction)
-export async function setCurrentSessionId(sessionId: string, route?: string): Promise<void> {
-  const state = await loadState()
-  const routeKey = route || '_default'
-  if (!state.routeSessions) state.routeSessions = {}
-  state.routeSessions[routeKey] = sessionId
-  // keep legacy field in sync
-  if (!route || route === '_default') {
-    state.currentSessionId = sessionId
-  }
-  await saveState(state)
-}
-
 // set the last output target (for auto-resume after restart)
 export async function setLastOutputTarget(outputTarget: string | null): Promise<void> {
-  const state = await loadState()
   if (outputTarget) {
-    state.lastOutputTarget = outputTarget
+    await Bun.write(RESUME_PATH, JSON.stringify({ outputTarget }))
   } else {
-    delete state.lastOutputTarget
+    try { await unlink(RESUME_PATH) } catch { /* doesn't exist */ }
   }
-  await saveState(state)
 }
 
 // get the last output target
 export async function getLastOutputTarget(): Promise<string | null> {
-  const state = await loadState()
-  return state.lastOutputTarget || null
+  const file = Bun.file(RESUME_PATH)
+  if (!(await file.exists())) return null
+  try {
+    const data = await file.json() as { outputTarget?: string }
+    return data.outputTarget || null
+  } catch {
+    return null
+  }
 }
