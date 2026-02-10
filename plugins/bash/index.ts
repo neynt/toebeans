@@ -1,16 +1,15 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext, Message } from '../../server/types.ts'
-import { resolve } from 'path'
-import { homedir } from 'os'
-import { join } from 'path'
+import { resolve, join } from 'path'
 import { mkdir } from 'node:fs/promises'
+import { getDataDir } from '../../server/session.ts'
 
 const DEFAULT_TIMEOUT_S = 60
 const MAX_TIMEOUT_S = 600
 const SPAWN_DEFAULT_TIMEOUT_S = 600
 const SPAWN_MAX_TIMEOUT_S = 3600
 
-const BASH_LOGS_DIR = join(homedir(), '.toebeans', 'bash-logs')
+const BASH_LOGS_DIR = join(getDataDir(), 'bash')
 
 interface SpawnedProcess {
   proc: ReturnType<typeof Bun.spawn>

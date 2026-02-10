@@ -1,10 +1,10 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { Tool, ToolResult, ToolContext, Message } from '../../server/types.ts'
 import { mkdir, readdir, stat } from 'node:fs/promises'
-import { homedir } from 'os'
 import { join } from 'path'
+import { getDataDir } from '../../server/session.ts'
 
-const LOG_DIR = join(homedir(), '.toebeans', 'codex')
+const LOG_DIR = join(getDataDir(), 'openai-codex')
 
 interface ProcessInfo {
   proc: ReturnType<typeof Bun.spawn>

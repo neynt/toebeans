@@ -4,7 +4,7 @@
 import type { Plugin, Tool, ToolResult } from '../../server/types.ts'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'path'
-import { homedir } from 'os'
+import { getDataDir } from '../../server/session.ts'
 
 interface NanoBananaConfig {
   apiKey: string
@@ -21,7 +21,7 @@ interface GeminiResponse {
   }>
 }
 
-const IMAGE_DIR = join(homedir(), '.toebeans', 'workspace', 'images')
+const IMAGE_DIR = join(getDataDir(), 'nano-banana')
 
 async function ensureImageDir(): Promise<void> {
   await mkdir(IMAGE_DIR, { recursive: true })

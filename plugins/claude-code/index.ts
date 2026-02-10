@@ -3,8 +3,9 @@ import type { Tool, ToolResult, ToolContext, Message } from '../../server/types.
 import { mkdir, readdir, stat, symlink, access } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
+import { getDataDir } from '../../server/session.ts'
 
-const LOG_DIR = join(homedir(), '.toebeans', 'claude-code')
+const LOG_DIR = join(getDataDir(), 'claude-code')
 const WORKTREE_BASE = join(homedir(), 'code', 'toebeans-wt')
 
 interface ProcessInfo {
