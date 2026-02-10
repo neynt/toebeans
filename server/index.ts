@@ -51,6 +51,7 @@ async function main() {
     apiKey: config.llm.apiKey,
     model: config.llm.model,
     thinkingBudget: config.llm.thinkingBudget,
+    effort: config.llm.effort,
   })
 
   const pluginManager = new PluginManager()

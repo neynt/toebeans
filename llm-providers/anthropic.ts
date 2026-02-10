@@ -10,11 +10,13 @@ export class AnthropicProvider implements LlmProvider {
   private client: Anthropic
   private model: string
   private thinkingBudget?: number
+  private effort?: 'low' | 'medium' | 'high' | 'max'
 
-  constructor(options: { apiKey?: string; model: string; thinkingBudget?: number }) {
+  constructor(options: { apiKey?: string; model: string; thinkingBudget?: number; effort?: 'low' | 'medium' | 'high' | 'max' }) {
     this.client = new Anthropic({ apiKey: options.apiKey })
     this.model = options.model
     this.thinkingBudget = options.thinkingBudget
+    this.effort = options.effort
   }
 
   async *stream(params: {
@@ -108,6 +110,9 @@ export class AnthropicProvider implements LlmProvider {
       tools: tools.length > 0 ? tools : undefined,
       ...(thinkingEnabled
         ? { thinking: { type: 'enabled' as const, budget_tokens: this.thinkingBudget! } }
+        : {}),
+      ...(this.effort
+        ? { output_config: { effort: this.effort } } as Record<string, unknown>
         : {}),
     })
 
