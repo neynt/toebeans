@@ -75,7 +75,7 @@ export default function createBashPlugin(): Plugin {
 
   return {
     name: 'bash',
-    description: 'Execute bash commands. IMPORTANT: NEVER restart the toebeans server via tmux or systemctl - only kanoko (the agent) should call restart_server.',
+    description: 'Execute bash commands.',
 
     input: inputGenerator(),
 

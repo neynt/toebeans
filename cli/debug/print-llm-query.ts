@@ -1,6 +1,5 @@
-import { PluginManager } from '../../server/plugin.ts'
 import { loadConfig } from '../../server/config.ts'
-import { loadSession, getSoulPath, listSessions } from '../../server/session.ts'
+import { listSessions } from '../../server/session.ts'
 
 export default async function printLlmQuery() {
   const sessionId = process.argv[3]
@@ -16,46 +15,13 @@ export default async function printLlmQuery() {
   }
 
   const config = await loadConfig()
+  const base = `http://localhost:${config.server.port}`
 
-  // load soul
-  const soulFile = Bun.file(getSoulPath())
-  const soul = await soulFile.exists() ? await soulFile.text() : '(no soul file)'
-
-  // set up plugins (skipInit — debug only needs tools/descriptions)
-  const pluginManager = new PluginManager()
-
-  for (const [name, pluginConfig] of Object.entries(config.plugins)) {
-    try {
-      await pluginManager.loadPlugin(name, pluginConfig, { skipInit: true })
-    } catch (err) {
-      console.error(`warning: failed to load plugin ${name}:`, err)
-    }
+  const res = await fetch(`${base}/debug/${sessionId}`)
+  if (!res.ok) {
+    console.error(`server returned ${res.status} — is it running?`)
+    process.exit(1)
   }
 
-  // build system prompt
-  const systemParts: string[] = [soul, `Current working directory: ${process.cwd()}`]
-  const pluginSection = pluginManager.getSystemPromptSection()
-  if (pluginSection) {
-    systemParts.push(pluginSection)
-  }
-  const system = systemParts.join('\n\n')
-
-  // get tools
-  const tools = pluginManager.getTools().map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema,
-  }))
-
-  // load messages
-  const messages = await loadSession(sessionId)
-
-  const raw = {
-    model: config.llm.model,
-    max_tokens: 8192,
-    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-    messages,
-    tools: tools.length > 0 ? tools : undefined,
-  }
-  console.log(JSON.stringify(raw, null, 2))
+  console.log(await res.text())
 }

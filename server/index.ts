@@ -568,6 +568,14 @@ async function main() {
         })
       }
 
+      // debug endpoint: GET /debug/system
+      if (url.pathname === '/debug/system') {
+        const system = await buildSystemPrompt()
+        return new Response(system, {
+          headers: { 'content-type': 'text/plain' },
+        })
+      }
+
       // debug endpoint: GET /debug/:sessionId
       const debugMatch = url.pathname.match(/^\/debug\/(.+)$/)
       if (debugMatch) {
