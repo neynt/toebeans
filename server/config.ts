@@ -8,6 +8,7 @@ const configSchema = z.object({
   }).passthrough(),
   session: z.object({
     compactAtTokens: z.number(),
+    compactMinTokens: z.number().default(5000),
     lifespanSeconds: z.number(),
     compactionPrompt: z.string().optional(),
   }).passthrough(),
