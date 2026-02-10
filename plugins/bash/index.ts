@@ -4,10 +4,14 @@ import { resolve, join } from 'path'
 import { mkdir } from 'node:fs/promises'
 import { getDataDir } from '../../server/session.ts'
 
-const DEFAULT_TIMEOUT_S = 60
-const MAX_TIMEOUT_S = 600
-const SPAWN_DEFAULT_TIMEOUT_S = 600
-const SPAWN_MAX_TIMEOUT_S = 3600
+interface BashConfig {
+  defaultTimeout?: number
+  maxTimeout?: number
+  spawnDefaultTimeout?: number
+  spawnMaxTimeout?: number
+}
+
+let pluginConfig: BashConfig = {}
 
 const BASH_LOGS_DIR = join(getDataDir(), 'bash')
 
@@ -77,6 +81,10 @@ export default function createBashPlugin(): Plugin {
     name: 'bash',
     description: 'Execute bash commands.',
 
+    async init(cfg: unknown) {
+      pluginConfig = (cfg as BashConfig) ?? {}
+    },
+
     input: inputGenerator(),
 
     tools: [
@@ -90,21 +98,21 @@ export default function createBashPlugin(): Plugin {
             workingDir: { type: 'string', description: 'Optional working directory' },
             timeout: {
               type: 'number',
-              description: `Timeout in seconds (default: ${DEFAULT_TIMEOUT_S}, max: ${MAX_TIMEOUT_S})`,
-              minimum: 1,
-              maximum: MAX_TIMEOUT_S,
+              description: 'Timeout in seconds (default: 60, max: 600, configurable)',
             },
           },
           required: ['command'],
         },
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-          const { command, workingDir, timeout = DEFAULT_TIMEOUT_S } = input as {
+          const defaultTimeout = pluginConfig.defaultTimeout ?? 60
+          const maxTimeout = pluginConfig.maxTimeout ?? 600
+          const { command, workingDir, timeout = defaultTimeout } = input as {
             command: string
             workingDir?: string
             timeout?: number
           }
           const cwd = workingDir ? resolve(context.workingDir, workingDir) : context.workingDir
-          const timeoutMs = Math.min(Math.max(timeout, 1), MAX_TIMEOUT_S) * 1000
+          const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeout) * 1000
 
           const proc = Bun.spawn(['bash', '-c', command], {
             cwd,
@@ -156,15 +164,15 @@ export default function createBashPlugin(): Plugin {
             workingDir: { type: 'string', description: 'Optional working directory' },
             timeout: {
               type: 'number',
-              description: `Timeout in seconds (default: ${SPAWN_DEFAULT_TIMEOUT_S}, max: ${SPAWN_MAX_TIMEOUT_S})`,
-              minimum: 1,
-              maximum: SPAWN_MAX_TIMEOUT_S,
+              description: 'Timeout in seconds (default: 600, max: 3600, configurable)',
             },
           },
           required: ['command'],
         },
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-          const { command, workingDir, timeout = SPAWN_DEFAULT_TIMEOUT_S } = input as {
+          const spawnDefaultTimeout = pluginConfig.spawnDefaultTimeout ?? 600
+          const spawnMaxTimeout = pluginConfig.spawnMaxTimeout ?? 3600
+          const { command, workingDir, timeout = spawnDefaultTimeout } = input as {
             command: string
             workingDir?: string
             timeout?: number
@@ -173,7 +181,7 @@ export default function createBashPlugin(): Plugin {
           await ensureBashLogsDir()
 
           const cwd = workingDir ? resolve(context.workingDir, workingDir) : context.workingDir
-          const timeoutMs = Math.min(Math.max(timeout, 1), SPAWN_MAX_TIMEOUT_S) * 1000
+          const timeoutMs = Math.min(Math.max(timeout, 1), spawnMaxTimeout) * 1000
           const logFilename = generateLogFilename()
           const logPath = join(BASH_LOGS_DIR, logFilename)
 
