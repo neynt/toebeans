@@ -21,6 +21,9 @@ interface DiscordConfig {
   allowDMs?: boolean  // respond to direct messages (default: true)
   transcribeVoice?: boolean  // transcribe voice messages (default: true)
   sessionManager?: any  // session manager instance for slash commands
+  whisperModel?: string  // whisper model for voice transcription (default: tiny)
+  typingDelayMaxMs?: number  // max typing delay in ms (default: 1000)
+  typingDelayPerCharMs?: number  // per-character typing delay in ms (default: 10)
 }
 
 interface QueuedMessage {
@@ -112,9 +115,9 @@ async function downloadImageAsBase64(url: string): Promise<{ media_type: 'image/
   }
 }
 
-async function transcribeAudio(audioPath: string): Promise<string> {
+async function transcribeAudio(audioPath: string, model: string = 'tiny'): Promise<string> {
   try {
-    const { stdout } = await execAsync(`uvx --from openai-whisper whisper "${audioPath}" --model tiny --language en --output_format txt`)
+    const { stdout } = await execAsync(`uvx --from openai-whisper whisper "${audioPath}" --model ${model} --language en --output_format txt`)
     // whisperx outputs a .txt file in the same directory
     const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
     try {
@@ -370,8 +373,10 @@ export default function createDiscordPlugin(): Plugin {
             const trimmed = text.trim()
             if (!trimmed) return
 
-            // human-like delay: 300ms + 10ms per character, max 1s
-            const delay = Math.min(1000, 300 + trimmed.length * 10)
+            // human-like delay: 300ms + per-char delay, capped at max
+            const maxDelay = config?.typingDelayMaxMs ?? 1000
+            const perChar = config?.typingDelayPerCharMs ?? 10
+            const delay = Math.min(maxDelay, 300 + trimmed.length * perChar)
             await new Promise(resolve => setTimeout(resolve, delay))
 
             let remaining = trimmed
@@ -625,7 +630,7 @@ export default function createDiscordPlugin(): Plugin {
                 await mkdir(audioDir, { recursive: true })
                 const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
                 await downloadFile(attachment.url, audioFile)
-                const transcription = await transcribeAudio(audioFile)
+                const transcription = await transcribeAudio(audioFile, config!.whisperModel ?? 'tiny')
 
                 content += `\n\n[Voice message transcription: ${transcription}]`
               } catch (err) {
