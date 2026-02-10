@@ -4,8 +4,9 @@ import { loadSession, appendMessage } from './session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
 import { estimateImageTokens } from './tokens.ts'
 
-const MAX_TOOL_RESULT_LENGTH = 50000 // ~12k tokens
-const MAX_TOOL_RESULT_TOKENS = 10_000
+// defaults — can be overridden via AgentOptions
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000
+const DEFAULT_MAX_TOOL_RESULT_TOKENS = 10_000
 
 // repair message history to handle interrupted tool calls
 // ensures every tool_use has a matching tool_result
@@ -63,23 +64,23 @@ export function repairMessages(messages: Message[]): Message[] {
   return repaired
 }
 
-function truncateString(content: string): string {
-  if (content.length <= MAX_TOOL_RESULT_LENGTH) {
+function truncateString(content: string, maxChars: number): string {
+  if (content.length <= maxChars) {
     return content
   }
-  const half = Math.floor(MAX_TOOL_RESULT_LENGTH / 2)
-  const truncatedBytes = content.length - MAX_TOOL_RESULT_LENGTH
+  const half = Math.floor(maxChars / 2)
+  const truncatedBytes = content.length - maxChars
   return content.slice(0, half) + `\n\n... [truncated ${truncatedBytes} characters] ...\n\n` + content.slice(-half)
 }
 
-function truncateToolResult(content: ToolResultContent): ToolResultContent {
+function truncateToolResult(content: ToolResultContent, maxChars: number): ToolResultContent {
   if (typeof content === 'string') {
-    return truncateString(content)
+    return truncateString(content, maxChars)
   }
   // for rich content, truncate text blocks only
   return content.map(block => {
     if (block.type === 'text') {
-      return { ...block, text: truncateString(block.text) }
+      return { ...block, text: truncateString(block.text, maxChars) }
     }
     return block
   })
@@ -93,7 +94,7 @@ function toolResultText(content: ToolResultContent): string {
     .join('\n')
 }
 
-function truncateStringByTokens(text: string, tokenCount: number, maxTokens: number = MAX_TOOL_RESULT_TOKENS): string {
+function truncateStringByTokens(text: string, tokenCount: number, maxTokens: number): string {
   if (tokenCount <= maxTokens) return text
   // estimate char cutoff — ~4 chars/token, trim conservatively then verify
   let cutoff = Math.floor(text.length * (maxTokens / tokenCount) * 0.9)
@@ -111,7 +112,7 @@ function truncateStringByTokens(text: string, tokenCount: number, maxTokens: num
   return trimmed + `\n\n[truncated — result was ${tokenCount} tokens, limit is ${maxTokens}]`
 }
 
-function truncateToolResultByTokens(content: ToolResultContent): ToolResultContent {
+function truncateToolResultByTokens(content: ToolResultContent, maxTokens: number): ToolResultContent {
   const text = toolResultText(content)
   const textTokens = countTokens(text)
 
@@ -126,13 +127,13 @@ function truncateToolResultByTokens(content: ToolResultContent): ToolResultConte
   }
 
   const totalTokens = textTokens + imageTokens
-  if (totalTokens <= MAX_TOOL_RESULT_TOKENS) return content
+  if (totalTokens <= maxTokens) return content
 
   if (typeof content === 'string') {
-    return truncateStringByTokens(content, textTokens)
+    return truncateStringByTokens(content, textTokens, maxTokens)
   }
   // for rich content, give text the remaining budget after image tokens
-  const textBudget = Math.max(100, MAX_TOOL_RESULT_TOKENS - imageTokens)
+  const textBudget = Math.max(100, maxTokens - imageTokens)
   const truncatedText = truncateStringByTokens(text, textTokens, textBudget)
   const nonTextBlocks = content.filter(b => b.type !== 'text')
   return [{ type: 'text' as const, text: truncatedText }, ...nonTextBlocks]
@@ -147,6 +148,8 @@ export interface AgentOptions {
   onChunk?: (chunk: ServerMessage) => void
   checkInterrupts?: () => { content: ContentBlock[]; outputTarget: string }[]
   checkAbort?: () => boolean
+  maxToolResultChars?: number
+  maxToolResultTokens?: number
 }
 
 export async function runAgentTurn(
@@ -154,6 +157,8 @@ export async function runAgentTurn(
   options: AgentOptions
 ): Promise<AgentResult> {
   const { provider, system: getSystem, tools: getTools, sessionId, workingDir, onChunk } = options
+  const maxToolResultChars = options.maxToolResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS
+  const maxToolResultTokens = options.maxToolResultTokens ?? DEFAULT_MAX_TOOL_RESULT_TOKENS
 
   // load existing messages and repair any interrupted tool calls
   const messages = repairMessages(await loadSession(sessionId))
@@ -255,8 +260,8 @@ export async function runAgentTurn(
         } else {
           try {
             result = await tool.execute(block.input, toolContext)
-            result.content = truncateToolResult(result.content)
-            result.content = truncateToolResultByTokens(result.content)
+            result.content = truncateToolResult(result.content, maxToolResultChars)
+            result.content = truncateToolResultByTokens(result.content, maxToolResultTokens)
           } catch (err) {
             result = { content: `Tool error: ${err}`, is_error: true }
           }

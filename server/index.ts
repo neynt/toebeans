@@ -54,6 +54,12 @@ async function main() {
     maxOutputTokens: config.llm.maxOutputTokens,
   })
 
+  // shared agent options from config (spread into each runAgentTurn call)
+  const agentLlmConfig = {
+    maxToolResultChars: config.llm.maxToolResultChars,
+    maxToolResultTokens: config.llm.maxToolResultTokens,
+  }
+
   const pluginManager = new PluginManager()
 
   // prepare server context for plugins (will be populated with routeOutput after it's defined)
@@ -177,6 +183,7 @@ async function main() {
             onChunk: resumeOnChunk,
             checkInterrupts: resumeCheckInterrupts,
             checkAbort: resumeCheckAbort,
+            ...agentLlmConfig,
           })
 
           // drain remaining interrupts as new turns
@@ -309,6 +316,7 @@ async function main() {
               onChunk: agentOnChunk,
               checkInterrupts: agentCheckInterrupts,
               checkAbort: agentCheckAbort,
+              ...agentLlmConfig,
             })
 
             // drain any remaining interrupts that arrived during a no-tool-use response
@@ -451,6 +459,7 @@ async function main() {
             onChunk: wsOnChunk,
             checkInterrupts: wsCheckInterrupts,
             checkAbort: wsCheckAbort,
+            ...agentLlmConfig,
           })
 
           // drain remaining interrupts as new turns
