@@ -36,7 +36,7 @@ export function createSessionManager(
   routeOutput?: (target: string, message: any) => Promise<void>,
   pluginManager?: PluginManager,
 ): SessionManager {
-  const { compactAtTokens, lifespanSeconds } = config.session
+  const { compactAtTokens, compactMinTokens, lifespanSeconds } = config.session
   const compactionPrompt = config.session.compactionPrompt || DEFAULT_COMPACTION_PROMPT
 
   // trim tool_result content to keep compaction cache-friendly
@@ -154,9 +154,14 @@ export function createSessionManager(
       if (lastActivity) {
         const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
         if (ageSeconds >= lifespanSeconds) {
-          console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes stale, compacting before new message`)
-          const newId = await compactSession(sessionId, route)
-          return newId
+          const tokens = await estimateSessionTokens(sessionId)
+          if (tokens < compactMinTokens) {
+            console.log(`session-manager: session ${sessionId} is stale but only ${tokens} tokens (< ${compactMinTokens}), skipping compaction`)
+          } else {
+            console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes stale (${tokens} tokens), compacting before new message`)
+            const newId = await compactSession(sessionId, route)
+            return newId
+          }
         }
       }
 
@@ -172,13 +177,17 @@ export function createSessionManager(
         return
       }
 
-      // check lifespan
+      // check lifespan (only compact if tokens meet minimum threshold)
       const lastActivity = await getSessionLastActivity(sessionId)
       if (lastActivity) {
         const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
         if (ageSeconds >= lifespanSeconds) {
-          console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes old, compacting`)
-          await compactSession(sessionId, route)
+          if (tokens < compactMinTokens) {
+            console.log(`session-manager: session ${sessionId} is stale but only ${tokens} tokens (< ${compactMinTokens}), skipping compaction`)
+          } else {
+            console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes old (${tokens} tokens), compacting`)
+            await compactSession(sessionId, route)
+          }
           return
         }
       }
