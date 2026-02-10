@@ -6,6 +6,8 @@
 
 1. clone this repo
 2. `while true; do bun run server; sleep 3; done`
+3. probably some config stuff TODO get back to this
+4. if you like it, set up a systemd unit
 
 ## core concepts
 

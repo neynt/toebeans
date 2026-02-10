@@ -5,13 +5,10 @@ import { repairMessages } from './agent.ts'
 import {
   getCurrentSessionId,
   loadSession,
-  markSessionFinished,
-  isSessionFinished,
   estimateSessionTokens,
   getSessionLastActivity,
   getSessionCreatedAt,
   writeSession,
-  setCurrentSessionId,
   generateSessionId,
   getKnowledgeDir,
 } from './session.ts'
@@ -151,11 +148,7 @@ export function createSessionManager(
 
     const rawMessages = await loadSession(sessionId)
     if (rawMessages.length === 0) {
-      // nothing to compact, just create new session
-      const newId = await generateSessionId(route)
-      await markSessionFinished(sessionId)
-      await setCurrentSessionId(newId, route)
-      return newId
+      return await generateSessionId(route)
     }
 
     // repair interrupted tool calls before sending to API
@@ -173,9 +166,6 @@ export function createSessionManager(
       await appendToKnowledge(knowledge)
     }
 
-    // mark old session as finished
-    await markSessionFinished(sessionId)
-
     // create new session with summary as context (same route)
     const newId = await generateSessionId(route)
     const summaryMessage: Message = {
@@ -186,7 +176,6 @@ export function createSessionManager(
       }],
     }
     await writeSession(newId, [summaryMessage])
-    await setCurrentSessionId(newId, route)
 
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
@@ -212,14 +201,6 @@ export function createSessionManager(
   return {
     async getSessionForMessage(route?: string): Promise<string> {
       const sessionId = await getCurrentSessionId(route)
-
-      // check if session is finished
-      if (await isSessionFinished(sessionId)) {
-        // create new session for this route
-        const newId = await generateSessionId(route)
-        await setCurrentSessionId(newId, route)
-        return newId
-      }
 
       // check if session is stale (inactive for too long) — compact before new message lands
       const lastActivity = await getSessionLastActivity(sessionId)
