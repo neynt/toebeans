@@ -692,7 +692,7 @@ export default function createDiscordPlugin(): Plugin {
             let reply = '📊 **Session Info**\n'
             reply += `**ID:** \`${info.id}\`\n`
             reply += `**Messages:** ${info.messageCount}\n`
-            reply += `**Tokens:** ~${info.estimatedTokens}\n`
+            reply += `**Tokens:** ~${info.estimatedTokens} (system: ~${info.systemPromptTokens})\n`
             reply += `**Created:** ${createdStr}\n`
             reply += `**Last Activity:** ${lastActivityStr}\n`
             reply += `**Age:** ${ageMinutes} minutes`
