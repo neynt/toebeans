@@ -16,7 +16,6 @@ const configSchema = z.object({
     provider: z.string(),
     model: z.string(),
     apiKey: z.string().optional(),
-    thinkingBudget: z.number().optional(),
     effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
   }).passthrough(),
   notifyOnRestart: z.string().optional(),

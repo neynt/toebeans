@@ -50,7 +50,6 @@ async function main() {
   const provider = new AnthropicProvider({
     apiKey: config.llm.apiKey,
     model: config.llm.model,
-    thinkingBudget: config.llm.thinkingBudget,
     effort: config.llm.effort,
   })
 
