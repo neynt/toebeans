@@ -14,22 +14,22 @@ New facts learned about the user (preferences, environment, projects, communicat
 
 Be concise.`
 
-function trimForCompaction(messages: Message[]): Message[] {
+function trimForCompaction(messages: Message[], trimLength: number): Message[] {
   return messages.map(msg => ({
     role: msg.role,
     content: msg.content.map(block => {
       if (block.type === 'tool_result') {
         if (typeof block.content === 'string') {
-          const trimmed = block.content.length > 200
-            ? block.content.slice(0, 200) + '... (truncated)'
+          const trimmed = block.content.length > trimLength
+            ? block.content.slice(0, trimLength) + '... (truncated)'
             : block.content
           return { ...block, content: trimmed }
         }
         const trimmed = block.content
           .filter(b => b.type === 'text')
           .map(b => {
-            if (b.type === 'text' && b.text.length > 200) {
-              return { ...b, text: b.text.slice(0, 200) + '... (truncated)' }
+            if (b.type === 'text' && b.text.length > trimLength) {
+              return { ...b, text: b.text.slice(0, trimLength) + '... (truncated)' }
             }
             return b
           })
@@ -169,17 +169,28 @@ function createMemoryTools(): Tool[] {
   ]
 }
 
-export default function createMemoryPlugin(): Plugin {
+interface MemoryConfig {
+  recentLogDays?: number
+}
+
+export default function createMemoryPlugin(serverContext?: { config?: { session?: { compactionTrimLength?: number } } }): Plugin {
+  let pluginConfig: MemoryConfig = {}
+  const compactionTrimLength = serverContext?.config?.session?.compactionTrimLength ?? 200
+
   return {
     name: 'memory',
     description: `Long-term memory. Stored as markdown files in ~/.toebeans/knowledge/.`,
     tools: createMemoryTools(),
 
+    async init(cfg: unknown) {
+      pluginConfig = (cfg as MemoryConfig) ?? {}
+    },
+
     async onPreCompaction(context: PreCompactionContext) {
       const { sessionId, messages, provider } = context
 
       // trim tool results before sending to LLM
-      const trimmed = trimForCompaction(messages)
+      const trimmed = trimForCompaction(messages, compactionTrimLength)
 
       // append extraction prompt
       const lastMsg = trimmed[trimmed.length - 1]
@@ -235,13 +246,18 @@ export default function createMemoryPlugin(): Plugin {
         }
       }
 
-      // recent daily logs (today and yesterday)
+      // recent daily logs
+      const recentLogDays = pluginConfig.recentLogDays ?? 2
       const recentLogs: string[] = []
       const today = new Date()
-      const yesterday = new Date(today)
-      yesterday.setDate(yesterday.getDate() - 1)
+      const dates: Date[] = []
+      for (let i = 0; i < recentLogDays; i++) {
+        const d = new Date(today)
+        d.setDate(d.getDate() - i)
+        dates.push(d)
+      }
 
-      for (const date of [today, yesterday]) {
+      for (const date of dates) {
         const dateStr = date.toISOString().slice(0, 10)
         const dailyLogPath = join(knowledgeDir, `${dateStr}.md`)
         const dailyLogFile = Bun.file(dailyLogPath)

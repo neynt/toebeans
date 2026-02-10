@@ -38,6 +38,7 @@ export function createSessionManager(
 ): SessionManager {
   const { compactAtTokens, compactMinTokens, lifespanSeconds } = config.session
   const compactionPrompt = config.session.compactionPrompt || DEFAULT_COMPACTION_PROMPT
+  const compactionTrimLength = config.session.compactionTrimLength ?? 200
 
   // trim tool_result content to keep compaction cache-friendly
   function trimForCompaction(messages: Message[]): Message[] {
@@ -46,16 +47,16 @@ export function createSessionManager(
       content: msg.content.map(block => {
         if (block.type === 'tool_result') {
           if (typeof block.content === 'string') {
-            const trimmed = block.content.length > 200
-              ? block.content.slice(0, 200) + '... (truncated)'
+            const trimmed = block.content.length > compactionTrimLength
+              ? block.content.slice(0, compactionTrimLength) + '... (truncated)'
               : block.content
             return { ...block, content: trimmed }
           }
           const trimmed = block.content
             .filter(b => b.type === 'text')
             .map(b => {
-              if (b.type === 'text' && b.text.length > 200) {
-                return { ...b, text: b.text.slice(0, 200) + '... (truncated)' }
+              if (b.type === 'text' && b.text.length > compactionTrimLength) {
+                return { ...b, text: b.text.slice(0, compactionTrimLength) + '... (truncated)' }
               }
               return b
             })
