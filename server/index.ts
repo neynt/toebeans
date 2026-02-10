@@ -96,7 +96,7 @@ async function main() {
   serverContext.routeOutput = routeOutput
 
   // create session manager with routeOutput available
-  const sessionManager = createSessionManager(provider, config, routeOutput, pluginManager)
+  const sessionManager = createSessionManager(provider, config, routeOutput, pluginManager, buildSystemPrompt)
 
   // load plugins from config
   for (const [name, pluginConfig] of Object.entries(config.plugins)) {

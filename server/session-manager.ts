@@ -1,3 +1,4 @@
+import { countTokens } from '@anthropic-ai/tokenizer'
 import type { LlmProvider } from './llm-provider.ts'
 import type { Message } from './types.ts'
 import type { Config } from './config.ts'
@@ -25,6 +26,7 @@ export interface SessionManager {
     id: string
     messageCount: number
     estimatedTokens: number
+    systemPromptTokens: number
     createdAt: Date | null
     lastActivity: Date | null
   }>
@@ -35,10 +37,17 @@ export function createSessionManager(
   config: Config,
   routeOutput?: (target: string, message: any) => Promise<void>,
   pluginManager?: PluginManager,
+  buildSystemPrompt?: () => Promise<string>,
 ): SessionManager {
   const { compactAtTokens, compactMinTokens, lifespanSeconds } = config.session
   const compactionPrompt = config.session.compactionPrompt || DEFAULT_COMPACTION_PROMPT
   const compactionTrimLength = config.session.compactionTrimLength ?? 200
+
+  async function getSystemPromptTokens(): Promise<number> {
+    if (!buildSystemPrompt) return 0
+    const prompt = await buildSystemPrompt()
+    return countTokens(prompt)
+  }
 
   // trim tool_result content to keep compaction cache-friendly
   function trimForCompaction(messages: Message[]): Message[] {
@@ -155,7 +164,7 @@ export function createSessionManager(
       if (lastActivity) {
         const ageSeconds = (Date.now() - lastActivity.getTime()) / 1000
         if (ageSeconds >= lifespanSeconds) {
-          const tokens = await estimateSessionTokens(sessionId)
+          const tokens = await estimateSessionTokens(sessionId) + await getSystemPromptTokens()
           if (tokens < compactMinTokens) {
             console.log(`session-manager: session ${sessionId} is stale but only ${tokens} tokens (< ${compactMinTokens}), skipping compaction`)
           } else {
@@ -170,8 +179,8 @@ export function createSessionManager(
     },
 
     async checkCompaction(sessionId: string, route?: string): Promise<void> {
-      // check token count
-      const tokens = await estimateSessionTokens(sessionId)
+      // check token count (messages + system prompt = real context usage)
+      const tokens = await estimateSessionTokens(sessionId) + await getSystemPromptTokens()
       if (tokens >= compactAtTokens) {
         console.log(`session-manager: session ${sessionId} has ${tokens} tokens, compacting`)
         await compactSession(sessionId, route)
@@ -201,14 +210,16 @@ export function createSessionManager(
 
     async getSessionInfo(sessionId: string) {
       const messages = await loadSession(sessionId)
-      const tokens = await estimateSessionTokens(sessionId)
+      const messageTokens = await estimateSessionTokens(sessionId)
+      const systemPromptTokens = await getSystemPromptTokens()
       const createdAt = await getSessionCreatedAt(sessionId)
       const lastActivity = await getSessionLastActivity(sessionId)
 
       return {
         id: sessionId,
         messageCount: messages.length,
-        estimatedTokens: tokens,
+        estimatedTokens: messageTokens + systemPromptTokens,
+        systemPromptTokens,
         createdAt,
         lastActivity,
       }
