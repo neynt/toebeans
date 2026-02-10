@@ -51,6 +51,7 @@ async function main() {
     apiKey: config.llm.apiKey,
     model: config.llm.model,
     effort: config.llm.effort,
+    maxOutputTokens: config.llm.maxOutputTokens,
   })
 
   const pluginManager = new PluginManager()

@@ -11,6 +11,7 @@ const configSchema = z.object({
     compactMinTokens: z.number().default(5000),
     lifespanSeconds: z.number(),
     compactionPrompt: z.string().optional(),
+    compactionTrimLength: z.number().optional(),
   }).passthrough(),
   plugins: z.record(z.string(), z.unknown()),
   llm: z.object({
@@ -18,6 +19,9 @@ const configSchema = z.object({
     model: z.string(),
     apiKey: z.string().optional(),
     effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+    maxOutputTokens: z.number().optional(),
+    maxToolResultTokens: z.number().optional(),
+    maxToolResultChars: z.number().optional(),
   }).passthrough(),
   notifyOnRestart: z.string().optional(),
 }).passthrough()

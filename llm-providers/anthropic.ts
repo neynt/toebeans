@@ -10,11 +10,13 @@ export class AnthropicProvider implements LlmProvider {
   private client: Anthropic
   private model: string
   private effort?: 'low' | 'medium' | 'high' | 'max'
+  private maxOutputTokens: number
 
-  constructor(options: { apiKey?: string; model: string; effort?: 'low' | 'medium' | 'high' | 'max' }) {
+  constructor(options: { apiKey?: string; model: string; effort?: 'low' | 'medium' | 'high' | 'max'; maxOutputTokens?: number }) {
     this.client = new Anthropic({ apiKey: options.apiKey })
     this.model = options.model
     this.effort = options.effort
+    this.maxOutputTokens = options.maxOutputTokens ?? 16384
   }
 
   async *stream(params: {
@@ -99,7 +101,7 @@ export class AnthropicProvider implements LlmProvider {
 
     const stream = this.client.messages.stream({
       model: this.model,
-      max_tokens: 16384,
+      max_tokens: this.maxOutputTokens,
       system: systemBlocks,
       messages,
       tools: tools.length > 0 ? tools : undefined,
