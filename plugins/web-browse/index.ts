@@ -1,10 +1,15 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { getDataDir, getWorkspaceDir } from '../../server/session.ts'
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
+import { chromium } from 'playwright-extra'
+import type { Browser, BrowserContext, Page } from 'playwright'
+import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+
 import TurndownService from 'turndown'
 import { join } from 'path'
 import { mkdir } from 'node:fs/promises'
+
+chromium.use(StealthPlugin())
 
 // --- cookie persistence ---
 
@@ -40,7 +45,10 @@ async function getBrowser(): Promise<Browser> {
   if (!browserPool) {
     browserPool = await chromium.launch({
       headless: true,
-      args: ['--remote-debugging-port=9222'],
+      args: [
+        '--remote-debugging-port=9222',
+        '--disable-blink-features=AutomationControlled',
+      ],
     })
   }
   return browserPool
@@ -49,7 +57,12 @@ async function getBrowser(): Promise<Browser> {
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
 async function createContextWithCookies(browser: Browser): Promise<BrowserContext> {
-  const context = await browser.newContext({ userAgent: USER_AGENT })
+  const context = await browser.newContext({
+    userAgent: USER_AGENT,
+    viewport: { width: 1920, height: 1080 },
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
+  })
   const cookies = await loadCookies()
   if (cookies.length > 0) {
     await context.addCookies(cookies)
