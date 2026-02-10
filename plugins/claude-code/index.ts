@@ -6,7 +6,6 @@ import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 
 const LOG_DIR = join(getDataDir(), 'claude-code')
-const WORKTREE_BASE = join(homedir(), 'code', 'toebeans-wt')
 
 interface ProcessInfo {
   proc: ReturnType<typeof Bun.spawn>
@@ -72,6 +71,8 @@ interface QueuedMessage {
 
 interface ClaudeCodeConfig {
   notifyTarget?: string
+  worktreeBase?: string
+  model?: string
 }
 
 /**
@@ -86,9 +87,10 @@ async function handleWorktreeMerge(
   taskPreview: string,
   logPath: string,
   taskStatus: string,
+  worktreeBase: string,
   spawnConflictResolver?: (task: string, cwd: string) => void,
 ): Promise<string> {
-  const worktreePath = join(WORKTREE_BASE, worktree)
+  const worktreePath = join(worktreeBase, worktree)
 
   // attempt merge
   const mergeResult = Bun.spawnSync(
@@ -150,6 +152,7 @@ export default function createClaudeCodePlugin(): Plugin {
   function spawnClaudeCode(task: string, cwd: string) {
     const sid = generateSessionId()
     const lp = getLogPath(sid)
+    const model = config?.model ?? 'opus'
 
     ensureLogDir().then(async () => {
       const meta: MetaFile = {
@@ -161,7 +164,7 @@ export default function createClaudeCodePlugin(): Plugin {
       }
 
       const proc = Bun.spawn(
-        ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model opus -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
+        ['sh', '-c', `exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model ${model} -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1`],
         {
           cwd,
           env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: lp },
@@ -242,8 +245,11 @@ export default function createClaudeCodePlugin(): Plugin {
               return { content: 'worktree requires workingDir to be set (need a git repo to branch from)', is_error: true }
             }
 
-            const worktreePath = join(WORKTREE_BASE, worktree)
-            await mkdir(WORKTREE_BASE, { recursive: true })
+            const worktreeBase = config?.worktreeBase
+              ? config.worktreeBase.replace(/^~/, homedir())
+              : join(homedir(), 'code', 'toebeans-wt')
+            const worktreePath = join(worktreeBase, worktree)
+            await mkdir(worktreeBase, { recursive: true })
 
             // create the worktree + branch
             const wtResult = Bun.spawnSync(
@@ -285,8 +291,9 @@ export default function createClaudeCodePlugin(): Plugin {
 
           // spawn claude with stdout/stderr redirected to log file via shell
           // this way claude writes directly to the file — survives toebeans dying
+          const claudeModel = config?.model ?? 'opus'
           const proc = Bun.spawn(
-            ['sh', '-c', 'exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model opus -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1'],
+            ['sh', '-c', `exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model ${claudeModel} -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1`],
             {
               cwd,
               env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: logPath },
@@ -319,8 +326,11 @@ export default function createClaudeCodePlugin(): Plugin {
 
               // handle worktree merge if applicable
               if (worktree && meta.originalWorkingDir) {
+                const wtBase = config?.worktreeBase
+                  ? config.worktreeBase.replace(/^~/, homedir())
+                  : join(homedir(), 'code', 'toebeans-wt')
                 const mergeMsg = await handleWorktreeMerge(
-                  worktree, meta.originalWorkingDir, sessionId, taskPreview, logPath, status,
+                  worktree, meta.originalWorkingDir, sessionId, taskPreview, logPath, status, wtBase,
                   (conflictTask, conflictCwd) => {
                     // spawn a new claude code session to resolve the conflict
                     spawnClaudeCode(conflictTask, conflictCwd)
