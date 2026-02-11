@@ -196,7 +196,7 @@ const tools: Tool[] = [
             payload: { headers: { name: string; value: string }[] }
           }
 
-          const headers = detail.payload.headers
+          const headers = detail.payload?.headers ?? []
           results.push([
             `ID: ${detail.id}`,
             `Thread: ${detail.threadId}`,
@@ -245,7 +245,7 @@ const tools: Tool[] = [
           }
         }
 
-        const headers = msg.payload.headers
+        const headers = msg.payload?.headers ?? []
         const body = extractBody(msg.payload)
 
         const lines = [
