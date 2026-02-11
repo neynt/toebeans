@@ -54,12 +54,16 @@ async function getAccessToken(): Promise<string> {
   return accessToken
 }
 
-async function gmailGet(path: string, params?: Record<string, string>): Promise<unknown> {
+async function gmailGet(path: string, params?: Record<string, string | string[]>): Promise<unknown> {
   const token = await getAccessToken()
   const url = new URL(`${GMAIL_API}${path}`)
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      url.searchParams.set(k, v)
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, item)
+      } else {
+        url.searchParams.set(k, v)
+      }
     }
   }
   const res = await fetch(url.toString(), {
@@ -188,7 +192,7 @@ const tools: Tool[] = [
         for (const msg of listData.messages) {
           const detail = await gmailGet(`/messages/${msg.id}`, {
             format: 'metadata',
-            metadataHeaders: 'From,To,Subject,Date',
+            metadataHeaders: ['From', 'To', 'Subject', 'Date'],
           }) as {
             id: string
             threadId: string
