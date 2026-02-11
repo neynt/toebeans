@@ -9,6 +9,7 @@ commands:
   print-llm-query <session-id>   show the raw LLM query for a session
   print-system                   show the system prompt
   list-sessions                  list available sessions
+  analyze-system-prompt          token breakdown of the system prompt
 `)
   process.exit(1)
 }
@@ -30,6 +31,11 @@ switch (command) {
     for (const s of sessions) {
       console.log(`${s.id}  (last active: ${s.lastActiveAt.toISOString()})`)
     }
+    break
+  }
+  case 'analyze-system-prompt': {
+    const mod = await import('./analyze-system-prompt.ts')
+    await mod.default()
     break
   }
   default:

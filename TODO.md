@@ -17,12 +17,14 @@
 - [x] qwen3-tts voice
 - [x] see images
 - [x] more correct debug cli commands
-- [ ] knowledge revamp
-- [ ] lower effort claude by default
+- [x] browser stealth -- ONESHOT
+- [x] knowledge revamp -- plugin is responsible for daily & user files, core only compaction
+- [x] lower effort claude by default
+- [ ] knowledge revamp -- why the hell is it 15k tokens of system context
+- [ ] connect to gmail
 - [ ] local llm support?
 - [x] visual web browser tool
-- [ ] scheduled wakeups
 - [ ] tui should display a full audit log, including a history of all tool calls
 - [ ] brave web search api
 - [ ] google local places api
-- [ ] browser stealth
+- [ ] archive old state files
