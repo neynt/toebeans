@@ -11,22 +11,18 @@ function buildExtractionPrompt(currentProfile: string | null): string {
 
   return `You are extracting knowledge from a conversation that is about to be compacted.
 ${profileSection}
-Respond with exactly three sections:
+Respond with a ## Summary section, and optionally a ## User Profile section.
 
 ## Summary
 Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.
 
-## User Profile
+## User Profile (ONLY if meaningfully new long-term facts were learned)
 The COMPLETE updated user profile. This will overwrite the existing USER.md file entirely.
 - Only include stable, long-term facts about the user (preferences, environment, projects, expertise, communication style)
 - Do NOT include session-specific or ephemeral details
 - Keep it concise and well-organized (~1000 tokens max)
 - Preserve the existing structure/organization of the profile where possible
-- If you learned genuinely new long-term facts, incorporate them
-- If nothing meaningfully new was learned, reproduce the existing profile as-is
-
-## Profile Changed
-Answer "yes" if the profile was meaningfully updated with new information, or "no" if it is essentially unchanged. Only say "yes" if genuinely new, stable, long-term facts were added.`
+- If nothing meaningfully new was learned about the user, OMIT this section entirely.`
 }
 
 function trimForCompaction(messages: Message[], trimLength: number): Message[] {
@@ -236,18 +232,16 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
 
       // parse sections
       const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Profile|$)/)
-      const profileMatch = result.match(/## User Profile\s*\n([\s\S]*?)(?=## Profile Changed|$)/)
-      const changedMatch = result.match(/## Profile Changed\s*\n([\s\S]*)/)
+      const profileMatch = result.match(/## User Profile[^\n]*\n([\s\S]*)/)
 
       const summary = summaryMatch?.[1]?.trim() || result.trim()
       const profile = profileMatch?.[1]?.trim()
-      const changed = changedMatch?.[1]?.trim().toLowerCase().startsWith('yes')
 
       // write summary to daily log
       await appendToDailyLog(summary, sessionId)
 
-      // overwrite USER.md only if profile changed
-      if (changed && profile) {
+      // overwrite USER.md if profile section was included
+      if (profile) {
         console.log(`memory: updated user profile from session ${sessionId}`)
         await writeUserProfile(profile)
       }
