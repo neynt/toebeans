@@ -4,15 +4,30 @@ import { getKnowledgeDir } from '../../server/session.ts'
 import { join } from 'path'
 import { $ } from 'bun'
 
-const EXTRACTION_PROMPT = `You are extracting knowledge from a conversation that is about to be compacted. Respond with two sections:
+function buildExtractionPrompt(currentProfile: string | null): string {
+  const profileSection = currentProfile
+    ? `\nHere is the current user profile (USER.md):\n\n${currentProfile}\n`
+    : '\nThere is no existing user profile yet.\n'
+
+  return `You are extracting knowledge from a conversation that is about to be compacted.
+${profileSection}
+Respond with exactly three sections:
 
 ## Summary
 Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.
 
-## User Knowledge
-New facts learned about the user (preferences, environment, projects, communication style). If nothing new was learned, write "nothing new".
+## User Profile
+The COMPLETE updated user profile. This will overwrite the existing USER.md file entirely.
+- Only include stable, long-term facts about the user (preferences, environment, projects, expertise, communication style)
+- Do NOT include session-specific or ephemeral details
+- Keep it concise and well-organized (~1000 tokens max)
+- Preserve the existing structure/organization of the profile where possible
+- If you learned genuinely new long-term facts, incorporate them
+- If nothing meaningfully new was learned, reproduce the existing profile as-is
 
-Be concise.`
+## Profile Changed
+Answer "yes" if the profile was meaningfully updated with new information, or "no" if it is essentially unchanged. Only say "yes" if genuinely new, stable, long-term facts were added.`
+}
 
 function trimForCompaction(messages: Message[], trimLength: number): Message[] {
   return messages.map(msg => ({
@@ -40,18 +55,19 @@ function trimForCompaction(messages: Message[], trimLength: number): Message[] {
   }))
 }
 
-async function appendToKnowledge(content: string): Promise<void> {
+async function readUserProfile(): Promise<string | null> {
   const knowledgePath = join(getKnowledgeDir(), 'USER.md')
   const file = Bun.file(knowledgePath)
-  const timestamp = new Date().toISOString().slice(0, 10)
-  const entry = `\n## ${timestamp}\n\n${content}\n`
-
   if (await file.exists()) {
-    const existing = await file.text()
-    await Bun.write(knowledgePath, existing + entry)
-  } else {
-    await Bun.write(knowledgePath, `# About the user\n${entry}`)
+    const content = await file.text()
+    return content.trim() || null
   }
+  return null
+}
+
+async function writeUserProfile(content: string): Promise<void> {
+  const knowledgePath = join(getKnowledgeDir(), 'USER.md')
+  await Bun.write(knowledgePath, content)
 }
 
 async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
@@ -189,17 +205,21 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
     async onPreCompaction(context: PreCompactionContext) {
       const { sessionId, messages, provider } = context
 
+      // read current user profile for context
+      const currentProfile = await readUserProfile()
+
       // trim tool results before sending to LLM
       const trimmed = trimForCompaction(messages, compactionTrimLength)
 
       // append extraction prompt
+      const extractionPrompt = buildExtractionPrompt(currentProfile)
       const lastMsg = trimmed[trimmed.length - 1]
       if (lastMsg?.role === 'user') {
-        lastMsg.content.push({ type: 'text', text: EXTRACTION_PROMPT })
+        lastMsg.content.push({ type: 'text', text: extractionPrompt })
       } else {
         trimmed.push({
           role: 'user',
-          content: [{ type: 'text', text: EXTRACTION_PROMPT }],
+          content: [{ type: 'text', text: extractionPrompt }],
         })
       }
 
@@ -215,20 +235,21 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
       }
 
       // parse sections
-      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Knowledge|$)/)
-      const knowledgeMatch = result.match(/## User Knowledge\s*\n([\s\S]*)/)
+      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Profile|$)/)
+      const profileMatch = result.match(/## User Profile\s*\n([\s\S]*?)(?=## Profile Changed|$)/)
+      const changedMatch = result.match(/## Profile Changed\s*\n([\s\S]*)/)
 
       const summary = summaryMatch?.[1]?.trim() || result.trim()
-      const knowledgeRaw = knowledgeMatch?.[1]?.trim()
-      const knowledge = knowledgeRaw && !/^nothing new/i.test(knowledgeRaw) ? knowledgeRaw : null
+      const profile = profileMatch?.[1]?.trim()
+      const changed = changedMatch?.[1]?.trim().toLowerCase().startsWith('yes')
 
       // write summary to daily log
       await appendToDailyLog(summary, sessionId)
 
-      // write user knowledge to USER.md
-      if (knowledge) {
-        console.log(`memory: extracted knowledge from session ${sessionId}`)
-        await appendToKnowledge(knowledge)
+      // overwrite USER.md only if profile changed
+      if (changed && profile) {
+        console.log(`memory: updated user profile from session ${sessionId}`)
+        await writeUserProfile(profile)
       }
     },
 
