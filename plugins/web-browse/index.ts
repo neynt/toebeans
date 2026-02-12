@@ -1,15 +1,12 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { getDataDir, getWorkspaceDir } from '../../server/session.ts'
-import { chromium } from 'playwright-extra'
-import type { Browser, BrowserContext, Page } from 'playwright'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+import { chromium } from 'patchright'
+import type { Browser, BrowserContext, Page } from 'patchright'
 
 import TurndownService from 'turndown'
 import { join } from 'path'
 import { mkdir } from 'node:fs/promises'
-
-chromium.use(StealthPlugin())
 
 // --- plugin config ---
 
@@ -22,6 +19,8 @@ interface WebBrowseConfig {
 }
 
 let pluginConfig: WebBrowseConfig = {}
+
+const HARD_TIMEOUT_MS = 45000
 
 // --- cookie persistence ---
 
@@ -49,6 +48,30 @@ async function saveCookies(context: BrowserContext): Promise<void> {
   }
 }
 
+// --- stealth constants ---
+
+const CHROME_USER_AGENT =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+const WEBGL_SPOOF_SCRIPT = `
+  const spoofParams = {
+    37445: 'Google Inc. (NVIDIA)',
+    37446: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 SUPER, OpenGL 4.5)',
+  };
+  const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (spoofParams[param] !== undefined) return spoofParams[param];
+    return origGetParameter.call(this, param);
+  };
+  if (typeof WebGL2RenderingContext !== 'undefined') {
+    const origGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(param) {
+      if (spoofParams[param] !== undefined) return spoofParams[param];
+      return origGetParameter2.call(this, param);
+    };
+  }
+`
+
 // --- browser pool ---
 
 let browserPool: Browser | null = null
@@ -56,9 +79,9 @@ let browserPool: Browser | null = null
 async function getBrowser(): Promise<Browser> {
   if (!browserPool) {
     browserPool = await chromium.launch({
+      channel: 'chrome',
       headless: true,
       args: [
-        '--remote-debugging-port=9222',
         '--disable-blink-features=AutomationControlled',
       ],
     })
@@ -66,15 +89,14 @@ async function getBrowser(): Promise<Browser> {
   return browserPool
 }
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-
 async function createContextWithCookies(browser: Browser): Promise<BrowserContext> {
   const context = await browser.newContext({
-    userAgent: USER_AGENT,
     viewport: { width: 1920, height: 1080 },
     locale: pluginConfig.locale ?? 'en-US',
     timezoneId: pluginConfig.timezone ?? 'America/New_York',
+    userAgent: CHROME_USER_AGENT,
   })
+  await context.addInitScript(WEBGL_SPOOF_SCRIPT)
   const cookies = await loadCookies()
   if (cookies.length > 0) {
     await context.addCookies(cookies)
@@ -229,21 +251,21 @@ export default function createWebBrowsePlugin(): Plugin {
           properties: {
             url: { type: 'string', description: 'The URL to browse' },
             selector: { type: 'string', description: 'Optional CSS selector to extract specific content' },
-            timeout: { type: 'number', description: 'Optional navigation timeout in milliseconds (default: 30000)' },
+            timeout: { type: 'number', description: 'Optional navigation timeout in milliseconds (default: 15000)' },
           },
           required: ['url'],
         },
         async execute(input: unknown, _context: ToolContext): Promise<ToolResult> {
-          const navTimeout = pluginConfig.navigationTimeout ?? 30000
+          const navTimeout = pluginConfig.navigationTimeout ?? 15000
           const { url, selector, timeout = navTimeout } = input as { url: string; selector?: string; timeout?: number }
 
           const browser = await getBrowser()
           const context = await createContextWithCookies(browser)
           const page = await context.newPage()
 
-          try {
+          const doWork = async (): Promise<ToolResult> => {
             try {
-              await page.goto(url, { waitUntil: 'networkidle', timeout })
+              await page.goto(url, { waitUntil: 'domcontentloaded', timeout })
             } catch (err: unknown) {
               const error = err as Error
               if (error.message.includes('Timeout') || error.message.includes('timeout')) {
@@ -257,9 +279,17 @@ export default function createWebBrowsePlugin(): Plugin {
             await saveCookies(context)
             await context.close()
             return { content }
+          }
+
+          try {
+            return await Promise.race([
+              doWork(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`hard timeout: web_browse exceeded ${HARD_TIMEOUT_MS}ms`)), HARD_TIMEOUT_MS)
+              ),
+            ])
           } catch (err: unknown) {
-            await saveCookies(context)
-            await context.close()
+            try { await context.close() } catch { /* already closed */ }
             const error = err as Error
             return { content: `error: ${error.message}`, is_error: true }
           }
@@ -310,16 +340,17 @@ export default function createWebBrowsePlugin(): Plugin {
 
           const { id, session } = await getOrCreateSession(session_id)
           const { page, context } = session
-          const screenshots: string[] = []
-          const evalResults: string[] = []
 
-          try {
+          const doWork = async (): Promise<ToolResult> => {
+            const screenshots: string[] = []
+            const evalResults: string[] = []
+
             for (const action of actions) {
               switch (action.type) {
                 case 'goto':
                   if (!action.url) throw new Error('goto action requires url')
                   try {
-                    await page.goto(action.url, { waitUntil: 'networkidle', timeout: pluginConfig.navigationTimeout ?? 30000 })
+                    await page.goto(action.url, { waitUntil: 'domcontentloaded', timeout: pluginConfig.navigationTimeout ?? 15000 })
                   } catch (err: unknown) {
                     const error = err as Error
                     if (error.message.includes('Timeout') || error.message.includes('timeout')) {
@@ -347,7 +378,7 @@ export default function createWebBrowsePlugin(): Plugin {
                   break
                 case 'wait_for':
                   if (!action.selector) throw new Error('wait_for action requires selector')
-                  await page.waitForSelector(action.selector, { timeout: pluginConfig.navigationTimeout ?? 30000 })
+                  await page.waitForSelector(action.selector, { timeout: pluginConfig.navigationTimeout ?? 15000 })
                   break
                 case 'evaluate':
                   if (!action.js) throw new Error('evaluate action requires js')
@@ -368,19 +399,27 @@ export default function createWebBrowsePlugin(): Plugin {
             touchSession(id)
 
             const markdownContent = await extractPageMarkdown(page)
-            const result: Record<string, any> = {
+            const resultObj: Record<string, any> = {
               session_id: id,
               url: page.url(),
               title: await page.title(),
               content: markdownContent,
             }
-            if (screenshots.length > 0) result.screenshots = screenshots
-            if (evalResults.length > 0) result.eval_results = evalResults
+            if (screenshots.length > 0) resultObj.screenshots = screenshots
+            if (evalResults.length > 0) resultObj.eval_results = evalResults
 
-            return { content: JSON.stringify(result, null, 2) }
+            return { content: JSON.stringify(resultObj, null, 2) }
+          }
+
+          try {
+            return await Promise.race([
+              doWork(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`hard timeout: web_interact exceeded ${HARD_TIMEOUT_MS}ms`)), HARD_TIMEOUT_MS)
+              ),
+            ])
           } catch (err: unknown) {
-            await saveCookies(context)
-            touchSession(id)
+            try { await expireSession(id) } catch { /* already closed */ }
             const error = err as Error
             return { content: `error: ${error.message}`, is_error: true }
           }
@@ -409,11 +448,22 @@ export default function createWebBrowsePlugin(): Plugin {
           if (session_id && sessions.has(session_id)) {
             const session = sessions.get(session_id)!
             touchSession(session_id)
-            try {
+
+            const doWork = async (): Promise<ToolResult> => {
               const path = await takeScreenshot(session.page)
               await saveCookies(session.context)
               return { content: JSON.stringify({ session_id, path, url: session.page.url() }) }
+            }
+
+            try {
+              return await Promise.race([
+                doWork(),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`hard timeout: web_screenshot exceeded ${HARD_TIMEOUT_MS}ms`)), HARD_TIMEOUT_MS)
+                ),
+              ])
             } catch (err: unknown) {
+              try { await expireSession(session_id) } catch { /* already closed */ }
               return { content: `error: ${(err as Error).message}`, is_error: true }
             }
           }
@@ -424,9 +474,9 @@ export default function createWebBrowsePlugin(): Plugin {
             const context = await createContextWithCookies(browser)
             const page = await context.newPage()
 
-            try {
+            const doWork = async (): Promise<ToolResult> => {
               try {
-                await page.goto(url, { waitUntil: 'networkidle', timeout: pluginConfig.navigationTimeout ?? 30000 })
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: pluginConfig.navigationTimeout ?? 15000 })
               } catch (err: unknown) {
                 const error = err as Error
                 if (error.message.includes('Timeout') || error.message.includes('timeout')) {
@@ -440,8 +490,17 @@ export default function createWebBrowsePlugin(): Plugin {
               await saveCookies(context)
               await context.close()
               return { content: JSON.stringify({ path, url }) }
+            }
+
+            try {
+              return await Promise.race([
+                doWork(),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`hard timeout: web_screenshot exceeded ${HARD_TIMEOUT_MS}ms`)), HARD_TIMEOUT_MS)
+                ),
+              ])
             } catch (err: unknown) {
-              await context.close()
+              try { await context.close() } catch { /* already closed */ }
               return { content: `error: ${(err as Error).message}`, is_error: true }
             }
           }

@@ -52,7 +52,7 @@ function getTimersDir(): string {
 //   daily-08:00.md - every day at 08:00
 //   weekly-mon-09:00.md - every monday at 09:00
 //   hourly-30.md - every hour at :30
-function parseSchedule(filename: string): { type: 'absolute' | 'daily' | 'weekly' | 'hourly'; next: Date; repeat: boolean } | null {
+function parseSchedule(filename: string): { type: 'absolute' | 'daily' | 'weekly' | 'hourly'; next: Date; prev?: Date; repeat: boolean } | null {
   const name = filename.replace('.md', '')
 
   // absolute: 2024-02-05T14:30:00 or 2024-02-05T14:30
@@ -65,22 +65,22 @@ function parseSchedule(filename: string): { type: 'absolute' | 'daily' | 'weekly
   // daily: daily-HH:MM
   const dailyMatch = name.match(/^daily-(\d{2}):(\d{2})$/)
   if (dailyMatch) {
-    const next = getNextDaily(parseInt(dailyMatch[1]!), parseInt(dailyMatch[2]!))
-    return { type: 'daily', next, repeat: true }
+    const h = parseInt(dailyMatch[1]!), m = parseInt(dailyMatch[2]!)
+    return { type: 'daily', next: getNextDaily(h, m), prev: getPrevDaily(h, m), repeat: true }
   }
 
   // weekly: weekly-day-HH:MM
   const weeklyMatch = name.match(/^weekly-(mon|tue|wed|thu|fri|sat|sun)-(\d{2}):(\d{2})$/)
   if (weeklyMatch) {
-    const next = getNextWeekly(weeklyMatch[1]!, parseInt(weeklyMatch[2]!), parseInt(weeklyMatch[3]!))
-    return { type: 'weekly', next, repeat: true }
+    const d = weeklyMatch[1]!, h = parseInt(weeklyMatch[2]!), m = parseInt(weeklyMatch[3]!)
+    return { type: 'weekly', next: getNextWeekly(d, h, m), prev: getPrevWeekly(d, h, m), repeat: true }
   }
 
   // hourly: hourly-MM
   const hourlyMatch = name.match(/^hourly-(\d{2})$/)
   if (hourlyMatch) {
-    const next = getNextHourly(parseInt(hourlyMatch[1]!))
-    return { type: 'hourly', next, repeat: true }
+    const m = parseInt(hourlyMatch[1]!)
+    return { type: 'hourly', next: getNextHourly(m), prev: getPrevHourly(m), repeat: true }
   }
 
   return null
@@ -94,6 +94,16 @@ function getNextDaily(hours: number, minutes: number): Date {
     next.setDate(next.getDate() + 1)
   }
   return next
+}
+
+function getPrevDaily(hours: number, minutes: number): Date {
+  const now = new Date()
+  const prev = new Date(now)
+  prev.setHours(hours, minutes, 0, 0)
+  if (prev > now) {
+    prev.setDate(prev.getDate() - 1)
+  }
+  return prev
 }
 
 function getNextWeekly(day: string, hours: number, minutes: number): Date {
@@ -112,6 +122,22 @@ function getNextWeekly(day: string, hours: number, minutes: number): Date {
   return next
 }
 
+function getPrevWeekly(day: string, hours: number, minutes: number): Date {
+  const days: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+  const targetDay = days[day] ?? 0
+  const now = new Date()
+  const prev = new Date(now)
+  prev.setHours(hours, minutes, 0, 0)
+
+  const currentDay = now.getDay()
+  let daysSince = currentDay - targetDay
+  if (daysSince < 0 || (daysSince === 0 && prev > now)) {
+    daysSince += 7
+  }
+  prev.setDate(prev.getDate() - daysSince)
+  return prev
+}
+
 function getNextHourly(minutes: number): Date {
   const now = new Date()
   const next = new Date(now)
@@ -120,6 +146,16 @@ function getNextHourly(minutes: number): Date {
     next.setHours(next.getHours() + 1)
   }
   return next
+}
+
+function getPrevHourly(minutes: number): Date {
+  const now = new Date()
+  const prev = new Date(now)
+  prev.setMinutes(minutes, 0, 0)
+  if (prev > now) {
+    prev.setHours(prev.getHours() - 1)
+  }
+  return prev
 }
 
 function formatTimeUntil(date: Date): string {
@@ -136,11 +172,27 @@ function formatTimeUntil(date: Date): string {
   return `${secs}s`
 }
 
+// persistent lastFired tracking to detect missed fires across restarts
+async function loadLastFired(timersDir: string): Promise<Record<string, number>> {
+  try {
+    const file = Bun.file(join(timersDir, '.lastFired.json'))
+    if (await file.exists()) {
+      return await file.json()
+    }
+  } catch {}
+  return {}
+}
+
+async function saveLastFired(timersDir: string, lastFired: Record<string, number>) {
+  await Bun.write(join(timersDir, '.lastFired.json'), JSON.stringify(lastFired))
+}
+
 export default function createTimersPlugin(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
   const scheduledTimers = new Map<string, ScheduledTimer>()
   const timersDir = getTimersDir()
+  let lastFired: Record<string, number> = {}
 
   async function queueTimerMessage(filename: string, content: string) {
     const { frontmatter, body } = parseFrontmatter(content)
@@ -170,6 +222,26 @@ export default function createTimersPlugin(): Plugin {
     }
   }
 
+  async function fireTimer(filename: string, schedule: { repeat: boolean }) {
+    try {
+      const filePath = join(timersDir, filename)
+      const content = await Bun.file(filePath).text()
+      console.log(`timers: firing ${filename}`)
+      await queueTimerMessage(filename, content)
+
+      lastFired[filename] = Date.now()
+      await saveLastFired(timersDir, lastFired)
+
+      if (schedule.repeat) {
+        scheduleTimer(filename)
+      } else {
+        scheduledTimers.delete(filename)
+      }
+    } catch (err) {
+      console.error(`timers: error firing ${filename}:`, err)
+    }
+  }
+
   async function scheduleTimer(filename: string) {
     const schedule = parseSchedule(filename)
     if (!schedule) {
@@ -187,27 +259,22 @@ export default function createTimersPlugin(): Plugin {
       return
     }
 
-    const actualMs = Math.max(0, msUntil)
+    // detect missed fires for recurring timers
+    if (schedule.repeat && schedule.prev) {
+      const prevTime = schedule.prev.getTime()
+      const lastFiredTime = lastFired[filename] ?? 0
+      if (lastFiredTime < prevTime) {
+        console.log(`timers: missed fire detected for ${filename} (should have fired ${schedule.prev.toLocaleString()})`)
+        // fire after a short delay to let the server finish starting up
+        const catchupTimeout = setTimeout(() => fireTimer(filename, schedule), 2000)
+        scheduledTimers.set(filename, { filename, timeout: catchupTimeout, nextFire: schedule.prev })
+        return
+      }
+    }
+
     console.log(`timers: scheduled ${filename} for ${schedule.next.toLocaleString()} (in ${formatTimeUntil(schedule.next)})`)
 
-    const timeout = setTimeout(async () => {
-      try {
-        const filePath = join(timersDir, filename)
-        const content = await Bun.file(filePath).text()
-        console.log(`timers: firing ${filename}`)
-        await queueTimerMessage(filename, content)
-
-        // reschedule if repeating, otherwise just remove from memory
-        // (file stays around for history - past timers are ignored on load)
-        if (schedule.repeat) {
-          scheduleTimer(filename)
-        } else {
-          scheduledTimers.delete(filename)
-        }
-      } catch (err) {
-        console.error(`timers: error firing ${filename}:`, err)
-      }
-    }, actualMs)
+    const timeout = setTimeout(() => fireTimer(filename, schedule), Math.max(0, msUntil))
 
     scheduledTimers.set(filename, {
       filename,
@@ -219,6 +286,7 @@ export default function createTimersPlugin(): Plugin {
   async function loadAllTimers() {
     try {
       await mkdir(timersDir, { recursive: true })
+      lastFired = await loadLastFired(timersDir)
       const glob = new Bun.Glob('*.md')
       for await (const filename of glob.scan(timersDir)) {
         await scheduleTimer(filename)
@@ -269,6 +337,9 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
         try {
           await mkdir(timersDir, { recursive: true })
           await Bun.write(join(timersDir, filename), content)
+          // mark as "fired now" so we don't immediately catch up on the previous occurrence
+          lastFired[filename] = Date.now()
+          await saveLastFired(timersDir, lastFired)
           await scheduleTimer(filename)
           return {
             content: `Timer created: ${filename}\nNext fire: ${schedule.next.toLocaleString()} (in ${formatTimeUntil(schedule.next)})\nRepeating: ${schedule.repeat}`,
@@ -317,6 +388,9 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
           clearTimeout(timer.timeout)
           scheduledTimers.delete(filename)
         }
+
+        delete lastFired[filename]
+        await saveLastFired(timersDir, lastFired)
 
         try {
           const filePath = join(timersDir, filename)

@@ -53,7 +53,7 @@ plugins extend the assistant's functionality.
 | `openai-codex` | same but codex |
 | `view-image` | put images into your context window |
 | `web-browse` | browse the web in a persistent browser, using text or screenshots |
-| `gmail` | read your emails |
+| `gmail` | read your emails. write drafts. send them if you're brave |
 | `google-calendar` | read and edit your calendar events |
 | `google-sheets` | read and edit your sheets |
 | `nano-banana` | generate images |

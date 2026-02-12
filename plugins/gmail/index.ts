@@ -1,5 +1,5 @@
 // gmail plugin for toebeans
-// read-only access to gmail via OAuth2
+// read and compose gmail via OAuth2
 
 import type { Plugin, Tool, ToolResult } from '../../server/types.ts'
 import { readFile } from 'node:fs/promises'
@@ -74,6 +74,80 @@ async function gmailGet(path: string, params?: Record<string, string | string[]>
     throw new Error(`gmail API error (${res.status}): ${text}`)
   }
   return res.json()
+}
+
+async function gmailPost(path: string, body: unknown): Promise<unknown> {
+  const token = await getAccessToken()
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`gmail API error (${res.status}): ${text}`)
+  }
+  return res.json()
+}
+
+function encodeBase64Url(str: string): string {
+  return Buffer.from(str, 'utf-8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+}
+
+interface ComposeParams {
+  to: string
+  subject: string
+  body: string
+  cc?: string
+  bcc?: string
+  in_reply_to?: string
+}
+
+async function buildMessage(params: ComposeParams): Promise<{ raw: string; threadId?: string }> {
+  const lines: string[] = [
+    `From: Jim Zhang <hyriodula@gmail.com>`,
+    `To: ${params.to}`,
+  ]
+  if (params.cc) lines.push(`Cc: ${params.cc}`)
+  if (params.bcc) lines.push(`Bcc: ${params.bcc}`)
+
+  let threadId: string | undefined
+  let subject = params.subject
+
+  if (params.in_reply_to) {
+    // fetch original message to get threadId and Message-ID header
+    const original = await gmailGet(`/messages/${params.in_reply_to}`, {
+      format: 'metadata',
+      metadataHeaders: ['Message-ID'],
+    }) as {
+      threadId: string
+      payload: { headers: { name: string; value: string }[] }
+    }
+    threadId = original.threadId
+    const originalHeaders = original.payload?.headers ?? []
+    const messageId = getHeader(originalHeaders, 'Message-ID')
+    if (messageId) {
+      lines.push(`In-Reply-To: ${messageId}`)
+      lines.push(`References: ${messageId}`)
+    }
+    if (!subject.toLowerCase().startsWith('re:')) {
+      subject = `Re: ${subject}`
+    }
+  }
+
+  lines.push(`Subject: ${subject}`)
+  lines.push(`Content-Type: text/plain; charset="UTF-8"`)
+  lines.push(``)
+  lines.push(params.body)
+
+  return { raw: encodeBase64Url(lines.join('\r\n')), threadId }
 }
 
 function getHeader(headers: { name: string; value: string }[], name: string): string {
@@ -269,12 +343,70 @@ const tools: Tool[] = [
       }
     },
   },
+  {
+    name: 'gmail_draft',
+    description: 'Create a draft email in Gmail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body (plain text)' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId.' },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const params = input as ComposeParams
+      try {
+        const { raw, threadId } = await buildMessage(params)
+        const reqBody: Record<string, unknown> = { message: { raw } }
+        if (threadId) reqBody.message = { raw, threadId }
+        const data = await gmailPost('/drafts', reqBody) as { id: string }
+        return { content: `draft created (id: ${data.id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to create draft: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_send',
+    description: 'Send an email directly via Gmail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body (plain text)' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId.' },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const params = input as ComposeParams
+      try {
+        const { raw, threadId } = await buildMessage(params)
+        const reqBody: Record<string, unknown> = { raw }
+        if (threadId) reqBody.threadId = threadId
+        const data = await gmailPost('/messages/send', reqBody) as { id: string }
+        return { content: `message sent (id: ${data.id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to send message: ${error.message}`, is_error: true }
+      }
+    },
+  },
 ]
 
 export default function create(): Plugin {
   return {
     name: 'gmail',
-    description: 'read-only access to gmail via OAuth2',
+    description: 'read and compose gmail via OAuth2',
     tools,
   }
 }

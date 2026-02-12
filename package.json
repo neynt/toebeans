@@ -13,9 +13,7 @@
     "@anthropic-ai/tokenizer": "^0.0.4",
     "discord.js": "^14.25.1",
     "googleapis": "^171.4.0",
-    "playwright": "^1.58.1",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "patchright": "^1.52.0",
     "turndown": "^7.2.2",
     "zod": "^3.24.2"
   },

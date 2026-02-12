@@ -20,8 +20,8 @@
 - [x] browser stealth -- ONESHOT
 - [x] knowledge revamp -- plugin is responsible for daily & user files, core only compaction
 - [x] lower effort claude by default
+- [x] connect to gmail
 - [ ] knowledge revamp -- why the hell is it 15k tokens of system context
-- [ ] connect to gmail
 - [ ] local llm support?
 - [x] visual web browser tool
 - [ ] tui should display a full audit log, including a history of all tool calls
