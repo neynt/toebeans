@@ -22,6 +22,7 @@ interface InterruptMessage {
 const interruptBuffers = new Map<string, InterruptMessage[]>()
 const sessionBusy = new Map<string, boolean>()
 const sessionAbort = new Map<string, boolean>()
+const sessionAbortControllers = new Map<string, AbortController>()
 
 async function main() {
   console.log('toebeans server starting...')
@@ -174,6 +175,9 @@ async function main() {
             return sessionAbort.get(sessionId) || false
           }
 
+          const resumeAbortController = new AbortController()
+          sessionAbortControllers.set(sessionId, resumeAbortController)
+
           await runAgentTurn([{ type: 'text', text: 'server restarted successfully. continuing from where you left off.' }], {
             provider,
             system: buildSystemPrompt,
@@ -183,6 +187,7 @@ async function main() {
             onChunk: resumeOnChunk,
             checkInterrupts: resumeCheckInterrupts,
             checkAbort: resumeCheckAbort,
+            abortSignal: resumeAbortController.signal,
             ...agentLlmConfig,
           })
 
@@ -192,6 +197,10 @@ async function main() {
             if (remaining.length === 0) break
             console.log(`[server] draining ${remaining.length} remaining interrupt(s) as new turn`)
             const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+
+            const drainController = new AbortController()
+            sessionAbortControllers.set(sessionId, drainController)
+
             await runAgentTurn(interruptContent, {
               provider,
               system: buildSystemPrompt,
@@ -201,6 +210,7 @@ async function main() {
               onChunk: resumeOnChunk,
               checkInterrupts: resumeCheckInterrupts,
               checkAbort: resumeCheckAbort,
+              abortSignal: drainController.signal,
             })
           }
 
@@ -211,6 +221,7 @@ async function main() {
           await outputFn({ type: 'error', message: String(err) })
         } finally {
           sessionBusy.set(sessionId, false)
+          sessionAbortControllers.delete(sessionId)
         }
       } else {
         console.log(`[server] no restart_server tool call found in last assistant message, not auto-continuing`)
@@ -241,6 +252,12 @@ async function main() {
           if ((queuedMsg as any).stopRequested) {
             console.log(`[${name}] stop requested for session ${conversationSessionId}`)
             sessionAbort.set(conversationSessionId, true)
+
+            // abort in-progress operations (LLM stream, tool execution)
+            const controller = sessionAbortControllers.get(conversationSessionId)
+            if (controller) {
+              controller.abort()
+            }
 
             // send confirmation back to the plugin
             if (outputTarget) {
@@ -307,6 +324,10 @@ async function main() {
               return sessionAbort.get(conversationSessionId) || false
             }
 
+            // create abort controller for this turn (allows /stop to cancel in-progress ops)
+            const abortController = new AbortController()
+            sessionAbortControllers.set(conversationSessionId, abortController)
+
             await runAgentTurn(content, {
               provider,
               system: buildSystemPrompt,
@@ -316,6 +337,7 @@ async function main() {
               onChunk: agentOnChunk,
               checkInterrupts: agentCheckInterrupts,
               checkAbort: agentCheckAbort,
+              abortSignal: abortController.signal,
               ...agentLlmConfig,
             })
 
@@ -326,6 +348,11 @@ async function main() {
               if (remaining.length === 0) break
               console.log(`[${name}] draining ${remaining.length} remaining interrupt(s) as new turn`)
               const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+
+              // fresh controller for drain turns
+              const drainController = new AbortController()
+              sessionAbortControllers.set(conversationSessionId, drainController)
+
               await runAgentTurn(interruptContent, {
                 provider,
                 system: buildSystemPrompt,
@@ -335,6 +362,7 @@ async function main() {
                 onChunk: agentOnChunk,
                 checkInterrupts: agentCheckInterrupts,
                 checkAbort: agentCheckAbort,
+                abortSignal: drainController.signal,
               })
             }
 
@@ -352,6 +380,7 @@ async function main() {
             // mark session as not busy and clear abort flag
             sessionBusy.set(conversationSessionId, false)
             sessionAbort.set(conversationSessionId, false)
+            sessionAbortControllers.delete(conversationSessionId)
           }
         }
       } catch (err) {
@@ -450,6 +479,9 @@ async function main() {
             return sessionAbort.get(wsSessionId) || false
           }
 
+          const wsAbortController = new AbortController()
+          sessionAbortControllers.set(wsSessionId, wsAbortController)
+
           await runAgentTurn([{ type: 'text', text: msg.content }], {
             provider,
             system: buildSystemPrompt,
@@ -459,6 +491,7 @@ async function main() {
             onChunk: wsOnChunk,
             checkInterrupts: wsCheckInterrupts,
             checkAbort: wsCheckAbort,
+            abortSignal: wsAbortController.signal,
             ...agentLlmConfig,
           })
 
@@ -468,6 +501,10 @@ async function main() {
             if (remaining.length === 0) break
             console.log(`[websocket] draining ${remaining.length} remaining interrupt(s) as new turn`)
             const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+
+            const drainController = new AbortController()
+            sessionAbortControllers.set(wsSessionId, drainController)
+
             await runAgentTurn(interruptContent, {
               provider,
               system: buildSystemPrompt,
@@ -477,6 +514,7 @@ async function main() {
               onChunk: wsOnChunk,
               checkInterrupts: wsCheckInterrupts,
               checkAbort: wsCheckAbort,
+              abortSignal: drainController.signal,
             })
           }
 
@@ -487,6 +525,7 @@ async function main() {
         } finally {
           sessionBusy.set(wsSessionId, false)
           sessionAbort.set(wsSessionId, false)
+          sessionAbortControllers.delete(wsSessionId)
         }
         break
       }

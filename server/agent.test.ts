@@ -110,9 +110,9 @@ describe('runAgentTurn interrupt injection', () => {
     )
     expect(toolResultMsg).toBeDefined()
 
-    // the interrupt text should be in the SAME message as the tool result
+    // the interrupt text should be in the SAME message as the tool result, wrapped in delimiters
     const hasInterruptText = toolResultMsg!.content.some(
-      b => b.type === 'text' && b.text === 'hey, new context!'
+      b => b.type === 'text' && b.text.includes('[USER INTERRUPT]') && b.text.includes('hey, new context!')
     )
     expect(hasInterruptText).toBe(true)
 
