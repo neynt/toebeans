@@ -11,6 +11,7 @@ commands:
   list-sessions                  list available sessions
   analyze-system-prompt          token breakdown of the system prompt
   tail-session <session-id>      pretty-print session and tail for updates
+  tail-all-sessions              tail all sessions simultaneously
 `)
   process.exit(1)
 }
@@ -41,6 +42,11 @@ switch (command) {
   }
   case 'tail-session': {
     const mod = await import('./tail-session.ts')
+    await mod.default()
+    break
+  }
+  case 'tail-all-sessions': {
+    const mod = await import('./tail-all-sessions.ts')
     await mod.default()
     break
   }
