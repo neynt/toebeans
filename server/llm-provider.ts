@@ -8,5 +8,6 @@ export interface LlmProvider {
     system: string
     tools: ToolDef[]
     cacheControl?: CacheHint[]
+    abortSignal?: AbortSignal
   }): AsyncIterable<StreamChunk>
 }

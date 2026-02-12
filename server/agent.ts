@@ -148,6 +148,7 @@ export interface AgentOptions {
   onChunk?: (chunk: ServerMessage) => void
   checkInterrupts?: () => { content: ContentBlock[]; outputTarget: string }[]
   checkAbort?: () => boolean
+  abortSignal?: AbortSignal
   maxToolResultChars?: number
   maxToolResultTokens?: number
 }
@@ -191,44 +192,75 @@ export async function runAgentTurn(
     let hasToolUse = false
     let hasText = false
 
-    // stream response
-    for await (const chunk of provider.stream({ messages, system, tools: toolDefs })) {
-      switch (chunk.type) {
-        case 'text':
-          onChunk?.({ type: 'text', text: chunk.text })
-          hasText = true
-          // accumulate text into last text block or create new one
-          const lastBlock = assistantContent[assistantContent.length - 1]
-          if (lastBlock?.type === 'text') {
-            lastBlock.text += chunk.text
-          } else {
-            assistantContent.push({ type: 'text', text: chunk.text })
-          }
+    // stream response (abort-aware)
+    let streamAborted = false
+    try {
+      for await (const chunk of provider.stream({ messages, system, tools: toolDefs, abortSignal: options.abortSignal })) {
+        // check abort signal between chunks
+        if (options.abortSignal?.aborted) {
+          streamAborted = true
           break
+        }
 
-        case 'tool_use':
-          // signal end of text block before tool use (flush any buffered text)
-          if (hasText) {
-            onChunk?.({ type: 'text_block_end' })
-            hasText = false
-          }
-          hasToolUse = true
-          onChunk?.({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input })
-          assistantContent.push({
-            type: 'tool_use',
-            id: chunk.id,
-            name: chunk.name,
-            input: chunk.input,
-          })
-          break
+        switch (chunk.type) {
+          case 'text':
+            onChunk?.({ type: 'text', text: chunk.text })
+            hasText = true
+            // accumulate text into last text block or create new one
+            const lastBlock = assistantContent[assistantContent.length - 1]
+            if (lastBlock?.type === 'text') {
+              lastBlock.text += chunk.text
+            } else {
+              assistantContent.push({ type: 'text', text: chunk.text })
+            }
+            break
 
-        case 'usage':
-          totalUsage.input += chunk.input
-          totalUsage.output += chunk.output
-          totalUsage.cacheRead += chunk.cacheRead ?? 0
-          totalUsage.cacheWrite += chunk.cacheWrite ?? 0
-          break
+          case 'tool_use':
+            // signal end of text block before tool use (flush any buffered text)
+            if (hasText) {
+              onChunk?.({ type: 'text_block_end' })
+              hasText = false
+            }
+            hasToolUse = true
+            onChunk?.({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input })
+            assistantContent.push({
+              type: 'tool_use',
+              id: chunk.id,
+              name: chunk.name,
+              input: chunk.input,
+            })
+            break
+
+          case 'usage':
+            totalUsage.input += chunk.input
+            totalUsage.output += chunk.output
+            totalUsage.cacheRead += chunk.cacheRead ?? 0
+            totalUsage.cacheWrite += chunk.cacheWrite ?? 0
+            break
+        }
       }
+    } catch (err) {
+      // abort signal causes the stream to throw — treat as clean abort
+      if (options.abortSignal?.aborted) {
+        streamAborted = true
+      } else {
+        throw err
+      }
+    }
+
+    if (streamAborted) {
+      console.log(`[agent] stream aborted for session ${sessionId}`)
+      // save whatever we accumulated before abort
+      if (assistantContent.length > 0) {
+        const assistantMessage: Message = { role: 'assistant', content: assistantContent }
+        messages.push(assistantMessage)
+        await appendMessage(sessionId, assistantMessage)
+      }
+      if (hasText) {
+        onChunk?.({ type: 'text_block_end' })
+      }
+      onChunk?.({ type: 'done', usage: totalUsage })
+      return { messages, usage: totalUsage, aborted: true }
     }
 
     // save assistant message (skip if empty — model had nothing to say)
@@ -248,50 +280,119 @@ export async function runAgentTurn(
       break
     }
 
-    // execute tools and collect results
+    // execute tools and collect results, checking for interrupts between each
+    const toolUseBlocks = assistantContent.filter(b => b.type === 'tool_use') as
+      { type: 'tool_use'; id: string; name: string; input: unknown }[]
     const toolResults: ContentBlock[] = []
-    for (const block of assistantContent) {
-      if (block.type === 'tool_use') {
-        const tool = toolMap.get(block.name)
-        let result: { content: ToolResultContent; is_error?: boolean }
+    let interruptBlocks: ContentBlock[] = []
+    let interrupted = false
 
-        if (!tool) {
-          result = { content: `Unknown tool: ${block.name}`, is_error: true }
-        } else {
-          try {
-            result = await tool.execute(block.input, toolContext)
-            result.content = truncateToolResult(result.content, maxToolResultChars)
-            result.content = truncateToolResultByTokens(result.content, maxToolResultTokens)
-          } catch (err) {
+    for (let i = 0; i < toolUseBlocks.length; i++) {
+      const block = toolUseBlocks[i]!
+
+      // before executing each tool (except the first), check for interrupts
+      if (i > 0 && options.checkInterrupts) {
+        const interrupts = options.checkInterrupts()
+        if (interrupts.length > 0) {
+          console.log(`[agent] interrupt detected between tool calls — skipping ${toolUseBlocks.length - i} remaining tool(s)`)
+          for (const interrupt of interrupts) {
+            for (const block of interrupt.content) {
+              if (block.type === 'text') {
+                interruptBlocks.push({ type: 'text', text: `[USER INTERRUPT]\n${block.text}\n[/USER INTERRUPT]` })
+              } else {
+                interruptBlocks.push(block)
+              }
+            }
+          }
+          // mark remaining tools as interrupted (API requires matching tool_results)
+          for (let j = i; j < toolUseBlocks.length; j++) {
+            const remaining = toolUseBlocks[j]!
+            const skippedResult = { content: '(skipped — user interrupt received)', is_error: true }
+            onChunk?.({ type: 'tool_result', tool_use_id: remaining.id, content: skippedResult.content, is_error: true })
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: remaining.id,
+              content: skippedResult.content,
+              is_error: true,
+            })
+          }
+          interrupted = true
+          break
+        }
+      }
+
+      // also check abort signal between tools
+      if (options.checkAbort?.()) {
+        console.log(`[agent] abort requested between tool calls for session ${sessionId}`)
+        // mark remaining tools as aborted
+        for (let j = i; j < toolUseBlocks.length; j++) {
+          const remaining = toolUseBlocks[j]!
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: remaining.id,
+            content: '(aborted)',
+            is_error: true,
+          })
+        }
+        // save what we have and bail
+        const toolResultMessage: Message = {
+          role: 'user',
+          content: [...toolResults],
+        }
+        messages.push(toolResultMessage)
+        await appendMessage(sessionId, toolResultMessage)
+        onChunk?.({ type: 'done', usage: totalUsage })
+        return { messages, usage: totalUsage, aborted: true }
+      }
+
+      const tool = toolMap.get(block.name)
+      let result: { content: ToolResultContent; is_error?: boolean }
+
+      if (!tool) {
+        result = { content: `Unknown tool: ${block.name}`, is_error: true }
+      } else {
+        try {
+          result = await tool.execute(block.input, toolContext)
+          result.content = truncateToolResult(result.content, maxToolResultChars)
+          result.content = truncateToolResultByTokens(result.content, maxToolResultTokens)
+        } catch (err) {
+          if (options.abortSignal?.aborted) {
+            result = { content: '(aborted)', is_error: true }
+          } else {
             result = { content: `Tool error: ${err}`, is_error: true }
           }
         }
-
-        onChunk?.({ type: 'tool_result', tool_use_id: block.id, content: result.content, is_error: result.is_error })
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: result.content,
-          is_error: result.is_error,
-        })
       }
+
+      onChunk?.({ type: 'tool_result', tool_use_id: block.id, content: result.content, is_error: result.is_error })
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: result.content,
+        is_error: result.is_error,
+      })
     }
 
-    // check for interrupt messages before saving tool results
-    // interrupts must be merged into the tool result message to maintain
-    // alternating user/assistant message structure required by the API
-    let interruptBlocks: ContentBlock[] = []
-    if (options.checkInterrupts) {
+    // if we didn't already interrupt, check for interrupts after all tools finished
+    if (!interrupted && options.checkInterrupts) {
       const interrupts = options.checkInterrupts()
       if (interrupts.length > 0) {
         console.log(`[agent] injecting ${interrupts.length} interrupt(s) into conversation`)
         for (const interrupt of interrupts) {
-          interruptBlocks.push(...interrupt.content)
+          for (const block of interrupt.content) {
+            if (block.type === 'text') {
+              interruptBlocks.push({ type: 'text', text: `[USER INTERRUPT]\n${block.text}\n[/USER INTERRUPT]` })
+            } else {
+              interruptBlocks.push(block)
+            }
+          }
         }
       }
     }
 
     // add tool results (+ any interrupt content) as a single user message
+    // interrupts are merged into tool result message to maintain alternating
+    // user/assistant message structure required by the API
     const toolResultMessage: Message = {
       role: 'user',
       content: [...toolResults, ...interruptBlocks],

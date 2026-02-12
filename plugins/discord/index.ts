@@ -652,6 +652,7 @@ export default function createDiscordPlugin(): Plugin {
           await client!.application?.commands.set([
             { name: 'compact', description: 'Force compact the current session' },
             { name: 'session', description: 'Show current session info' },
+            { name: 'stop', description: 'Stop the current operation immediately' },
           ])
           console.log('discord: registered slash commands')
         } catch (err) {
@@ -675,7 +676,21 @@ export default function createDiscordPlugin(): Plugin {
 
         try {
           const route = `discord:${interaction.channelId}`
-          if (interaction.commandName === 'compact') {
+          if (interaction.commandName === 'stop') {
+            // queue a stop request (same as /stop text message)
+            const stopMessage: QueuedMessage = {
+              message: { role: 'user', content: [] },
+              outputTarget: route,
+              stopRequested: true,
+            }
+            messageQueue.push(stopMessage)
+            if (resolveWaiter) {
+              resolveWaiter()
+              resolveWaiter = null
+            }
+            await interaction.reply({ content: 'stopping...', ephemeral: true })
+            return
+          } else if (interaction.commandName === 'compact') {
             await interaction.deferReply()
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const newId = await config!.sessionManager.forceCompact(sessionId, route)

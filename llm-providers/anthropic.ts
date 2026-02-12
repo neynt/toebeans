@@ -24,6 +24,7 @@ export class AnthropicProvider implements LlmProvider {
     system: string
     tools: ToolDef[]
     cacheControl?: CacheHint[]
+    abortSignal?: AbortSignal
   }): AsyncIterable<StreamChunk> {
     const messages = params.messages.map((msg, idx) => {
       const content = msg.content.map((block): AnthropicContentBlock => {
@@ -109,7 +110,7 @@ export class AnthropicProvider implements LlmProvider {
       ...(this.effort
         ? { output_config: { effort: this.effort } } as Record<string, unknown>
         : {}),
-    })
+    }, params.abortSignal ? { signal: params.abortSignal } : undefined)
 
     let currentToolUse: { id: string; name: string; inputJson: string } | null = null
 
@@ -164,13 +165,18 @@ export class AnthropicProvider implements LlmProvider {
       }
     }
 
-    const finalMessage = await stream.finalMessage()
-    yield {
-      type: 'usage',
-      input: finalMessage.usage.input_tokens,
-      output: finalMessage.usage.output_tokens,
-      cacheRead: (finalMessage.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens,
-      cacheWrite: (finalMessage.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
+    // get final usage (may fail if stream was aborted)
+    try {
+      const finalMessage = await stream.finalMessage()
+      yield {
+        type: 'usage',
+        input: finalMessage.usage.input_tokens,
+        output: finalMessage.usage.output_tokens,
+        cacheRead: (finalMessage.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens,
+        cacheWrite: (finalMessage.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
+      }
+    } catch {
+      // aborted stream won't have final usage — that's fine
     }
   }
 }
