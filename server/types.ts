@@ -70,6 +70,19 @@ export type ServerMessage =
   | { type: 'done'; usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }; cost?: { session: number; turn: number } }
   | { type: 'error'; message: string }
 
+// Session entry types — the JSONL format
+export interface TokenUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export type SessionEntry =
+  | { type: 'system_prompt'; timestamp: string; content: string }
+  | { type: 'message'; timestamp: string; message: Message }
+  | { type: 'cost'; timestamp: string; inputCost: number; outputCost: number; usage: TokenUsage }
+
 // Session info
 export interface SessionInfo {
   id: string

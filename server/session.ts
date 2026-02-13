@@ -1,7 +1,7 @@
 import { mkdir, unlink } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { Message, SessionInfo } from './types.ts'
+import type { Message, SessionInfo, SessionEntry } from './types.ts'
 import { countMessagesTokens } from './tokens.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
@@ -56,7 +56,23 @@ export async function generateSessionId(route?: string): Promise<string> {
   throw new Error(`all session IDs exhausted for ${prefix} (0000-9999)`)
 }
 
-export async function loadSession(sessionId: string): Promise<Message[]> {
+/**
+ * Parse a JSONL line as a SessionEntry. Handles both new entry format
+ * (has a `type` field) and legacy format (raw Message objects with `role`).
+ */
+function parseSessionLine(line: string): SessionEntry {
+  const parsed = JSON.parse(line)
+  if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+    return parsed as SessionEntry
+  }
+  // legacy: raw Message object — wrap it
+  return { type: 'message', timestamp: '', message: parsed as Message }
+}
+
+/**
+ * Load all session entries (new format).
+ */
+export async function loadSessionEntries(sessionId: string): Promise<SessionEntry[]> {
   const path = getSessionPath(sessionId)
   const file = Bun.file(path)
 
@@ -66,13 +82,42 @@ export async function loadSession(sessionId: string): Promise<Message[]> {
 
   const text = await file.text()
   const lines = text.trim().split('\n').filter(Boolean)
-
-  return lines.map(line => JSON.parse(line) as Message)
+  return lines.map(parseSessionLine)
 }
 
-export async function appendMessage(sessionId: string, message: Message): Promise<void> {
+/**
+ * Load only the Message objects from a session (for LLM calls).
+ */
+export async function loadSession(sessionId: string): Promise<Message[]> {
+  const entries = await loadSessionEntries(sessionId)
+  return entries
+    .filter((e): e is SessionEntry & { type: 'message' } => e.type === 'message')
+    .map(e => e.message)
+}
+
+/**
+ * Load the system prompt from a session (first system_prompt entry), or null if none.
+ */
+export async function loadSystemPrompt(sessionId: string): Promise<string | null> {
+  const entries = await loadSessionEntries(sessionId)
+  const sp = entries.find((e): e is SessionEntry & { type: 'system_prompt' } => e.type === 'system_prompt')
+  return sp?.content ?? null
+}
+
+/**
+ * Load all cost entries from a session.
+ */
+export async function loadCostEntries(sessionId: string): Promise<(SessionEntry & { type: 'cost' })[]> {
+  const entries = await loadSessionEntries(sessionId)
+  return entries.filter((e): e is SessionEntry & { type: 'cost' } => e.type === 'cost')
+}
+
+/**
+ * Append a session entry to the JSONL file.
+ */
+export async function appendEntry(sessionId: string, entry: SessionEntry): Promise<void> {
   const path = getSessionPath(sessionId)
-  const line = JSON.stringify(message) + '\n'
+  const line = JSON.stringify(entry) + '\n'
 
   const file = Bun.file(path)
   if (await file.exists()) {
@@ -81,6 +126,17 @@ export async function appendMessage(sessionId: string, message: Message): Promis
   } else {
     await Bun.write(path, line)
   }
+}
+
+/**
+ * Append a message to the session (wraps in a SessionEntry).
+ */
+export async function appendMessage(sessionId: string, message: Message): Promise<void> {
+  await appendEntry(sessionId, {
+    type: 'message',
+    timestamp: new Date().toISOString(),
+    message,
+  })
 }
 
 export async function listSessions(): Promise<SessionInfo[]> {
@@ -183,9 +239,9 @@ export async function getSessionLastActivity(sessionId: string): Promise<Date | 
 }
 
 // write a session from scratch (used for compacted sessions)
-export async function writeSession(sessionId: string, messages: Message[]): Promise<void> {
+export async function writeSession(sessionId: string, entries: SessionEntry[]): Promise<void> {
   const path = getSessionPath(sessionId)
-  const lines = messages.map(m => JSON.stringify(m)).join('\n') + '\n'
+  const lines = entries.map(e => JSON.stringify(e)).join('\n') + '\n'
   await Bun.write(path, lines)
 }
 
