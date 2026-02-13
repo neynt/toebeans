@@ -37,15 +37,26 @@ function trimForCompaction(messages: Message[], trimLength: number): Message[] {
   }))
 }
 
-async function readUserProfile(): Promise<string | null> {
-  const knowledgePath = join(getKnowledgeDir(), 'USER.md')
-  const file = Bun.file(knowledgePath)
-  if (await file.exists()) {
-    const content = await file.text()
-    return content.trim() || null
-  }
-  return null
-}
+const DEFAULT_USER_MD = `\
+### Identity
+- **Name**: ...
+- **Location**: ...
+- **Job/Role**: ...
+
+### Preferences
+- **Communication style**: ...
+- **Interests**: ...
+
+### Daily Life
+- **Routines**: ...
+- **Hobbies**: ...
+
+### Projects
+- ...
+
+### Accounts & Services
+- ...
+`
 
 async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
   const today = new Date().toISOString().slice(0, 10)
@@ -211,19 +222,20 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
       const parts: string[] = []
       const knowledgeDir = getKnowledgeDir()
 
-      // user profile
+      // user profile (seed default if missing)
       const userKnowledgePath = join(knowledgeDir, 'USER.md')
       const userKnowledgeFile = Bun.file(userKnowledgePath)
-      if (await userKnowledgeFile.exists()) {
-        const content = await userKnowledgeFile.text()
-        if (content.trim()) {
-          parts.push(
-            `# User info (${userKnowledgePath})\n` +
-            `Below the line is what you know about the user. If you learn anything more about the user that could be useful in the future, add it to the file with bash. Pay special attention to expressed preferences and corrections.\n` +
-            `---\n` +
-            content
-          )
-        }
+      if (!await userKnowledgeFile.exists()) {
+        await Bun.write(userKnowledgePath, DEFAULT_USER_MD)
+      }
+      const userContent = await Bun.file(userKnowledgePath).text()
+      if (userContent.trim()) {
+        parts.push(
+          `# User info (${userKnowledgePath})\n` +
+          `Below the line is what you know about the user. If you learn anything more about the user that could be useful in the future, add it to the file with bash. Pay special attention to expressed preferences and corrections.\n` +
+          `---\n` +
+          userContent
+        )
       }
 
       // knowledge directory listing
