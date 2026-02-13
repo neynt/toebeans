@@ -181,22 +181,13 @@ function createMemoryTools(): Tool[] {
   ]
 }
 
-interface MemoryConfig {
-  recentLogDays?: number
-}
-
 export default function createMemoryPlugin(serverContext?: { config?: { session?: { compactionTrimLength?: number } } }): Plugin {
-  let pluginConfig: MemoryConfig = {}
   const compactionTrimLength = serverContext?.config?.session?.compactionTrimLength ?? 200
 
   return {
     name: 'memory',
     description: `Long-term memory. Stored as markdown files in ~/.toebeans/knowledge/.`,
     tools: createMemoryTools(),
-
-    async init(cfg: unknown) {
-      pluginConfig = (cfg as MemoryConfig) ?? {}
-    },
 
     async onPreCompaction(context: PreCompactionContext) {
       const { sessionId, messages, provider } = context
@@ -261,31 +252,19 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
         }
       }
 
-      // recent daily logs
-      const recentLogDays = pluginConfig.recentLogDays ?? 2
-      const recentLogs: string[] = []
-      const today = new Date()
-      const dates: Date[] = []
-      for (let i = 0; i < recentLogDays; i++) {
-        const d = new Date(today)
-        d.setDate(d.getDate() - i)
-        dates.push(d)
-      }
-
-      for (const date of dates) {
-        const dateStr = date.toISOString().slice(0, 10)
-        const dailyLogPath = join(knowledgeDir, `${dateStr}.md`)
-        const dailyLogFile = Bun.file(dailyLogPath)
-        if (await dailyLogFile.exists()) {
-          const content = await dailyLogFile.text()
-          if (content.trim()) {
-            recentLogs.push(content)
-          }
+      // topic file listing
+      const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/
+      const excludeFiles = new Set(['USER.md', 'USER.md.bak'])
+      const glob = new Bun.Glob('*.md')
+      const topicFiles: string[] = []
+      for await (const file of glob.scan(knowledgeDir)) {
+        if (!datePattern.test(file) && !excludeFiles.has(file)) {
+          topicFiles.push(file.replace('.md', ''))
         }
       }
-
-      if (recentLogs.length > 0) {
-        parts.push('## Recent Activity\n\n' + recentLogs.join('\n\n'))
+      if (topicFiles.length > 0) {
+        topicFiles.sort()
+        parts.push(`## Available Knowledge Files\nUse \`recall\` to read these when relevant: ${topicFiles.join(', ')}`)
       }
 
       return parts.length > 0 ? parts.join('\n\n') : null
