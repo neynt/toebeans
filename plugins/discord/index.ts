@@ -590,6 +590,22 @@ export default function createDiscordPlugin(): Plugin {
           return
         }
 
+        // handle /reset command (reset session without summary)
+        if (msg.content.trim() === '/reset') {
+          if (!config!.sessionManager) return
+          const route = `discord:${msg.channelId}`
+          try {
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const newId = await config!.sessionManager.resetSession(sessionId, route)
+            const channel = msg.channel as TextChannel | DMChannel
+            await channel.send(`✅ reset session \`${sessionId}\` → \`${newId}\``)
+          } catch (err) {
+            const channel = msg.channel as TextChannel | DMChannel
+            await channel.send(`❌ reset failed: ${err}`)
+          }
+          return
+        }
+
         // start typing immediately
         const typingChannel = msg.channel as TextChannel | DMChannel
         typingChannel.sendTyping().catch(() => {})
@@ -651,6 +667,7 @@ export default function createDiscordPlugin(): Plugin {
         try {
           await client!.application?.commands.set([
             { name: 'compact', description: 'Force compact the current session' },
+            { name: 'reset', description: 'Reset session without summary (clean slate)' },
             { name: 'session', description: 'Show current session info' },
             { name: 'stop', description: 'Stop the current operation immediately' },
           ])
@@ -695,6 +712,11 @@ export default function createDiscordPlugin(): Plugin {
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const newId = await config!.sessionManager.forceCompact(sessionId, route)
             await interaction.editReply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
+          } else if (interaction.commandName === 'reset') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const newId = await config!.sessionManager.resetSession(sessionId, route)
+            await interaction.editReply(`✅ reset session \`${sessionId}\` → \`${newId}\``)
           } else if (interaction.commandName === 'session') {
             await interaction.deferReply()
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
