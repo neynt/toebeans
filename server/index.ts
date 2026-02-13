@@ -195,7 +195,7 @@ async function main() {
           })
 
           // drain remaining interrupts as new turns
-          while (true) {
+          while (!resumeCheckAbort()) {
             const remaining = resumeCheckInterrupts()
             if (remaining.length === 0) break
             console.log(`[server] draining ${remaining.length} remaining interrupt(s) as new turn`)
@@ -347,7 +347,7 @@ async function main() {
 
             // drain any remaining interrupts that arrived during a no-tool-use response
             // (checkInterrupts only runs between tool calls, so these would be stranded)
-            while (true) {
+            while (!agentCheckAbort()) {
               const remaining = agentCheckInterrupts()
               if (remaining.length === 0) break
               console.log(`[${name}] draining ${remaining.length} remaining interrupt(s) as new turn`)
@@ -501,7 +501,7 @@ async function main() {
           })
 
           // drain remaining interrupts as new turns
-          while (true) {
+          while (!wsCheckAbort()) {
             const remaining = wsCheckInterrupts()
             if (remaining.length === 0) break
             console.log(`[websocket] draining ${remaining.length} remaining interrupt(s) as new turn`)
