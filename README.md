@@ -21,10 +21,10 @@
 
 | path | contents |
 |-|-|
-| `~/.toebeans/config.json` | main config file. a simple one will be created after first run |
+| `~/.toebeans/config.json` | main config file |
 | `~/.toebeans/SOUL.md` | user-customizable start of the system message |
-| `~/.toebeans/secrets` | where plugins store shared secrets / API keys |
-| `~/.toebeans/$plugin_name` | typically where plugins store their data |
+| `~/.toebeans/secrets/` | where plugins store shared secrets / API keys |
+| `~/.toebeans/$plugin_name/` | typically where plugins store their data |
 
 ## plugins
 
@@ -34,7 +34,7 @@ plugins extend the assistant's functionality.
 
 | plugin | function |
 |-|-|
-| `bash` | lets your agent run bash. go wild!! be free!! |
+| `bash` | lets your agent run bash |
 | `memory` | remember things about you and what you talked about |
 | `timers` | schedule repeating or one-off wakeups |
 | `plugins` | add/remove plugins |
@@ -43,7 +43,7 @@ plugins extend the assistant's functionality.
 
 | plugin | function |
 |-|-|
-| `discord` | lets you chat with your agent through discord |
+| `discord` | chat with your agent through discord |
 
 ### productive plugins
 
