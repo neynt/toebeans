@@ -1,5 +1,5 @@
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, StreamChunk, ToolDef, AgentResult, ServerMessage, TokenUsage } from './types.ts'
+import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, ToolDef, AgentResult, ServerMessage, TokenUsage } from './types.ts'
 import { loadSession, appendMessage, appendEntry, loadCostEntries, loadSystemPrompt } from './session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
 import { estimateImageTokens } from './tokens.ts'
