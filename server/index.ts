@@ -405,7 +405,7 @@ async function main() {
     // then plugin instructions (tool descriptions)
     const pluginSection = pluginManager.getSystemPromptSection()
     if (pluginSection) {
-      parts.push(pluginSection)
+      parts.push(`# Enabled plugins\n\n${pluginSection}`)
     }
 
     return parts.join('\n\n')
