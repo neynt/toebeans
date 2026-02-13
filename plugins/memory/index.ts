@@ -211,29 +211,40 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
       const parts: string[] = []
       const knowledgeDir = getKnowledgeDir()
 
-      // user knowledge
+      // user profile
       const userKnowledgePath = join(knowledgeDir, 'USER.md')
       const userKnowledgeFile = Bun.file(userKnowledgePath)
       if (await userKnowledgeFile.exists()) {
         const content = await userKnowledgeFile.text()
         if (content.trim()) {
-          parts.push(content)
+          parts.push(
+            `# User info (${userKnowledgePath})\n` +
+            `Below the line is what you know about the user. If you learn anything more about the user that could be useful in the future, add it to the file with bash. Pay special attention to expressed preferences and corrections.\n` +
+            `---\n` +
+            content
+          )
         }
       }
 
-      // topic file listing
+      // knowledge directory listing
       const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/
       const excludeFiles = new Set(['USER.md', 'USER.md.bak'])
       const glob = new Bun.Glob('*.md')
       const topicFiles: string[] = []
       for await (const file of glob.scan(knowledgeDir)) {
         if (!datePattern.test(file) && !excludeFiles.has(file)) {
-          topicFiles.push(file.replace('.md', ''))
+          topicFiles.push(file)
         }
       }
       if (topicFiles.length > 0) {
         topicFiles.sort()
-        parts.push(`## Available Knowledge Files\nUse \`recall\` to read these when relevant: ${topicFiles.join(', ')}`)
+        parts.push(
+          `# Knowledge directory (${knowledgeDir})\n` +
+          `Files:\n` +
+          topicFiles.map(f => `- ${f}`).join('\n') + '\n\n' +
+          `Use bash to read any of these files when you need context. ` +
+          `You can also create or edit markdown files here and they'll be surfaced automatically in future conversations.`
+        )
       }
 
       return parts.length > 0 ? parts.join('\n\n') : null
