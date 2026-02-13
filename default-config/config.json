@@ -1,0 +1,25 @@
+{
+  "server": {
+    "port": 3000
+  },
+  "session": {
+    "compactAtTokens": 20000,
+    "compactMinTokens": 5000,
+    "lifespanSeconds": 3600,
+    "compactionPrompt": "Summarize this conversation for your future self. You are being compacted, and this summary will be the only context you have when the conversation continues. Be brief but keep all useful information. Include key topics, decisions, completed tasks, pending tasks, and important details like IDs, names, and technical specifics.",
+    "compactionTrimLength": 200,
+    "autoSummarize": true
+  },
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5-20250929",
+    "apiKey": "",
+    "effort": "medium",
+    "maxOutputTokens": 16384,
+    "maxToolResultTokens": 10000,
+    "maxToolResultChars": 50000,
+    "thinkingBudget": 1024
+  },
+  "plugins": {},
+  "notifyOnRestart": ""
+}
