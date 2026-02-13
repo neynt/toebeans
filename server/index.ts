@@ -38,7 +38,7 @@ async function main() {
   if (await soulFile.exists()) {
     soul = await soulFile.text()
   } else {
-    const defaultSoul = await Bun.file(new URL('./default-soul.md', import.meta.url)).text()
+    const defaultSoul = await Bun.file(new URL('../default-config/SOUL.md', import.meta.url)).text()
     await Bun.write(soulPath, defaultSoul)
     soul = defaultSoul
     console.log(`created default SOUL.md at ${soulPath}`)

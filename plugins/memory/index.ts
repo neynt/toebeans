@@ -36,26 +36,11 @@ function trimForCompaction(messages: Message[], trimLength: number): Message[] {
   }))
 }
 
-const DEFAULT_USER_MD = `\
-### Identity
-- **Name**: ...
-- **Location**: ...
-- **Job/Role**: ...
+const DEFAULT_USER_MD_PATH = new URL('../../default-config/USER.md', import.meta.url)
 
-### Preferences
-- **Communication style**: ...
-- **Interests**: ...
-
-### Daily Life
-- **Routines**: ...
-- **Hobbies**: ...
-
-### Projects
-- ...
-
-### Accounts & Services
-- ...
-`
+async function getDefaultUserMd(): Promise<string> {
+  return await Bun.file(DEFAULT_USER_MD_PATH).text()
+}
 
 async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
   const today = new Date().toISOString().slice(0, 10)
@@ -124,7 +109,7 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
       const userKnowledgePath = join(knowledgeDir, 'USER.md')
       const userKnowledgeFile = Bun.file(userKnowledgePath)
       if (!await userKnowledgeFile.exists()) {
-        await Bun.write(userKnowledgePath, DEFAULT_USER_MD)
+        await Bun.write(userKnowledgePath, await getDefaultUserMd())
       }
       const userContent = await Bun.file(userKnowledgePath).text()
       if (userContent.trim()) {

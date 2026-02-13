@@ -69,7 +69,7 @@ export default async function analyzeSystem() {
 
   // 1. SOUL.md
   const soul = await readFileOrNull(SOUL_PATH)
-    ?? await Bun.file(new URL('../../server/default-soul.md', import.meta.url)).text()
+    ?? await Bun.file(new URL('../../default-config/SOUL.md', import.meta.url)).text()
   components.push({ name: 'SOUL.md', text: soul, tokens: countTokens(soul) })
 
   // 2. Memory plugin: USER.md
