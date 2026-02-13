@@ -25,6 +25,7 @@ export interface SessionManager {
   getSessionForMessage(route?: string): Promise<string>
   checkCompaction(sessionId: string, route?: string): Promise<void>
   forceCompact(sessionId: string, route?: string): Promise<string>
+  resetSession(sessionId: string, route?: string): Promise<string>
   getSessionInfo(sessionId: string): Promise<{
     id: string
     messageCount: number
@@ -241,6 +242,43 @@ export function createSessionManager(
     async forceCompact(sessionId: string, route?: string): Promise<string> {
       console.log(`session-manager: forcing compaction of session ${sessionId}`)
       return await compactSession(sessionId, route)
+    },
+
+    async resetSession(sessionId: string, route?: string): Promise<string> {
+      console.log(`session-manager: resetting session ${sessionId} (route: ${route || '_default'})`)
+
+      const rawMessages = await loadSession(sessionId)
+
+      // fire pre-compaction hooks so plugins can extract knowledge
+      if (pluginManager && rawMessages.length > 0) {
+        const messages = repairMessages(rawMessages)
+        await pluginManager.firePreCompaction({ sessionId, route, messages, provider })
+      }
+
+      // compute old session's total cost
+      const oldCostEntries = await loadCostEntries(sessionId)
+      const oldSessionCost = oldCostEntries.reduce((sum, e) => sum + e.inputCost + e.outputCost, 0)
+
+      // create a brand new empty session (no summary, no carryover)
+      const newId = await generateSessionId(route)
+
+      console.log(`session-manager: reset session ${sessionId} → ${newId}`)
+
+      // send reset notification
+      if (routeOutput && config.notifyOnRestart) {
+        try {
+          const costStr = `$${oldSessionCost.toFixed(2)}`
+          await routeOutput(config.notifyOnRestart, {
+            type: 'text',
+            text: `🧹 \`reset\` old: \`${sessionId}\` → new: \`${newId}\` (old session cost: ${costStr})`
+          })
+          await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
+        } catch (err) {
+          console.error(`session-manager: failed to send reset notification:`, err)
+        }
+      }
+
+      return newId
     },
 
     async getSessionInfo(sessionId: string) {
