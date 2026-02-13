@@ -78,14 +78,18 @@ function connect() {
         break
       }
 
-      case 'done':
+      case 'done': {
+        const costStr = msg.cost
+          ? ` | turn: $${msg.cost.turn.toFixed(3)} session: $${msg.cost.session.toFixed(3)}`
+          : ''
         console.log(`\n[tokens: ${msg.usage.input}↓ ${msg.usage.output}↑` +
           (msg.usage.cacheRead ? ` ${msg.usage.cacheRead}⚡` : '') +
           (msg.usage.cacheWrite ? ` ${msg.usage.cacheWrite}💾` : '') +
-          ']')
+          costStr + ']')
         state.pendingResponse = false
         showPrompt()
         break
+      }
 
       case 'error':
         console.error(`\n[error: ${msg.message}]`)
