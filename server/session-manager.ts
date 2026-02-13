@@ -13,6 +13,8 @@ import {
   writeSession,
   generateSessionId,
 } from './session.ts'
+import { estimateCost, formatCost, type UsageTotals } from './cost.ts'
+import { addUsageToSession, carrySessionCost } from './session-cost.ts'
 
 const DEFAULT_COMPACTION_PROMPT = `Summarize this conversation for your future self. You are being compacted — this summary will be the only context you have when the conversation continues.
 
@@ -76,7 +78,7 @@ export function createSessionManager(
     }))
   }
 
-  async function generateSummary(messages: Message[]): Promise<string> {
+  async function generateSummary(messages: Message[]): Promise<{ text: string; usage: UsageTotals }> {
     const trimmed = trimForCompaction(messages)
 
     const lastMsg = trimmed[trimmed.length - 1]
@@ -90,6 +92,7 @@ export function createSessionManager(
     }
 
     let result = ''
+    const usage: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
     for await (const chunk of provider.stream({
       messages: trimmed,
       system: 'You are being compacted. Respond with the requested summary.',
@@ -97,10 +100,15 @@ export function createSessionManager(
     })) {
       if (chunk.type === 'text') {
         result += chunk.text
+      } else if (chunk.type === 'usage') {
+        usage.input += chunk.input
+        usage.output += chunk.output
+        usage.cacheRead += chunk.cacheRead ?? 0
+        usage.cacheWrite += chunk.cacheWrite ?? 0
       }
     }
 
-    return result.trim()
+    return { text: result.trim(), usage }
   }
 
   async function compactSession(sessionId: string, route?: string): Promise<string> {
@@ -120,8 +128,13 @@ export function createSessionManager(
       await pluginManager.firePreCompaction({ sessionId, route, messages, provider })
     }
 
-    // generate summary
-    const summary = await generateSummary(messages)
+    // generate summary (and capture compaction LLM usage)
+    const { text: summary, usage: compactionUsage } = await generateSummary(messages)
+
+    // add compaction LLM cost to the old session before carrying forward
+    const compactionEstimate = estimateCost(compactionUsage, config.llm.model)
+    const compactionCost = compactionEstimate?.optimistic ?? 0
+    await addUsageToSession(sessionId, compactionUsage, compactionCost)
 
     // create new session with summary as context (same route)
     const newId = await generateSessionId(route)
@@ -134,6 +147,9 @@ export function createSessionManager(
     }
     await writeSession(newId, [summaryMessage])
 
+    // carry cumulative cost to the new session
+    const newCost = await carrySessionCost(sessionId, newId)
+
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
 
@@ -142,9 +158,10 @@ export function createSessionManager(
       try {
         const formattedBefore = beforeTokens.toLocaleString()
         const formattedAfter = afterTokens.toLocaleString()
+        const costStr = formatCost({ optimistic: newCost.estimatedCost, pessimistic: newCost.estimatedCost })
         await routeOutput(config.notifyOnRestart, {
           type: 'text',
-          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens)`
+          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens, cumulative cost: ${costStr})`
         })
         await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
       } catch (err) {
