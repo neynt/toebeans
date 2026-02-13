@@ -138,7 +138,7 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
 
       // knowledge directory listing
       const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/
-      const excludeFiles = new Set(['USER.md', 'USER.md.bak'])
+      const excludeFiles = new Set(['USER.md'])
       const glob = new Bun.Glob('*.md')
       const topicFiles: string[] = []
       for await (const file of glob.scan(knowledgeDir)) {
