@@ -6,6 +6,8 @@ import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../llm-providers/anthropic.ts'
+import { estimateCost } from './cost.ts'
+import { addUsageToSession } from './session-cost.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -59,6 +61,39 @@ async function main() {
   const agentLlmConfig = {
     maxToolResultChars: config.llm.maxToolResultChars,
     maxToolResultTokens: config.llm.maxToolResultTokens,
+  }
+
+  const model = config.llm.model
+
+  /**
+   * Wrap an onChunk callback to intercept 'done' messages and add cumulative cost tracking.
+   * Returns the wrapped callback.
+   */
+  function withCostTracking(
+    sessionId: string,
+    onChunk: (chunk: ServerMessage) => void | Promise<void>,
+  ): (chunk: ServerMessage) => Promise<void> {
+    return async (chunk: ServerMessage) => {
+      if (chunk.type === 'done') {
+        const turnUsage = {
+          input: chunk.usage.input,
+          output: chunk.usage.output,
+          cacheRead: chunk.usage.cacheRead ?? 0,
+          cacheWrite: chunk.usage.cacheWrite ?? 0,
+        }
+        const estimate = estimateCost(turnUsage, model)
+        const turnCost = estimate?.optimistic ?? 0
+        const sessionCost = await addUsageToSession(sessionId, turnUsage, turnCost)
+        // enrich the done message with cost info
+        const enriched: ServerMessage = {
+          ...chunk,
+          cost: { session: sessionCost.estimatedCost, turn: turnCost },
+        }
+        await onChunk(enriched)
+      } else {
+        await onChunk(chunk)
+      }
+    }
   }
 
   const pluginManager = new PluginManager()
@@ -162,10 +197,10 @@ async function main() {
 
         try {
           sessionAbort.set(sessionId, false)
-          const resumeOnChunk = async (chunk: ServerMessage) => {
+          const resumeOnChunk = withCostTracking(sessionId, async (chunk: ServerMessage) => {
             broadcast(sessionId, chunk)
             await outputFn(chunk)
-          }
+          })
           const resumeCheckInterrupts = () => {
             const buffer = interruptBuffers.get(sessionId) || []
             interruptBuffers.set(sessionId, [])
@@ -309,12 +344,12 @@ async function main() {
           }
 
           try {
-            const agentOnChunk = async (chunk: ServerMessage) => {
+            const agentOnChunk = withCostTracking(conversationSessionId, async (chunk: ServerMessage) => {
               broadcast(conversationSessionId, chunk)
               if (outputFn) {
                 await outputFn(chunk)
               }
-            }
+            })
             const agentCheckInterrupts = () => {
               const buffer = interruptBuffers.get(conversationSessionId) || []
               interruptBuffers.set(conversationSessionId, [])
@@ -469,7 +504,7 @@ async function main() {
         await setLastOutputTarget(null)
 
         try {
-          const wsOnChunk = (chunk: ServerMessage) => broadcast(wsSessionId, chunk)
+          const wsOnChunk = withCostTracking(wsSessionId, (chunk: ServerMessage) => broadcast(wsSessionId, chunk))
           const wsCheckInterrupts = () => {
             const buffer = interruptBuffers.get(wsSessionId) || []
             interruptBuffers.set(wsSessionId, [])
