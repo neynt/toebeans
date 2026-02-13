@@ -1,8 +1,9 @@
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, StreamChunk, ToolDef, AgentResult, ServerMessage } from './types.ts'
-import { loadSession, appendMessage } from './session.ts'
+import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, StreamChunk, ToolDef, AgentResult, ServerMessage, TokenUsage } from './types.ts'
+import { loadSession, appendMessage, appendEntry, loadCostEntries, loadSystemPrompt } from './session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
 import { estimateImageTokens } from './tokens.ts'
+import { computeInputOutputCost } from './cost.ts'
 
 // defaults — can be overridden via AgentOptions
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000
@@ -145,6 +146,7 @@ export interface AgentOptions {
   tools: () => Tool[]
   sessionId: string
   workingDir: string
+  model: string
   onChunk?: (chunk: ServerMessage) => void
   checkInterrupts?: () => { content: ContentBlock[]; outputTarget: string }[]
   checkAbort?: () => boolean
@@ -157,9 +159,20 @@ export async function runAgentTurn(
   userContent: ContentBlock[],
   options: AgentOptions
 ): Promise<AgentResult> {
-  const { provider, system: getSystem, tools: getTools, sessionId, workingDir, onChunk } = options
+  const { provider, system: getSystem, tools: getTools, sessionId, workingDir, model, onChunk } = options
   const maxToolResultChars = options.maxToolResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS
   const maxToolResultTokens = options.maxToolResultTokens ?? DEFAULT_MAX_TOOL_RESULT_TOKENS
+
+  // write system prompt entry if this is a fresh session
+  const existingSystemPrompt = await loadSystemPrompt(sessionId)
+  if (!existingSystemPrompt) {
+    const system = await getSystem()
+    await appendEntry(sessionId, {
+      type: 'system_prompt',
+      timestamp: new Date().toISOString(),
+      content: system,
+    })
+  }
 
   // load existing messages and repair any interrupted tool calls
   const messages = repairMessages(await loadSession(sessionId))
@@ -174,7 +187,9 @@ export async function runAgentTurn(
 
   const toolContext: ToolContext = { sessionId, workingDir }
 
-  let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  let totalUsage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  // cost entries written during this turn (for turn cost calculation)
+  const turnCostEntries: { inputCost: number; outputCost: number }[] = []
 
   // agent loop - continue until no tool calls
   while (true) {
@@ -191,6 +206,7 @@ export async function runAgentTurn(
     const assistantContent: ContentBlock[] = []
     let hasToolUse = false
     let hasText = false
+    const iterationUsage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
     // stream response (abort-aware)
     let streamAborted = false
@@ -236,6 +252,10 @@ export async function runAgentTurn(
             totalUsage.output += chunk.output
             totalUsage.cacheRead += chunk.cacheRead ?? 0
             totalUsage.cacheWrite += chunk.cacheWrite ?? 0
+            iterationUsage.input += chunk.input
+            iterationUsage.output += chunk.output
+            iterationUsage.cacheRead += chunk.cacheRead ?? 0
+            iterationUsage.cacheWrite += chunk.cacheWrite ?? 0
             break
         }
       }
@@ -256,10 +276,13 @@ export async function runAgentTurn(
         messages.push(assistantMessage)
         await appendMessage(sessionId, assistantMessage)
       }
+      // write cost entry for this (partial) LLM call
+      await writeCostEntry(sessionId, model, iterationUsage, turnCostEntries)
       if (hasText) {
         onChunk?.({ type: 'text_block_end' })
       }
-      onChunk?.({ type: 'done', usage: totalUsage })
+      const { turnCost, sessionCost } = await computeCosts(sessionId, turnCostEntries)
+      onChunk?.({ type: 'done', usage: totalUsage, cost: { turn: turnCost, session: sessionCost } })
       return { messages, usage: totalUsage, aborted: true }
     }
 
@@ -270,13 +293,17 @@ export async function runAgentTurn(
       await appendMessage(sessionId, assistantMessage)
     }
 
+    // write cost entry for this LLM call
+    await writeCostEntry(sessionId, model, iterationUsage, turnCostEntries)
+
     if (!hasToolUse) {
       // signal end of text block before finishing (flush any buffered text)
       if (hasText) {
         onChunk?.({ type: 'text_block_end' })
       }
       // no tool calls, we're done
-      onChunk?.({ type: 'done', usage: totalUsage })
+      const { turnCost, sessionCost } = await computeCosts(sessionId, turnCostEntries)
+      onChunk?.({ type: 'done', usage: totalUsage, cost: { turn: turnCost, session: sessionCost } })
       break
     }
 
@@ -341,7 +368,8 @@ export async function runAgentTurn(
         }
         messages.push(toolResultMessage)
         await appendMessage(sessionId, toolResultMessage)
-        onChunk?.({ type: 'done', usage: totalUsage })
+        const { turnCost, sessionCost } = await computeCosts(sessionId, turnCostEntries)
+        onChunk?.({ type: 'done', usage: totalUsage, cost: { turn: turnCost, session: sessionCost } })
         return { messages, usage: totalUsage, aborted: true }
       }
 
@@ -403,10 +431,42 @@ export async function runAgentTurn(
     // check if abort was requested
     if (options.checkAbort?.()) {
       console.log(`[agent] abort requested for session ${sessionId}`)
-      onChunk?.({ type: 'done', usage: totalUsage })
+      const { turnCost, sessionCost } = await computeCosts(sessionId, turnCostEntries)
+      onChunk?.({ type: 'done', usage: totalUsage, cost: { turn: turnCost, session: sessionCost } })
       return { messages, usage: totalUsage, aborted: true }
     }
   }
 
   return { messages, usage: totalUsage }
+}
+
+/** Write a cost entry for one LLM API call and track it for turn cost. */
+async function writeCostEntry(
+  sessionId: string,
+  model: string,
+  usage: TokenUsage,
+  turnCostEntries: { inputCost: number; outputCost: number }[],
+): Promise<void> {
+  const costs = computeInputOutputCost(usage, model)
+  const entry = costs ?? { inputCost: 0, outputCost: 0 }
+
+  await appendEntry(sessionId, {
+    type: 'cost',
+    timestamp: new Date().toISOString(),
+    inputCost: entry.inputCost,
+    outputCost: entry.outputCost,
+    usage,
+  })
+  turnCostEntries.push(entry)
+}
+
+/** Compute turn and session costs from cost entries. */
+async function computeCosts(
+  sessionId: string,
+  turnCostEntries: { inputCost: number; outputCost: number }[],
+): Promise<{ turnCost: number; sessionCost: number }> {
+  const turnCost = turnCostEntries.reduce((sum, e) => sum + e.inputCost + e.outputCost, 0)
+  const allCostEntries = await loadCostEntries(sessionId)
+  const sessionCost = allCostEntries.reduce((sum, e) => sum + e.inputCost + e.outputCost, 0)
+  return { turnCost, sessionCost }
 }

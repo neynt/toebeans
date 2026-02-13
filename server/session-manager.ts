@@ -1,20 +1,21 @@
 import { countTokens } from '@anthropic-ai/tokenizer'
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message } from './types.ts'
+import type { Message, SessionEntry, TokenUsage } from './types.ts'
 import type { Config } from './config.ts'
 import type { PluginManager } from './plugin.ts'
 import { repairMessages } from './agent.ts'
 import {
   getCurrentSessionId,
   loadSession,
+  loadCostEntries,
   estimateSessionTokens,
   getSessionLastActivity,
   getSessionCreatedAt,
   writeSession,
+  appendEntry,
   generateSessionId,
 } from './session.ts'
-import { estimateCost, formatCost, type UsageTotals } from './cost.ts'
-import { addUsageToSession, carrySessionCost } from './session-cost.ts'
+import { computeInputOutputCost, type UsageTotals } from './cost.ts'
 
 const DEFAULT_COMPACTION_PROMPT = `Summarize this conversation for your future self. You are being compacted — this summary will be the only context you have when the conversation continues.
 
@@ -131,13 +132,29 @@ export function createSessionManager(
     // generate summary (and capture compaction LLM usage)
     const { text: summary, usage: compactionUsage } = await generateSummary(messages)
 
-    // add compaction LLM cost to the old session before carrying forward
-    const compactionEstimate = estimateCost(compactionUsage, config.llm.model)
-    const compactionCost = compactionEstimate?.optimistic ?? 0
-    await addUsageToSession(sessionId, compactionUsage, compactionCost)
+    // write compaction cost entry to the old session
+    const compactionCosts = computeInputOutputCost(compactionUsage, config.llm.model)
+    await appendEntry(sessionId, {
+      type: 'cost',
+      timestamp: new Date().toISOString(),
+      inputCost: compactionCosts?.inputCost ?? 0,
+      outputCost: compactionCosts?.outputCost ?? 0,
+      usage: {
+        input: compactionUsage.input,
+        output: compactionUsage.output,
+        cacheRead: compactionUsage.cacheRead,
+        cacheWrite: compactionUsage.cacheWrite,
+      },
+    })
 
-    // create new session with summary as context (same route)
+    // compute old session's total cost for the notification
+    const oldCostEntries = await loadCostEntries(sessionId)
+    const oldSessionCost = oldCostEntries.reduce((sum, e) => sum + e.inputCost + e.outputCost, 0)
+
+    // create new session with system_prompt + summary message
     const newId = await generateSessionId(route)
+    const now = new Date().toISOString()
+    const systemPrompt = buildSystemPrompt ? await buildSystemPrompt() : ''
     const summaryMessage: Message = {
       role: 'user',
       content: [{
@@ -145,10 +162,11 @@ export function createSessionManager(
         text: `[Previous conversation summary]\n\n${summary}\n\n[End of summary - new conversation starts here]`,
       }],
     }
-    await writeSession(newId, [summaryMessage])
-
-    // carry cumulative cost to the new session
-    const newCost = await carrySessionCost(sessionId, newId)
+    const entries: SessionEntry[] = [
+      { type: 'system_prompt', timestamp: now, content: systemPrompt },
+      { type: 'message', timestamp: now, message: summaryMessage },
+    ]
+    await writeSession(newId, entries)
 
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
@@ -158,10 +176,10 @@ export function createSessionManager(
       try {
         const formattedBefore = beforeTokens.toLocaleString()
         const formattedAfter = afterTokens.toLocaleString()
-        const costStr = formatCost({ optimistic: newCost.estimatedCost, pessimistic: newCost.estimatedCost })
+        const costStr = `$${oldSessionCost.toFixed(2)}`
         await routeOutput(config.notifyOnRestart, {
           type: 'text',
-          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens, cumulative cost: ${costStr})`
+          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens, old session cost: ${costStr})`
         })
         await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
       } catch (err) {

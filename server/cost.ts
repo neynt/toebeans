@@ -67,6 +67,21 @@ export function estimateCost(usage: UsageTotals, model: string): CostEstimate | 
   return { optimistic, pessimistic }
 }
 
+/**
+ * Compute separate input and output costs (optimistic — assumes cache hits).
+ */
+export function computeInputOutputCost(usage: UsageTotals, model: string): { inputCost: number; outputCost: number } | null {
+  const pricing = findPricing(model)
+  if (!pricing) return null
+
+  const M = 1_000_000
+  const inputCost = (usage.input / M) * pricing.input
+    + (usage.cacheRead / M) * pricing.cacheRead
+    + (usage.cacheWrite / M) * pricing.cacheWrite
+  const outputCost = (usage.output / M) * pricing.output
+  return { inputCost, outputCost }
+}
+
 export function formatCost(estimate: CostEstimate): string {
   const fmt = (n: number) => `$${n.toFixed(2)}`
   if (Math.abs(estimate.optimistic - estimate.pessimistic) < 0.005) {
