@@ -4,25 +4,11 @@ import { getKnowledgeDir } from '../../server/session.ts'
 import { join } from 'path'
 import { $ } from 'bun'
 
-function buildExtractionPrompt(currentProfile: string | null): string {
-  const profileSection = currentProfile
-    ? `\nHere is the current user profile (USER.md):\n\n${currentProfile}\n`
-    : '\nThere is no existing user profile yet.\n'
-
+function buildExtractionPrompt(): string {
   return `You are extracting knowledge from a conversation that is about to be compacted.
-${profileSection}
-Respond with a ## Summary section, and optionally a ## User Profile section.
 
 ## Summary
-Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.
-
-## User Profile (ONLY if meaningfully new long-term facts were learned)
-The COMPLETE updated user profile. This will overwrite the existing USER.md file entirely.
-- Only include stable, long-term facts about the user (preferences, environment, projects, expertise, communication style)
-- Do NOT include session-specific or ephemeral details
-- Keep it concise and well-organized (~1000 tokens max)
-- Preserve the existing structure/organization of the profile where possible
-- If nothing meaningfully new was learned about the user, OMIT this section entirely.`
+Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.`
 }
 
 function trimForCompaction(messages: Message[], trimLength: number): Message[] {
@@ -59,11 +45,6 @@ async function readUserProfile(): Promise<string | null> {
     return content.trim() || null
   }
   return null
-}
-
-async function writeUserProfile(content: string): Promise<void> {
-  const knowledgePath = join(getKnowledgeDir(), 'USER.md')
-  await Bun.write(knowledgePath, content)
 }
 
 async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
@@ -192,14 +173,11 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
     async onPreCompaction(context: PreCompactionContext) {
       const { sessionId, messages, provider } = context
 
-      // read current user profile for context
-      const currentProfile = await readUserProfile()
-
       // trim tool results before sending to LLM
       const trimmed = trimForCompaction(messages, compactionTrimLength)
 
       // append extraction prompt
-      const extractionPrompt = buildExtractionPrompt(currentProfile)
+      const extractionPrompt = buildExtractionPrompt()
       const lastMsg = trimmed[trimmed.length - 1]
       if (lastMsg?.role === 'user') {
         lastMsg.content.push({ type: 'text', text: extractionPrompt })
@@ -221,21 +199,12 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
         }
       }
 
-      // parse sections
-      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*?)(?=## User Profile|$)/)
-      const profileMatch = result.match(/## User Profile[^\n]*\n([\s\S]*)/)
-
+      // parse summary
+      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*)/)
       const summary = summaryMatch?.[1]?.trim() || result.trim()
-      const profile = profileMatch?.[1]?.trim()
 
       // write summary to daily log
       await appendToDailyLog(summary, sessionId)
-
-      // overwrite USER.md if profile section was included
-      if (profile) {
-        console.log(`memory: updated user profile from session ${sessionId}`)
-        await writeUserProfile(profile)
-      }
     },
 
     async buildSystemPrompt() {
