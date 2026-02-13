@@ -193,6 +193,14 @@ export async function runAgentTurn(
 
   // agent loop - continue until no tool calls
   while (true) {
+    // check abort before starting a new LLM call
+    if (options.checkAbort?.()) {
+      console.log(`[agent] abort requested before LLM call for session ${sessionId}`)
+      const { turnCost, sessionCost } = await computeCosts(sessionId, turnCostEntries)
+      onChunk?.({ type: 'done', usage: totalUsage, cost: { turn: turnCost, session: sessionCost } })
+      return { messages, usage: totalUsage, aborted: true }
+    }
+
     // refresh tools and system prompt each iteration (for load_plugin)
     const tools = getTools()
     const system = await getSystem()
