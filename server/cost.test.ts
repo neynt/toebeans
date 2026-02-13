@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { estimateCost, formatCost } from './cost.ts'
+import { estimateCost, formatCost, computeInputOutputCost } from './cost.ts'
 
 describe('estimateCost', () => {
   test('returns null for unknown model', () => {
@@ -33,6 +33,35 @@ describe('estimateCost', () => {
     )
     expect(result).not.toBeNull()
     expect(result!.optimistic).toBeCloseTo(15)
+  })
+})
+
+describe('computeInputOutputCost', () => {
+  test('splits cost into input and output components', () => {
+    const result = computeInputOutputCost(
+      { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 },
+      'claude-sonnet-4-5',
+    )
+    expect(result).not.toBeNull()
+    expect(result!.inputCost).toBeCloseTo(3)   // $3/M input
+    expect(result!.outputCost).toBeCloseTo(15)  // $15/M output
+  })
+
+  test('includes cache costs in inputCost', () => {
+    const result = computeInputOutputCost(
+      { input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 1_000_000 },
+      'claude-sonnet-4-5',
+    )
+    expect(result).not.toBeNull()
+    expect(result!.inputCost).toBeCloseTo(0.3 + 3.75)  // cacheRead + cacheWrite
+    expect(result!.outputCost).toBeCloseTo(0)
+  })
+
+  test('returns null for unknown model', () => {
+    expect(computeInputOutputCost(
+      { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 },
+      'gpt-4o',
+    )).toBeNull()
   })
 })
 

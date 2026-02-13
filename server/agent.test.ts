@@ -6,13 +6,20 @@ import type { LlmProvider } from './llm-provider.ts'
 // stub session storage — agent.ts imports loadSession and appendMessage
 import * as session from './session.ts'
 
-// mock session functions to avoid filesystem access
-const mockMessages: Message[] = []
-mock.module('./session.ts', () => ({
-  ...session,
-  loadSession: async () => [...mockMessages],
-  appendMessage: async () => {},
-}))
+// session mock helper — sets up mock for agent tests that need it
+function setupSessionMock(overrides: Record<string, Function> = {}) {
+  mock.module('./session.ts', () => ({
+    ...session,
+    loadSession: async () => [],
+    loadSessionEntries: async () => [],
+    loadSystemPrompt: async () => 'mock system prompt',
+    loadCostEntries: async () => [],
+    appendMessage: async () => {},
+    appendEntry: async () => {},
+    writeSession: async () => {},
+    ...overrides,
+  }))
+}
 
 describe('repairMessages', () => {
   test('passes through messages with no tool calls', () => {
@@ -41,6 +48,8 @@ describe('repairMessages', () => {
 })
 
 describe('runAgentTurn interrupt injection', () => {
+  setupSessionMock()
+
   function makeMockProvider(responses: StreamChunk[][]): LlmProvider {
     let callCount = 0
     return {
@@ -55,6 +64,7 @@ describe('runAgentTurn interrupt injection', () => {
   }
 
   function makeOptions(overrides: Partial<AgentOptions> & Pick<AgentOptions, 'provider'>): AgentOptions {
+    const { model = 'claude-sonnet-4-5', ...rest } = overrides
     return {
       system: async () => 'test system prompt',
       tools: () => [{
@@ -65,17 +75,16 @@ describe('runAgentTurn interrupt injection', () => {
       }],
       sessionId: 'test-session',
       workingDir: '/tmp',
-      ...overrides,
+      model,
+      ...rest,
     }
   }
 
   test('interrupts are merged into tool result message (not separate user messages)', async () => {
     const savedMessages: Message[] = []
-    mock.module('./session.ts', () => ({
-      ...session,
-      loadSession: async () => [],
+    setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
-    }))
+    })
 
     // response 1: tool use, response 2: text only
     const provider = makeMockProvider([
@@ -128,11 +137,9 @@ describe('runAgentTurn interrupt injection', () => {
 
   test('no interrupts produces clean tool result message', async () => {
     const savedMessages: Message[] = []
-    mock.module('./session.ts', () => ({
-      ...session,
-      loadSession: async () => [],
+    setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
-    }))
+    })
 
     const provider = makeMockProvider([
       [
