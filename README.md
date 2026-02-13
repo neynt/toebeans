@@ -4,8 +4,8 @@
 ## quick start
 
 1. clone this repo
-2. `while true; do bun run server; sleep 3; done`
-3. probably some config stuff? TODO get back to this, works for me tm
+2. `cp -r default-config ~/.toebeans`
+3. `while true; do bun run server; sleep 1; done`
 4. if you like it, set up a systemd unit
 
 ## core concepts
@@ -35,8 +35,8 @@ plugins extend the assistant's functionality.
 | plugin | function |
 |-|-|
 | `bash` | lets your agent run bash. go wild!! be free!! |
-| `memory` | remember things |
-| `timers` | schedule repeating (cron-style) or one-off (at-style) wakeups |
+| `memory` | remember things about you and what you talked about |
+| `timers` | schedule repeating or one-off wakeups |
 | `plugins` | add/remove plugins |
 
 ### chat plugins

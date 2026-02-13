@@ -13,10 +13,6 @@ bun run cli
 
 # debug tools
 bun run debug <command>
-
-# or with custom port
-PORT=3001 bun run server
-TOEBEANS_SERVER=ws://localhost:3001/ws bun run cli
 ```
 
 ## Data location
