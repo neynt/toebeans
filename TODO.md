@@ -28,3 +28,7 @@
 - [ ] brave web search api
 - [ ] google local places api
 - [ ] archive old state files
+- [ ] support agent skills
+- [ ] bitwarden
+- [ ] help me with verizon plan
+- [ ] phone calling

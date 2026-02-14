@@ -41,6 +41,7 @@ export interface ToolDef {
 export interface ToolContext {
   sessionId: string
   workingDir: string
+  outputTarget?: string
 }
 
 // Tool result

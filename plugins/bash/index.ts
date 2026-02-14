@@ -52,12 +52,13 @@ export default function createBashPlugin(): Plugin {
   const messageQueue: { message: Message; outputTarget?: string }[] = []
   let resolveWaiter: (() => void) | null = null
 
-  function queueNotification(text: string) {
+  function queueNotification(text: string, outputTarget?: string) {
     messageQueue.push({
       message: {
         role: 'user',
         content: [{ type: 'text', text }],
       },
+      outputTarget,
     })
     if (resolveWaiter) {
       resolveWaiter()
@@ -238,6 +239,9 @@ export default function createBashPlugin(): Plugin {
               }
             })()
 
+            // capture output target so notifications route back to the originating session
+            const { outputTarget } = context
+
             // set up completion notification
             proc.exited.then(async (code) => {
               try {
@@ -251,7 +255,8 @@ export default function createBashPlugin(): Plugin {
                 const lastLines = await readLastLines(logPath, 10)
 
                 queueNotification(
-                  `[bash process ${status}]\nPID: ${proc.pid}\nCommand: ${commandPreview}\nExit code: ${code ?? 1}\nLog: ${logPath}\n\nLast 10 lines:\n${lastLines}\n\nUse bash_check to see more output.`
+                  `[bash process ${status}]\nPID: ${proc.pid}\nCommand: ${commandPreview}\nExit code: ${code ?? 1}\nLog: ${logPath}\n\nLast 10 lines:\n${lastLines}\n\nUse bash_check to see more output.`,
+                  outputTarget
                 )
               } catch (err) {
                 console.error(`[bash_spawn] error in exit handler for pid ${proc.pid}:`, err)
@@ -266,7 +271,8 @@ export default function createBashPlugin(): Plugin {
                 process.kill(proc.pid, 0) // check if still alive
                 proc.kill()
                 queueNotification(
-                  `[bash process timed out]\nPID: ${proc.pid}\nCommand: ${command.slice(0, 80)}${command.length > 80 ? '...' : ''}\nKilled after ${timeout}s`
+                  `[bash process timed out]\nPID: ${proc.pid}\nCommand: ${command.slice(0, 80)}${command.length > 80 ? '...' : ''}\nKilled after ${timeout}s`,
+                  outputTarget
                 )
               } catch {
                 // already dead

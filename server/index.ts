@@ -191,6 +191,7 @@ async function main() {
             checkInterrupts: resumeCheckInterrupts,
             checkAbort: resumeCheckAbort,
             abortSignal: resumeAbortController.signal,
+            outputTarget: lastOutputTarget || undefined,
             ...agentLlmConfig,
           })
 
@@ -214,6 +215,7 @@ async function main() {
               checkInterrupts: resumeCheckInterrupts,
               checkAbort: resumeCheckAbort,
               abortSignal: drainController.signal,
+              outputTarget: lastOutputTarget || undefined,
               ...agentLlmConfig,
             })
           }
@@ -342,6 +344,7 @@ async function main() {
               checkInterrupts: agentCheckInterrupts,
               checkAbort: agentCheckAbort,
               abortSignal: abortController.signal,
+              outputTarget: effectiveOutputTarget || undefined,
               ...agentLlmConfig,
             })
 
@@ -367,6 +370,7 @@ async function main() {
                 checkInterrupts: agentCheckInterrupts,
                 checkAbort: agentCheckAbort,
                 abortSignal: drainController.signal,
+                outputTarget: effectiveOutputTarget || undefined,
                 ...agentLlmConfig,
               })
             }

@@ -153,13 +153,14 @@ export interface AgentOptions {
   abortSignal?: AbortSignal
   maxToolResultChars?: number
   maxToolResultTokens?: number
+  outputTarget?: string
 }
 
 export async function runAgentTurn(
   userContent: ContentBlock[],
   options: AgentOptions
 ): Promise<AgentResult> {
-  const { provider, system: getSystem, tools: getTools, sessionId, workingDir, model, onChunk } = options
+  const { provider, system: getSystem, tools: getTools, sessionId, workingDir, model, onChunk, outputTarget } = options
   const maxToolResultChars = options.maxToolResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS
   const maxToolResultTokens = options.maxToolResultTokens ?? DEFAULT_MAX_TOOL_RESULT_TOKENS
 
@@ -185,7 +186,7 @@ export async function runAgentTurn(
   messages.push(userMessage)
   await appendMessage(sessionId, userMessage)
 
-  const toolContext: ToolContext = { sessionId, workingDir }
+  const toolContext: ToolContext = { sessionId, workingDir, outputTarget }
 
   let totalUsage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   // cost entries written during this turn (for turn cost calculation)
