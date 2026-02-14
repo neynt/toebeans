@@ -146,6 +146,8 @@ export default function createDiscordPlugin(): Plugin {
   const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
+  // track last message ID per channel (for "last" shorthand in discord_react)
+  const lastMessageIds = new Map<string, string>()
 
   function queueMessage(channelId: string, content: string, author: string, isDM: boolean, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []) {
     const channelContext = isDM
@@ -210,7 +212,8 @@ export default function createDiscordPlugin(): Plugin {
           }
           const truncated = content.slice(0, 2000)
           // works for both TextChannel and DMChannel
-          await (channel as TextChannel | DMChannel).send(truncated)
+          const sent = await (channel as TextChannel | DMChannel).send(truncated)
+          lastMessageIds.set(channel_id, sent.id)
           return { content: `Sent message to channel ${channel_id}` }
         } catch (err) {
           return { content: `Failed to send: ${err}`, is_error: true }
@@ -241,7 +244,7 @@ export default function createDiscordPlugin(): Plugin {
           const messages = await (channel as TextChannel).messages.fetch({ limit: Math.min(limit, 100) })
           const formatted = messages
             .reverse()
-            .map(m => `[${m.author.username}] ${m.content}`)
+            .map(m => `[${m.id}] [${m.author.username}] ${m.content}`)
             .join('\n')
           return { content: formatted || '(no messages)' }
         } catch (err) {
@@ -251,12 +254,12 @@ export default function createDiscordPlugin(): Plugin {
     },
     {
       name: 'discord_react',
-      description: 'Add a reaction to a message.',
+      description: 'Add a reaction to a message. Use message_id "last" to react to the most recent message in the channel.',
       inputSchema: {
         type: 'object',
         properties: {
           channel_id: { type: 'string', description: 'Discord channel ID' },
-          message_id: { type: 'string', description: 'Message ID to react to' },
+          message_id: { type: 'string', description: 'Message ID to react to, or "last" for the most recent message in the channel' },
           emoji: { type: 'string', description: 'Emoji to react with (unicode or custom emoji name)' },
         },
         required: ['channel_id', 'message_id', 'emoji'],
@@ -265,7 +268,18 @@ export default function createDiscordPlugin(): Plugin {
         if (!client) {
           return { content: 'Discord client not connected', is_error: true }
         }
-        const { channel_id, message_id, emoji } = input as { channel_id: string; message_id: string; emoji: string }
+        const { channel_id, emoji } = input as { channel_id: string; message_id: string; emoji: string }
+        let { message_id } = input as { message_id: string }
+
+        // resolve "last" to the most recent tracked message in this channel
+        if (message_id === 'last') {
+          const lastId = lastMessageIds.get(channel_id)
+          if (!lastId) {
+            return { content: `No tracked messages in channel ${channel_id}. Use a specific message ID, or send/receive a message first.`, is_error: true }
+          }
+          message_id = lastId
+        }
+
         try {
           const channel = await client.channels.fetch(channel_id)
           if (!channel?.isTextBased()) {
@@ -273,7 +287,7 @@ export default function createDiscordPlugin(): Plugin {
           }
           const message = await (channel as TextChannel).messages.fetch(message_id)
           await message.react(emoji)
-          return { content: `Reacted with ${emoji}` }
+          return { content: `Reacted with ${emoji} on message ${message_id}` }
         } catch (err) {
           return { content: `Failed to react: ${err}`, is_error: true }
         }
@@ -659,6 +673,9 @@ export default function createDiscordPlugin(): Plugin {
             }
           }
         }
+
+        // track last message ID for this channel (enables "last" shorthand in discord_react)
+        lastMessageIds.set(msg.channelId, msg.id)
 
         queueMessage(msg.channelId, content, msg.author.username, isDM, images)
       })
