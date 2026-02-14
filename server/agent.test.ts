@@ -47,7 +47,7 @@ describe('repairMessages', () => {
   })
 })
 
-describe('runAgentTurn interrupt injection', () => {
+describe('runAgentTurn queued message handling', () => {
   setupSessionMock()
 
   function makeMockProvider(responses: StreamChunk[][]): LlmProvider {
@@ -80,7 +80,7 @@ describe('runAgentTurn interrupt injection', () => {
     }
   }
 
-  test('interrupts are merged into tool result message (not separate user messages)', async () => {
+  test('queued messages are appended to tool result message after all tools complete', async () => {
     const savedMessages: Message[] = []
     setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
@@ -93,19 +93,19 @@ describe('runAgentTurn interrupt injection', () => {
         { type: 'usage', input: 100, output: 50 },
       ],
       [
-        { type: 'text', text: 'done with interrupt' },
+        { type: 'text', text: 'got your message' },
         { type: 'usage', input: 100, output: 50 },
       ],
     ])
 
-    let interruptReturned = false
+    let queueReturned = false
     const result = await runAgentTurn(
       [{ type: 'text', text: 'do something' }],
       makeOptions({
         provider,
-        checkInterrupts: () => {
-          if (!interruptReturned) {
-            interruptReturned = true
+        checkQueuedMessages: () => {
+          if (!queueReturned) {
+            queueReturned = true
             return [{ content: [{ type: 'text', text: 'hey, new context!' }], outputTarget: '' }]
           }
           return []
@@ -119,23 +119,21 @@ describe('runAgentTurn interrupt injection', () => {
     )
     expect(toolResultMsg).toBeDefined()
 
-    // the interrupt text should be in the SAME message as the tool result, wrapped in delimiters
-    const hasInterruptText = toolResultMsg!.content.some(
-      b => b.type === 'text' && b.text.includes('[USER INTERRUPT]') && b.text.includes('hey, new context!')
+    // the queued text should be in the SAME message as the tool result (no [USER INTERRUPT] wrapper)
+    const hasQueuedText = toolResultMsg!.content.some(
+      b => b.type === 'text' && b.text === 'hey, new context!'
     )
-    expect(hasInterruptText).toBe(true)
+    expect(hasQueuedText).toBe(true)
 
     // verify no consecutive user messages in the result
     for (let i = 1; i < result.messages.length; i++) {
       if (result.messages[i]!.role === 'user' && result.messages[i - 1]!.role === 'user') {
-        // consecutive user messages are only ok if first is initial user message
-        // and second has tool_results (which shouldn't happen here)
         throw new Error(`consecutive user messages at index ${i - 1} and ${i}`)
       }
     }
   })
 
-  test('no interrupts produces clean tool result message', async () => {
+  test('no queued messages produces clean tool result message', async () => {
     const savedMessages: Message[] = []
     setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
@@ -156,7 +154,7 @@ describe('runAgentTurn interrupt injection', () => {
       [{ type: 'text', text: 'do something' }],
       makeOptions({
         provider,
-        checkInterrupts: () => [],
+        checkQueuedMessages: () => [],
       }),
     )
 

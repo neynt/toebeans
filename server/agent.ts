@@ -148,7 +148,7 @@ export interface AgentOptions {
   workingDir: string
   model: string
   onChunk?: (chunk: ServerMessage) => void
-  checkInterrupts?: () => { content: ContentBlock[]; outputTarget: string }[]
+  checkQueuedMessages?: () => { content: ContentBlock[]; outputTarget: string }[]
   checkAbort?: () => boolean
   abortSignal?: AbortSignal
   maxToolResultChars?: number
@@ -316,48 +316,15 @@ export async function runAgentTurn(
       break
     }
 
-    // execute tools and collect results, checking for interrupts between each
+    // execute tools and collect results
     const toolUseBlocks = assistantContent.filter(b => b.type === 'tool_use') as
       { type: 'tool_use'; id: string; name: string; input: unknown }[]
     const toolResults: ContentBlock[] = []
-    let interruptBlocks: ContentBlock[] = []
-    let interrupted = false
 
     for (let i = 0; i < toolUseBlocks.length; i++) {
       const block = toolUseBlocks[i]!
 
-      // before executing each tool (except the first), check for interrupts
-      if (i > 0 && options.checkInterrupts) {
-        const interrupts = options.checkInterrupts()
-        if (interrupts.length > 0) {
-          console.log(`[agent] interrupt detected between tool calls — skipping ${toolUseBlocks.length - i} remaining tool(s)`)
-          for (const interrupt of interrupts) {
-            for (const block of interrupt.content) {
-              if (block.type === 'text') {
-                interruptBlocks.push({ type: 'text', text: `[USER INTERRUPT]\n${block.text}\n[/USER INTERRUPT]` })
-              } else {
-                interruptBlocks.push(block)
-              }
-            }
-          }
-          // mark remaining tools as interrupted (API requires matching tool_results)
-          for (let j = i; j < toolUseBlocks.length; j++) {
-            const remaining = toolUseBlocks[j]!
-            const skippedResult = { content: '(skipped — user interrupt received)', is_error: true }
-            onChunk?.({ type: 'tool_result', tool_use_id: remaining.id, content: skippedResult.content, is_error: true })
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: remaining.id,
-              content: skippedResult.content,
-              is_error: true,
-            })
-          }
-          interrupted = true
-          break
-        }
-      }
-
-      // also check abort signal between tools
+      // check abort signal between tools
       if (options.checkAbort?.()) {
         console.log(`[agent] abort requested between tool calls for session ${sessionId}`)
         // mark remaining tools as aborted
@@ -410,29 +377,22 @@ export async function runAgentTurn(
       })
     }
 
-    // if we didn't already interrupt, check for interrupts after all tools finished
-    if (!interrupted && options.checkInterrupts) {
-      const interrupts = options.checkInterrupts()
-      if (interrupts.length > 0) {
-        console.log(`[agent] injecting ${interrupts.length} interrupt(s) into conversation`)
-        for (const interrupt of interrupts) {
-          for (const block of interrupt.content) {
-            if (block.type === 'text') {
-              interruptBlocks.push({ type: 'text', text: `[USER INTERRUPT]\n${block.text}\n[/USER INTERRUPT]` })
-            } else {
-              interruptBlocks.push(block)
-            }
-          }
-        }
+    // add tool results as a user message
+    const toolResultContent: ContentBlock[] = [...toolResults]
+
+    // check for queued user messages that arrived during tool execution
+    // these are appended to the tool result message (API requires alternating roles)
+    if (options.checkQueuedMessages) {
+      const queued = options.checkQueuedMessages()
+      if (queued.length > 0) {
+        console.log(`[agent] appending ${queued.length} queued message(s) after tool results`)
+        toolResultContent.push(...queued.flatMap(q => q.content))
       }
     }
 
-    // add tool results (+ any interrupt content) as a single user message
-    // interrupts are merged into tool result message to maintain alternating
-    // user/assistant message structure required by the API
     const toolResultMessage: Message = {
       role: 'user',
-      content: [...toolResults, ...interruptBlocks],
+      content: toolResultContent,
     }
     messages.push(toolResultMessage)
     await appendMessage(sessionId, toolResultMessage)

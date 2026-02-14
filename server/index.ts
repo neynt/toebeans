@@ -14,12 +14,12 @@ interface WebSocketData {
 // track connections by session
 const sessionSubscribers = new Map<string, Set<ServerWebSocket<WebSocketData>>>()
 
-// track pending interrupt messages per session
-interface InterruptMessage {
+// track pending queued messages per session (messages sent while agent is busy)
+interface QueuedMessage {
   content: ContentBlock[]
   outputTarget: string
 }
-const interruptBuffers = new Map<string, InterruptMessage[]>()
+const messageQueues = new Map<string, QueuedMessage[]>()
 const sessionBusy = new Map<string, boolean>()
 const sessionAbort = new Map<string, boolean>()
 const sessionAbortControllers = new Map<string, AbortController>()
@@ -169,9 +169,9 @@ async function main() {
             broadcast(sessionId, chunk)
             await outputFn(chunk)
           }
-          const resumeCheckInterrupts = () => {
-            const buffer = interruptBuffers.get(sessionId) || []
-            interruptBuffers.set(sessionId, [])
+          const resumeCheckQueued = () => {
+            const buffer = messageQueues.get(sessionId) || []
+            messageQueues.set(sessionId, [])
             return buffer
           }
           const resumeCheckAbort = () => {
@@ -188,31 +188,31 @@ async function main() {
             sessionId,
             workingDir: getWorkspaceDir(),
             onChunk: resumeOnChunk,
-            checkInterrupts: resumeCheckInterrupts,
+            checkQueuedMessages: resumeCheckQueued,
             checkAbort: resumeCheckAbort,
             abortSignal: resumeAbortController.signal,
             outputTarget: lastOutputTarget || undefined,
             ...agentLlmConfig,
           })
 
-          // drain remaining interrupts as new turns
+          // drain remaining queued messages as new turns
           while (!resumeCheckAbort()) {
-            const remaining = resumeCheckInterrupts()
+            const remaining = resumeCheckQueued()
             if (remaining.length === 0) break
-            console.log(`[server] draining ${remaining.length} remaining interrupt(s) as new turn`)
-            const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+            console.log(`[server] draining ${remaining.length} queued message(s) as new turn`)
+            const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
             const drainController = new AbortController()
             sessionAbortControllers.set(sessionId, drainController)
 
-            await runAgentTurn(interruptContent, {
+            await runAgentTurn(queuedContent, {
               provider,
               system: buildSystemPrompt,
               tools: getTools,
               sessionId,
               workingDir: getWorkspaceDir(),
               onChunk: resumeOnChunk,
-              checkInterrupts: resumeCheckInterrupts,
+              checkQueuedMessages: resumeCheckQueued,
               checkAbort: resumeCheckAbort,
               abortSignal: drainController.signal,
               outputTarget: lastOutputTarget || undefined,
@@ -286,19 +286,19 @@ async function main() {
 
           // check if session is busy (agent is currently processing)
           if (sessionBusy.get(conversationSessionId)) {
-            // buffer this message as an interrupt
-            console.log(`[${name}] session ${conversationSessionId} busy, buffering interrupt`)
-            if (!interruptBuffers.has(conversationSessionId)) {
-              interruptBuffers.set(conversationSessionId, [])
+            // queue this message for delivery after current tool calls complete
+            console.log(`[${name}] session ${conversationSessionId} busy, queuing message`)
+            if (!messageQueues.has(conversationSessionId)) {
+              messageQueues.set(conversationSessionId, [])
             }
-            interruptBuffers.get(conversationSessionId)!.push({
+            messageQueues.get(conversationSessionId)!.push({
               content,
               outputTarget: effectiveOutputTarget || '',
             })
 
             // notify the sender that their message will be injected
             if (effectiveOutputTarget) {
-              routeOutput(effectiveOutputTarget, { type: 'text', text: '(queued — will inject between tool calls)' })
+              routeOutput(effectiveOutputTarget, { type: 'text', text: '(queued)' })
                 .then(() => routeOutput(effectiveOutputTarget, { type: 'text_block_end' }))
                 .catch(() => {}) // best-effort notification
             }
@@ -321,9 +321,9 @@ async function main() {
                 await outputFn(chunk)
               }
             }
-            const agentCheckInterrupts = () => {
-              const buffer = interruptBuffers.get(conversationSessionId) || []
-              interruptBuffers.set(conversationSessionId, [])
+            const agentCheckQueued = () => {
+              const buffer = messageQueues.get(conversationSessionId) || []
+              messageQueues.set(conversationSessionId, [])
               return buffer
             }
             const agentCheckAbort = () => {
@@ -341,33 +341,33 @@ async function main() {
               sessionId: conversationSessionId,
               workingDir: getWorkspaceDir(),
               onChunk: agentOnChunk,
-              checkInterrupts: agentCheckInterrupts,
+              checkQueuedMessages: agentCheckQueued,
               checkAbort: agentCheckAbort,
               abortSignal: abortController.signal,
               outputTarget: effectiveOutputTarget || undefined,
               ...agentLlmConfig,
             })
 
-            // drain any remaining interrupts that arrived during a no-tool-use response
-            // (checkInterrupts only runs between tool calls, so these would be stranded)
+            // drain any remaining queued messages that arrived during a no-tool-use response
+            // (checkQueuedMessages only runs after tool calls, so these would be stranded)
             while (!agentCheckAbort()) {
-              const remaining = agentCheckInterrupts()
+              const remaining = agentCheckQueued()
               if (remaining.length === 0) break
-              console.log(`[${name}] draining ${remaining.length} remaining interrupt(s) as new turn`)
-              const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+              console.log(`[${name}] draining ${remaining.length} queued message(s) as new turn`)
+              const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
               // fresh controller for drain turns
               const drainController = new AbortController()
               sessionAbortControllers.set(conversationSessionId, drainController)
 
-              await runAgentTurn(interruptContent, {
+              await runAgentTurn(queuedContent, {
                 provider,
                 system: buildSystemPrompt,
                 tools: getTools,
                 sessionId: conversationSessionId,
                 workingDir: getWorkspaceDir(),
                 onChunk: agentOnChunk,
-                checkInterrupts: agentCheckInterrupts,
+                checkQueuedMessages: agentCheckQueued,
                 checkAbort: agentCheckAbort,
                 abortSignal: drainController.signal,
                 outputTarget: effectiveOutputTarget || undefined,
@@ -456,16 +456,16 @@ async function main() {
 
         // check if session is busy
         if (sessionBusy.get(wsSessionId)) {
-          console.log(`[websocket] session ${wsSessionId} busy, buffering interrupt`)
-          if (!interruptBuffers.has(wsSessionId)) {
-            interruptBuffers.set(wsSessionId, [])
+          console.log(`[websocket] session ${wsSessionId} busy, queuing message`)
+          if (!messageQueues.has(wsSessionId)) {
+            messageQueues.set(wsSessionId, [])
           }
-          interruptBuffers.get(wsSessionId)!.push({
+          messageQueues.get(wsSessionId)!.push({
             content: [{ type: 'text', text: msg.content }],
             outputTarget: '',
           })
           // notify via websocket broadcast
-          broadcast(wsSessionId, { type: 'text', text: '(queued — will inject between tool calls)' })
+          broadcast(wsSessionId, { type: 'text', text: '(queued)' })
           broadcast(wsSessionId, { type: 'text_block_end' })
           break
         }
@@ -479,9 +479,9 @@ async function main() {
 
         try {
           const wsOnChunk = (chunk: ServerMessage) => broadcast(wsSessionId, chunk)
-          const wsCheckInterrupts = () => {
-            const buffer = interruptBuffers.get(wsSessionId) || []
-            interruptBuffers.set(wsSessionId, [])
+          const wsCheckQueued = () => {
+            const buffer = messageQueues.get(wsSessionId) || []
+            messageQueues.set(wsSessionId, [])
             return buffer
           }
           const wsCheckAbort = () => {
@@ -498,30 +498,30 @@ async function main() {
             sessionId: wsSessionId,
             workingDir: getWorkspaceDir(),
             onChunk: wsOnChunk,
-            checkInterrupts: wsCheckInterrupts,
+            checkQueuedMessages: wsCheckQueued,
             checkAbort: wsCheckAbort,
             abortSignal: wsAbortController.signal,
             ...agentLlmConfig,
           })
 
-          // drain remaining interrupts as new turns
+          // drain remaining queued messages as new turns
           while (!wsCheckAbort()) {
-            const remaining = wsCheckInterrupts()
+            const remaining = wsCheckQueued()
             if (remaining.length === 0) break
-            console.log(`[websocket] draining ${remaining.length} remaining interrupt(s) as new turn`)
-            const interruptContent: ContentBlock[] = remaining.flatMap(r => r.content)
+            console.log(`[websocket] draining ${remaining.length} queued message(s) as new turn`)
+            const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
             const drainController = new AbortController()
             sessionAbortControllers.set(wsSessionId, drainController)
 
-            await runAgentTurn(interruptContent, {
+            await runAgentTurn(queuedContent, {
               provider,
               system: buildSystemPrompt,
               tools: getTools,
               sessionId: wsSessionId,
               workingDir: getWorkspaceDir(),
               onChunk: wsOnChunk,
-              checkInterrupts: wsCheckInterrupts,
+              checkQueuedMessages: wsCheckQueued,
               checkAbort: wsCheckAbort,
               abortSignal: drainController.signal,
               ...agentLlmConfig,
