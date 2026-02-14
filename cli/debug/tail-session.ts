@@ -2,7 +2,7 @@ import { watch } from 'node:fs'
 import { listSessions } from '../../server/session.ts'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { Message, ContentBlock, ToolResultContent } from '../../server/types.ts'
+import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../../server/types.ts'
 
 const SESSIONS_DIR = join(homedir(), '.toebeans', 'sessions')
 
@@ -280,14 +280,34 @@ export default async function tailSession() {
   // print existing messages
   let linesPrinted = 0
 
+  function parseEntry(line: string): SessionEntry {
+    const parsed = JSON.parse(line)
+    if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+      return parsed as SessionEntry
+    }
+    // legacy: raw Message object
+    return { type: 'message', timestamp: '', message: parsed as Message }
+  }
+
+  function renderEntry(entry: SessionEntry): string {
+    switch (entry.type) {
+      case 'message':
+        return renderMessage(entry.message, linesPrinted)
+      case 'system_prompt':
+        return `${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`
+      case 'cost':
+        return `${DIM}── cost: $${(entry.inputCost + entry.outputCost).toFixed(4)} (in: ${entry.usage.input} out: ${entry.usage.output} cache_r: ${entry.usage.cacheRead} cache_w: ${entry.usage.cacheWrite}) ──${RESET}`
+    }
+  }
+
   function printNewMessages(text: string) {
     const lines = text.trim().split('\n').filter(Boolean)
     const newLines = lines.slice(linesPrinted)
     for (const line of newLines) {
       try {
-        const msg = JSON.parse(line) as Message
-        if (linesPrinted > 0) console.log() // blank line between messages
-        console.log(renderMessage(msg, linesPrinted))
+        const entry = parseEntry(line)
+        if (linesPrinted > 0) console.log() // blank line between entries
+        console.log(renderEntry(entry))
       } catch {
         console.error(`${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
       }
