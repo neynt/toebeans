@@ -2,7 +2,7 @@ import { watch, type FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join, basename } from 'path'
-import type { Message, ContentBlock, ToolResultContent } from '../../server/types.ts'
+import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../../server/types.ts'
 
 const SESSIONS_DIR = join(homedir(), '.toebeans', 'sessions')
 
@@ -262,6 +262,15 @@ function startTailing(sessionId: string, filePath: string) {
 
   let linesPrinted = 0
 
+  function parseEntry(line: string): SessionEntry {
+    const parsed = JSON.parse(line)
+    if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+      return parsed as SessionEntry
+    }
+    // legacy: raw Message object
+    return { type: 'message', timestamp: '', message: parsed as Message }
+  }
+
   async function printNewMessages() {
     try {
       const text = await Bun.file(filePath).text()
@@ -269,19 +278,27 @@ function startTailing(sessionId: string, filePath: string) {
       const newLines = lines.slice(linesPrinted)
       for (const line of newLines) {
         try {
-          const msg = JSON.parse(line) as Message
-          const roleColor = msg.role === 'user' ? BG_BLUE : BG_RED
-          const roleLabel = msg.role === 'user'
-            ? `${roleColor}${FG_WHITE}${BOLD} USER ${RESET}`
-            : `${roleColor}${FG_WHITE}${BOLD} ASSISTANT ${RESET}`
+          const entry = parseEntry(line)
 
-          const header = `${prefix} ${roleLabel} ${DIM}#${linesPrinted}${RESET}`
-          const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
-          const prefixed = prefixLines(blocks, prefix)
+          if (entry.type === 'message') {
+            const msg = entry.message
+            const roleColor = msg.role === 'user' ? BG_BLUE : BG_RED
+            const roleLabel = msg.role === 'user'
+              ? `${roleColor}${FG_WHITE}${BOLD} USER ${RESET}`
+              : `${roleColor}${FG_WHITE}${BOLD} ASSISTANT ${RESET}`
 
-          if (linesPrinted > 0) console.log()
-          console.log(header)
-          console.log(prefixed)
+            const header = `${prefix} ${roleLabel} ${DIM}#${linesPrinted}${RESET}`
+            const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
+            const prefixed = prefixLines(blocks, prefix)
+
+            if (linesPrinted > 0) console.log()
+            console.log(header)
+            console.log(prefixed)
+          } else if (entry.type === 'system_prompt') {
+            console.log(`${prefix} ${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`)
+          } else if (entry.type === 'cost') {
+            console.log(`${prefix} ${DIM}── cost: $${(entry.inputCost + entry.outputCost).toFixed(4)} ──${RESET}`)
+          }
         } catch {
           console.error(`${prefix} ${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
         }
