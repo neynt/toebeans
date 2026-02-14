@@ -134,7 +134,13 @@ async function transcribeAudio(audioPath: string, model: string = 'tiny'): Promi
   }
 }
 
-export default function createDiscordPlugin(): Plugin {
+interface ServerContext {
+  routeOutput: (target: string, message: any) => Promise<void>
+  requestStop: (outputTarget: string) => Promise<boolean>
+  config: any
+}
+
+export default function createDiscordPlugin(serverContext?: ServerContext): Plugin {
   let client: Client | null = null
   let config: DiscordConfig | null = null
   const messageQueue: QueuedMessage[] = []
@@ -592,17 +598,10 @@ export default function createDiscordPlugin(): Plugin {
           }
         }
 
-        // handle /stop command (control command, not queued)
+        // handle /stop command — bypass message queue and abort directly
         if (msg.content.trim() === '/stop') {
-          const stopMessage: QueuedMessage = {
-            message: { role: 'user', content: [] },
-            outputTarget: `discord:${msg.channelId}`,
-            stopRequested: true,
-          }
-          messageQueue.push(stopMessage)
-          if (resolveWaiter) {
-            resolveWaiter()
-            resolveWaiter = null
+          if (serverContext?.requestStop) {
+            await serverContext.requestStop(`discord:${msg.channelId}`)
           }
           return
         }
@@ -714,16 +713,8 @@ export default function createDiscordPlugin(): Plugin {
         try {
           const route = `discord:${interaction.channelId}`
           if (interaction.commandName === 'stop') {
-            // queue a stop request (same as /stop text message)
-            const stopMessage: QueuedMessage = {
-              message: { role: 'user', content: [] },
-              outputTarget: route,
-              stopRequested: true,
-            }
-            messageQueue.push(stopMessage)
-            if (resolveWaiter) {
-              resolveWaiter()
-              resolveWaiter = null
+            if (serverContext?.requestStop) {
+              await serverContext.requestStop(route)
             }
             await interaction.reply({ content: 'stopping...', ephemeral: true })
             return

@@ -66,8 +66,8 @@ async function main() {
 
   const pluginManager = new PluginManager()
 
-  // prepare server context for plugins (will be populated with routeOutput after it's defined)
-  const serverContext = { routeOutput: null as any, config }
+  // prepare server context for plugins (will be populated with routeOutput/requestStop after they're defined)
+  const serverContext = { routeOutput: null as any, requestStop: null as any, config }
 
   pluginManager.setServerContext(serverContext)
 
@@ -96,8 +96,31 @@ async function main() {
     await targetPlugin.plugin.output(pluginTarget, message)
   }
 
-  // populate routeOutput in server context now that it's defined
+  // directly abort a session by output target (bypasses the plugin message queue)
+  async function requestStop(outputTarget: string): Promise<boolean> {
+    const route = outputTarget
+    const conversationSessionId = await sessionManager.getSessionForMessage(route)
+
+    if (!sessionBusy.get(conversationSessionId)) {
+      return false // nothing to stop
+    }
+
+    console.log(`[server] requestStop for session ${conversationSessionId} (output target: ${outputTarget})`)
+    sessionAbort.set(conversationSessionId, true)
+
+    const controller = sessionAbortControllers.get(conversationSessionId)
+    if (controller) {
+      controller.abort()
+    }
+
+    await routeOutput(outputTarget, { type: 'text', text: 'stopped ✋' })
+    await routeOutput(outputTarget, { type: 'text_block_end' })
+    return true
+  }
+
+  // populate routeOutput and requestStop in server context now that they're defined
   serverContext.routeOutput = routeOutput
+  serverContext.requestStop = requestStop
 
   // create session manager with routeOutput available
   const sessionManager = createSessionManager(provider, config, routeOutput, pluginManager, buildSystemPrompt)
