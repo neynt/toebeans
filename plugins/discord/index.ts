@@ -486,6 +486,9 @@ export default function createDiscordPlugin(): Plugin {
             // append token count
             toolMessage += ` (${inputTokens} tokens)`
 
+            // escape backticks so they don't break Discord inline code formatting
+            toolMessage = toolMessage.replaceAll('`', "'")
+
             const msg = await textChannel.send(`\`${toolMessage}\``)
             toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
           } else if (message.type === 'tool_result') {
