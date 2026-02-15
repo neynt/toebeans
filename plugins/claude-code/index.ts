@@ -6,6 +6,44 @@ import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 
 const LOG_DIR = join(getDataDir(), 'claude-code')
+const PENDING_PATH = join(LOG_DIR, 'pending.json')
+
+async function readPending(): Promise<string[]> {
+  try {
+    const file = Bun.file(PENDING_PATH)
+    if (!(await file.exists())) return []
+    return await file.json()
+  } catch {
+    return []
+  }
+}
+
+async function writePending(ids: string[]): Promise<void> {
+  await Bun.write(PENDING_PATH, JSON.stringify(ids, null, 2))
+}
+
+async function addPending(sessionId: string): Promise<void> {
+  const ids = await readPending()
+  if (!ids.includes(sessionId)) {
+    ids.push(sessionId)
+    await writePending(ids)
+  }
+}
+
+async function removePending(sessionId: string): Promise<void> {
+  const ids = await readPending()
+  const filtered = ids.filter(id => id !== sessionId)
+  await writePending(filtered)
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
 
 interface ProcessInfo {
   proc: ReturnType<typeof Bun.spawn>
@@ -175,6 +213,7 @@ export default function createClaudeCodePlugin(): Plugin {
 
       meta.pid = proc.pid
       await writeMeta(meta)
+      await addPending(sid)
       runningProcesses.set(sid, { proc, pid: proc.pid, task })
 
       console.log(`[claude-code] spawned conflict resolver session ${sid} (pid ${proc.pid})`)
@@ -184,6 +223,7 @@ export default function createClaudeCodePlugin(): Plugin {
         meta.exitCode = code ?? 1
         meta.endedAt = new Date().toISOString()
         await writeMeta(meta)
+        await removePending(sid)
 
         const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
         const taskPreview = task.length > 100 ? task.slice(0, 100) + '...' : task
@@ -213,6 +253,102 @@ export default function createClaudeCodePlugin(): Plugin {
         resolveWaiter = resolve
       })
       console.log('[claude-code] waiter resolved, checking queue')
+    }
+  }
+
+  async function handleSessionCompletion(meta: MetaFile): Promise<void> {
+    const logPath = getLogPath(meta.sessionId)
+    // read exit code from log if meta doesn't have it
+    if (meta.endedAt) {
+      // already marked completed in meta — just need to send the notification
+    } else {
+      // process died while we were down — update meta
+      // try to infer exit code from log's final "result" line
+      let exitCode = 1
+      try {
+        const logContent = await Bun.file(logPath).text()
+        const lines = logContent.split('\n').filter(l => l.trim())
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const parsed = JSON.parse(lines[i]!)
+            if (parsed.type === 'result') {
+              exitCode = parsed.is_error ? 1 : 0
+              break
+            }
+          } catch { continue }
+        }
+      } catch { /* log might not exist */ }
+
+      meta.exitCode = exitCode
+      meta.endedAt = new Date().toISOString()
+      await writeMeta(meta)
+    }
+
+    await removePending(meta.sessionId)
+
+    const status = meta.exitCode === 0 ? 'completed successfully' : `failed with exit code ${meta.exitCode}`
+    const taskPreview = meta.task.length > 100 ? meta.task.slice(0, 100) + '...' : meta.task
+
+    // handle worktree merge if applicable
+    if (meta.worktree && meta.originalWorkingDir) {
+      const wtBase = config?.worktreeBase
+        ? config.worktreeBase.replace(/^~/, homedir())
+        : join(homedir(), 'code', 'toebeans-wt')
+      const mergeMsg = await handleWorktreeMerge(
+        meta.worktree, meta.originalWorkingDir, meta.sessionId, taskPreview, logPath, status, wtBase,
+        (conflictTask, conflictCwd) => {
+          spawnClaudeCode(conflictTask, conflictCwd)
+        },
+      )
+      queueNotification(mergeMsg)
+    } else {
+      queueNotification(
+        `[Claude Code task ${status}]\nSession: ${meta.sessionId}\nTask: ${taskPreview}\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
+      )
+    }
+  }
+
+  function pollForExit(meta: MetaFile): void {
+    const interval = setInterval(async () => {
+      if (!isProcessAlive(meta.pid)) {
+        clearInterval(interval)
+        console.log(`[claude-code] polled session ${meta.sessionId} (pid ${meta.pid}) — process exited`)
+        await handleSessionCompletion(meta)
+      }
+    }, 2000)
+  }
+
+  async function reattachPendingSessions(): Promise<void> {
+    const pendingIds = await readPending()
+    if (pendingIds.length === 0) return
+
+    console.log(`[claude-code] reattaching ${pendingIds.length} pending session(s): ${pendingIds.join(', ')}`)
+
+    for (const sessionId of pendingIds) {
+      const meta = await readMeta(sessionId)
+      if (!meta) {
+        console.log(`[claude-code] no meta for pending session ${sessionId}, removing`)
+        await removePending(sessionId)
+        continue
+      }
+
+      if (meta.endedAt) {
+        // session already has endedAt (maybe meta was written but pending wasn't cleaned up)
+        console.log(`[claude-code] pending session ${sessionId} already has endedAt, sending notification`)
+        await handleSessionCompletion(meta)
+        continue
+      }
+
+      if (!isProcessAlive(meta.pid)) {
+        // process died while we were down
+        console.log(`[claude-code] pending session ${sessionId} (pid ${meta.pid}) is no longer alive`)
+        await handleSessionCompletion(meta)
+        continue
+      }
+
+      // still running — poll for exit
+      console.log(`[claude-code] pending session ${sessionId} (pid ${meta.pid}) still running, polling`)
+      pollForExit(meta)
     }
   }
 
@@ -304,10 +440,11 @@ export default function createClaudeCodePlugin(): Plugin {
 
           meta.pid = proc.pid
           await writeMeta(meta)
+          await addPending(sessionId)
 
           runningProcesses.set(sessionId, { proc, pid: proc.pid, task, worktree, originalWorkingDir: worktree ? originalCwd : undefined })
 
-          // notify when done (best-effort — only works if toebeans is still alive)
+          // notify when done — also persists across restarts via pending.json
           console.log(`[claude-code] registering exit handler for session ${sessionId}`)
           proc.exited.then(async (code) => {
             console.log(`[claude-code] proc.exited fired for ${sessionId}, exit code: ${code}`)
@@ -319,6 +456,7 @@ export default function createClaudeCodePlugin(): Plugin {
               meta.exitCode = code ?? 1
               meta.endedAt = new Date().toISOString()
               await writeMeta(meta)
+              await removePending(sessionId)
               console.log(`[claude-code] wrote meta for ${sessionId}`)
 
               const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
@@ -569,6 +707,7 @@ export default function createClaudeCodePlugin(): Plugin {
       config = cfg as ClaudeCodeConfig
       console.log('[claude-code] initialized with config:', config)
       await ensureLogDir()
+      await reattachPendingSessions()
     },
   }
 }
