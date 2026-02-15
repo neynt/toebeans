@@ -23,6 +23,7 @@ const configSchema = z.object({
     maxToolResultTokens: z.number().optional(),
     maxToolResultChars: z.number().optional(),
   }).passthrough(),
+  timezone: z.string().default('America/New_York'),
   notifyOnRestart: z.string().optional(),
 }).passthrough()
 
