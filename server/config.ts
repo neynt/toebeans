@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import JSON5 from 'json5'
 import { getDataDir } from './session.ts'
 import { join } from 'path'
 
@@ -41,7 +42,7 @@ export type Config = z.infer<typeof configSchema>
 let rawConfigCache: Record<string, unknown> | null = null
 
 export async function loadConfig(): Promise<Config> {
-  const configPath = join(getDataDir(), 'config.json')
+  const configPath = join(getDataDir(), 'config.json5')
   const file = Bun.file(configPath)
 
   if (!(await file.exists())) {
@@ -51,7 +52,8 @@ export async function loadConfig(): Promise<Config> {
   }
 
   try {
-    const raw = await file.json() as Record<string, unknown>
+    const text = await file.text()
+    const raw = JSON5.parse(text) as Record<string, unknown>
     rawConfigCache = raw
     return configSchema.parse(raw)
   } catch (err) {
@@ -61,7 +63,7 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function saveConfig(config: Config): Promise<void> {
-  const configPath = join(getDataDir(), 'config.json')
+  const configPath = join(getDataDir(), 'config.json5')
 
   // merge changes into the raw cache to preserve key order
   if (rawConfigCache) {
@@ -87,8 +89,8 @@ export async function saveConfig(config: Config): Promise<void> {
         rawConfigCache[key] = config[key]
       }
     }
-    await Bun.write(configPath, JSON.stringify(rawConfigCache, null, 2))
+    await Bun.write(configPath, JSON5.stringify(rawConfigCache, null, 2))
   } else {
-    await Bun.write(configPath, JSON.stringify(config, null, 2))
+    await Bun.write(configPath, JSON5.stringify(config, null, 2))
   }
 }

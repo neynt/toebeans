@@ -1,4 +1,5 @@
 import { countTokens } from '../../server/tokens.ts'
+import JSON5 from 'json5'
 import { join } from 'path'
 import { homedir } from 'os'
 import { formatLocalDate } from '../../server/time.ts'
@@ -21,7 +22,7 @@ async function readFileOrNull(path: string): Promise<string | null> {
 async function getToolSchemas() {
   const tools: { name: string; description: string; input_schema: unknown }[] = []
 
-  const configRaw = await Bun.file(join(DATA_DIR, 'config.json')).json() as any
+  const configRaw = JSON5.parse(await Bun.file(join(DATA_DIR, 'config.json5')).text()) as any
   const enabledPlugins = Object.keys(configRaw.plugins || {})
 
   const builtinDir = join(import.meta.dir, '..', '..', 'plugins')
@@ -102,7 +103,7 @@ export default async function analyzeSystem() {
   components.push({ name: 'Working directory', text: workdirText, tokens: countTokens(workdirText) })
 
   // 5. Plugin descriptions
-  const configRaw = await Bun.file(join(DATA_DIR, 'config.json')).json() as any
+  const configRaw = JSON5.parse(await Bun.file(join(DATA_DIR, 'config.json5')).text()) as any
   const enabledPlugins = Object.keys(configRaw.plugins || {})
 
   const builtinDir = join(import.meta.dir, '..', '..', 'plugins')
