@@ -1,4 +1,4 @@
-import { countTokens } from '@anthropic-ai/tokenizer'
+import { countTokens } from '../../server/tokens.ts'
 import { join } from 'path'
 import { homedir } from 'os'
 import { formatLocalDate } from '../../server/time.ts'

@@ -1,4 +1,4 @@
-import { countTokens } from '@anthropic-ai/tokenizer'
+import { countTokens } from './tokens.ts'
 import type { LlmProvider } from './llm-provider.ts'
 import type { Message, SessionEntry } from './types.ts'
 import type { Config } from './config.ts'

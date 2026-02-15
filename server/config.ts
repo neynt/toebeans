@@ -22,6 +22,14 @@ const configSchema = z.object({
     maxOutputTokens: z.number().optional(),
     maxToolResultTokens: z.number().optional(),
     maxToolResultChars: z.number().optional(),
+    // provider-specific config
+    anthropic: z.object({}).passthrough().optional(),
+    openai: z.object({
+      baseUrl: z.string().optional(),
+      thinking: z.boolean().optional(), // enable reasoning/thinking mode
+      temperature: z.number().optional(),
+      topP: z.number().optional(),
+    }).passthrough().optional(),
   }).passthrough(),
   timezone: z.string().default('America/New_York'),
   notifyOnRestart: z.string().optional(),

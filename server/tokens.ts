@@ -1,5 +1,14 @@
-import { countTokens } from '@anthropic-ai/tokenizer'
 import type { ToolResultContent, ContentBlock, ImageSource, Message } from './types.ts'
+
+/**
+ * Estimate token count from text. Uses a simple heuristic (~4 chars/token)
+ * that works reasonably well across tokenizers. The anthropic tokenizer
+ * could be used for exact counts, but this keeps us provider-agnostic.
+ */
+export function countTokens(text: string): number {
+  // ~4 chars per token is a decent cross-model estimate
+  return Math.ceil(text.length / 4)
+}
 
 /**
  * Estimate image tokens using Anthropic's formula: (width * height) / 750
