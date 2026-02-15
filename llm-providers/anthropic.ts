@@ -5,6 +5,12 @@ import type { Message, StreamChunk, ToolDef, CacheHint } from '../server/types.t
 type AnthropicContentBlock = Anthropic.Messages.ContentBlockParam
 type AnthropicTool = Anthropic.Messages.Tool
 
+// sanitize tool call IDs for cross-provider compatibility
+// Anthropic requires IDs matching /^[a-zA-Z0-9_-]+$/
+function sanitizeToolId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
 export class AnthropicProvider implements LlmProvider {
   name = 'anthropic'
   private client: Anthropic
@@ -39,7 +45,7 @@ export class AnthropicProvider implements LlmProvider {
             return { type: 'image', source: block.source }
           }
           case 'tool_use':
-            return { type: 'tool_use', id: block.id, name: block.name, input: block.input }
+            return { type: 'tool_use', id: sanitizeToolId(block.id), name: block.name, input: block.input }
           case 'tool_result': {
             let content = block.content
             // filter oversized images in rich content
@@ -53,7 +59,7 @@ export class AnthropicProvider implements LlmProvider {
             }
             return {
               type: 'tool_result',
-              tool_use_id: block.tool_use_id,
+              tool_use_id: sanitizeToolId(block.tool_use_id),
               content,
               is_error: block.is_error,
             }

@@ -2,6 +2,11 @@ import OpenAI from 'openai'
 import type { LlmProvider } from '../server/llm-provider.ts'
 import type { Message, StreamChunk, ToolDef } from '../server/types.ts'
 
+// sanitize tool call IDs for cross-provider compatibility
+function sanitizeToolId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
 export interface OpenAICompatibleOptions {
   apiKey?: string
   baseUrl?: string
@@ -58,7 +63,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
         if (toolCalls.length > 0) {
           assistantMsg.tool_calls = toolCalls.map(tc => ({
-            id: tc.id,
+            id: sanitizeToolId(tc.id),
             type: 'function' as const,
             function: {
               name: tc.name,
@@ -94,7 +99,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           }
           messages.push({
             role: 'tool',
-            tool_call_id: tr.tool_use_id,
+            tool_call_id: sanitizeToolId(tr.tool_use_id),
             content,
           })
         }
