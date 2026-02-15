@@ -1,6 +1,6 @@
 import { countTokens } from './tokens.ts'
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message, SessionEntry } from './types.ts'
+import type { Message, MessageCost, SessionEntry } from './types.ts'
 import type { Config } from './config.ts'
 import type { PluginManager } from './plugin.ts'
 import { repairMessages } from './agent.ts'
@@ -12,7 +12,6 @@ import {
   getSessionLastActivity,
   getSessionCreatedAt,
   writeSession,
-  appendEntry,
   generateSessionId,
 } from './session.ts'
 import { computeInputOutputCost, type UsageTotals } from './cost.ts'
@@ -133,11 +132,9 @@ export function createSessionManager(
     // generate summary (and capture compaction LLM usage)
     const { text: summary, usage: compactionUsage } = await generateSummary(messages)
 
-    // write compaction cost entry to the old session
+    // compute compaction cost
     const compactionCosts = computeInputOutputCost(compactionUsage, config.llm.model)
-    await appendEntry(sessionId, {
-      type: 'cost',
-      timestamp: new Date().toISOString(),
+    const compactionCost: MessageCost = {
       inputCost: compactionCosts?.inputCost ?? 0,
       outputCost: compactionCosts?.outputCost ?? 0,
       usage: {
@@ -146,13 +143,14 @@ export function createSessionManager(
         cacheRead: compactionUsage.cacheRead,
         cacheWrite: compactionUsage.cacheWrite,
       },
-    })
+    }
 
     // compute old session's total cost for the notification
     const oldCostEntries = await loadCostEntries(sessionId)
     const oldSessionCost = oldCostEntries.reduce((sum, e) => sum + e.inputCost + e.outputCost, 0)
+      + compactionCost.inputCost + compactionCost.outputCost
 
-    // create new session with system_prompt + summary message
+    // create new session with system_prompt + summary message (cost attached to summary)
     const newId = await generateSessionId(route)
     const now = new Date().toISOString()
     const systemPrompt = buildSystemPrompt ? await buildSystemPrompt() : ''
@@ -165,7 +163,7 @@ export function createSessionManager(
     }
     const entries: SessionEntry[] = [
       { type: 'system_prompt', timestamp: now, content: systemPrompt },
-      { type: 'message', timestamp: now, message: summaryMessage },
+      { type: 'message', timestamp: now, message: summaryMessage, cost: compactionCost },
     ]
     await writeSession(newId, entries)
 

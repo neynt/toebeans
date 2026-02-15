@@ -79,10 +79,15 @@ export interface TokenUsage {
   cacheWrite: number
 }
 
+export interface MessageCost {
+  inputCost: number
+  outputCost: number
+  usage: TokenUsage
+}
+
 export type SessionEntry =
   | { type: 'system_prompt'; timestamp: string; content: string }
-  | { type: 'message'; timestamp: string; message: Message }
-  | { type: 'cost'; timestamp: string; inputCost: number; outputCost: number; usage: TokenUsage }
+  | { type: 'message'; timestamp: string; message: Message; cost?: MessageCost }
 
 // Session info
 export interface SessionInfo {

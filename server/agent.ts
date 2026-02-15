@@ -1,5 +1,5 @@
 import type { LlmProvider } from './llm-provider.ts'
-import type { Message, ContentBlock, Tool, ToolContext, ToolResultContent, ToolDef, AgentResult, ServerMessage, TokenUsage } from './types.ts'
+import type { Message, MessageCost, ContentBlock, Tool, ToolContext, ToolResultContent, ToolDef, AgentResult, ServerMessage, TokenUsage } from './types.ts'
 import { loadSession, appendMessage, appendEntry, loadCostEntries, loadSystemPrompt } from './session.ts'
 import { countTokens, estimateImageTokens } from './tokens.ts'
 import { computeInputOutputCost } from './cost.ts'
@@ -278,14 +278,13 @@ export async function runAgentTurn(
 
     if (streamAborted) {
       console.log(`[agent] stream aborted for session ${sessionId}`)
-      // save whatever we accumulated before abort
+      const cost = computeMessageCost(model, iterationUsage, turnCostEntries)
+      // save whatever we accumulated before abort (with cost on the message)
       if (assistantContent.length > 0) {
         const assistantMessage: Message = { role: 'assistant', content: assistantContent }
         messages.push(assistantMessage)
-        await appendMessage(sessionId, assistantMessage)
+        await appendMessage(sessionId, assistantMessage, cost)
       }
-      // write cost entry for this (partial) LLM call
-      await writeCostEntry(sessionId, model, iterationUsage, turnCostEntries)
       if (hasText) {
         onChunk?.({ type: 'text_block_end' })
       }
@@ -294,15 +293,13 @@ export async function runAgentTurn(
       return { messages, usage: totalUsage, aborted: true }
     }
 
-    // save assistant message (skip if empty — model had nothing to say)
+    // save assistant message with cost (skip if empty — model had nothing to say)
+    const cost = computeMessageCost(model, iterationUsage, turnCostEntries)
     if (assistantContent.length > 0) {
       const assistantMessage: Message = { role: 'assistant', content: assistantContent }
       messages.push(assistantMessage)
-      await appendMessage(sessionId, assistantMessage)
+      await appendMessage(sessionId, assistantMessage, cost)
     }
-
-    // write cost entry for this LLM call
-    await writeCostEntry(sessionId, model, iterationUsage, turnCostEntries)
 
     if (!hasToolUse) {
       // signal end of text block before finishing (flush any buffered text)
@@ -408,24 +405,16 @@ export async function runAgentTurn(
   return { messages, usage: totalUsage }
 }
 
-/** Write a cost entry for one LLM API call and track it for turn cost. */
-async function writeCostEntry(
-  sessionId: string,
+/** Compute cost for one LLM API call and track it for turn cost. */
+function computeMessageCost(
   model: string,
   usage: TokenUsage,
   turnCostEntries: { inputCost: number; outputCost: number }[],
-): Promise<void> {
+): MessageCost {
   const costs = computeInputOutputCost(usage, model)
   const entry = costs ?? { inputCost: 0, outputCost: 0 }
-
-  await appendEntry(sessionId, {
-    type: 'cost',
-    timestamp: new Date().toISOString(),
-    inputCost: entry.inputCost,
-    outputCost: entry.outputCost,
-    usage,
-  })
   turnCostEntries.push(entry)
+  return { ...entry, usage }
 }
 
 /** Compute turn and session costs from cost entries. */

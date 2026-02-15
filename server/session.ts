@@ -1,7 +1,7 @@
 import { mkdir, unlink } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { Message, SessionInfo, SessionEntry } from './types.ts'
+import type { Message, MessageCost, SessionInfo, SessionEntry } from './types.ts'
 import { countMessagesTokens } from './tokens.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
@@ -60,10 +60,14 @@ export async function generateSessionId(route?: string): Promise<string> {
  * Parse a JSONL line as a SessionEntry. Handles both new entry format
  * (has a `type` field) and legacy format (raw Message objects with `role`).
  */
-function parseSessionLine(line: string): SessionEntry {
+function parseSessionLine(line: string): SessionEntry | null {
   const parsed = JSON.parse(line)
-  if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+  if (parsed.type === 'system_prompt' || parsed.type === 'message') {
     return parsed as SessionEntry
+  }
+  // legacy: standalone cost entries — skip (costs are now on message entries)
+  if (parsed.type === 'cost') {
+    return null
   }
   // legacy: raw Message object — wrap it
   return { type: 'message', timestamp: '', message: parsed as Message }
@@ -82,7 +86,8 @@ export async function loadSessionEntries(sessionId: string): Promise<SessionEntr
 
   const text = await file.text()
   const lines = text.trim().split('\n').filter(Boolean)
-  return lines.map(parseSessionLine)
+  const parsed = lines.map(parseSessionLine)
+  return parsed.filter((e): e is SessionEntry => e !== null)
 }
 
 /**
@@ -105,11 +110,17 @@ export async function loadSystemPrompt(sessionId: string): Promise<string | null
 }
 
 /**
- * Load all cost entries from a session.
+ * Load all cost data from a session (extracted from message entries with cost fields).
  */
-export async function loadCostEntries(sessionId: string): Promise<(SessionEntry & { type: 'cost' })[]> {
+export async function loadCostEntries(sessionId: string): Promise<MessageCost[]> {
   const entries = await loadSessionEntries(sessionId)
-  return entries.filter((e): e is SessionEntry & { type: 'cost' } => e.type === 'cost')
+  const costs: MessageCost[] = []
+  for (const e of entries) {
+    if (e.type === 'message' && e.cost) {
+      costs.push(e.cost)
+    }
+  }
+  return costs
 }
 
 /**
@@ -131,12 +142,16 @@ export async function appendEntry(sessionId: string, entry: SessionEntry): Promi
 /**
  * Append a message to the session (wraps in a SessionEntry).
  */
-export async function appendMessage(sessionId: string, message: Message): Promise<void> {
-  await appendEntry(sessionId, {
+export async function appendMessage(sessionId: string, message: Message, cost?: MessageCost): Promise<void> {
+  const entry: SessionEntry = {
     type: 'message',
     timestamp: new Date().toISOString(),
     message,
-  })
+  }
+  if (cost) {
+    ;(entry as SessionEntry & { type: 'message' }).cost = cost
+  }
+  await appendEntry(sessionId, entry)
 }
 
 export async function listSessions(): Promise<SessionInfo[]> {

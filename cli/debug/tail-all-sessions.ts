@@ -262,11 +262,13 @@ function startTailing(sessionId: string, filePath: string) {
 
   let linesPrinted = 0
 
-  function parseEntry(line: string): SessionEntry {
+  function parseEntry(line: string): SessionEntry | null {
     const parsed = JSON.parse(line)
-    if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+    if (parsed.type === 'system_prompt' || parsed.type === 'message') {
       return parsed as SessionEntry
     }
+    // legacy: standalone cost entries — skip
+    if (parsed.type === 'cost') return null
     // legacy: raw Message object
     return { type: 'message', timestamp: '', message: parsed as Message }
   }
@@ -279,6 +281,7 @@ function startTailing(sessionId: string, filePath: string) {
       for (const line of newLines) {
         try {
           const entry = parseEntry(line)
+          if (!entry) { linesPrinted++; continue }
 
           if (entry.type === 'message') {
             const msg = entry.message
@@ -287,7 +290,10 @@ function startTailing(sessionId: string, filePath: string) {
               ? `${roleColor}${FG_WHITE}${BOLD} USER ${RESET}`
               : `${roleColor}${FG_WHITE}${BOLD} ASSISTANT ${RESET}`
 
-            const header = `${prefix} ${roleLabel} ${DIM}#${linesPrinted}${RESET}`
+            const costStr = entry.cost
+              ? ` ${DIM}($${(entry.cost.inputCost + entry.cost.outputCost).toFixed(4)})${RESET}`
+              : ''
+            const header = `${prefix} ${roleLabel} ${DIM}#${linesPrinted}${RESET}${costStr}`
             const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
             const prefixed = prefixLines(blocks, prefix)
 
@@ -296,8 +302,6 @@ function startTailing(sessionId: string, filePath: string) {
             console.log(prefixed)
           } else if (entry.type === 'system_prompt') {
             console.log(`${prefix} ${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`)
-          } else if (entry.type === 'cost') {
-            console.log(`${prefix} ${DIM}── cost: $${(entry.inputCost + entry.outputCost).toFixed(4)} ──${RESET}`)
           }
         } catch {
           console.error(`${prefix} ${FG_RED}failed to parse line ${linesPrinted}${RESET}`)

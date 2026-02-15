@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, rm } from 'node:fs/promises'
-import type { Message, SessionEntry } from './types.ts'
+import type { Message, MessageCost, SessionEntry } from './types.ts'
 
 const SESSIONS_DIR = join(homedir(), '.toebeans', 'sessions')
 const TEST_SESSION = '_test-session-entries'
@@ -19,11 +19,13 @@ async function cleanup() {
 // we re-implement the parsing logic here for testing. This tests the same
 // logic that session.ts uses, without being affected by mocks.
 
-function parseSessionLine(line: string): SessionEntry {
+function parseSessionLine(line: string): SessionEntry | null {
   const parsed = JSON.parse(line)
-  if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+  if (parsed.type === 'system_prompt' || parsed.type === 'message') {
     return parsed as SessionEntry
   }
+  // legacy standalone cost entries are skipped
+  if (parsed.type === 'cost') return null
   return { type: 'message', timestamp: '', message: parsed as Message }
 }
 
@@ -32,7 +34,9 @@ async function readEntries(sessionId: string): Promise<SessionEntry[]> {
   const file = Bun.file(path)
   if (!(await file.exists())) return []
   const text = await file.text()
-  return text.trim().split('\n').filter(Boolean).map(parseSessionLine)
+  return text.trim().split('\n').filter(Boolean)
+    .map(parseSessionLine)
+    .filter((e): e is SessionEntry => e !== null)
 }
 
 async function writeEntries(sessionId: string, entries: SessionEntry[]): Promise<void> {
@@ -65,8 +69,7 @@ describe('session entries', () => {
     const entries: SessionEntry[] = [
       { type: 'system_prompt', timestamp: '2025-01-01T00:00:00Z', content: 'you are helpful' },
       { type: 'message', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
-      { type: 'message', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } },
-      { type: 'cost', timestamp: '2025-01-01T00:02:01Z', inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } },
+      { type: 'message', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] }, cost: { inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } } },
     ]
     await writeEntries(TEST_SESSION, entries)
 
@@ -78,8 +81,7 @@ describe('session entries', () => {
     const entries: SessionEntry[] = [
       { type: 'system_prompt', timestamp: '2025-01-01T00:00:00Z', content: 'you are helpful' },
       { type: 'message', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
-      { type: 'cost', timestamp: '2025-01-01T00:02:01Z', inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } },
-      { type: 'message', timestamp: '2025-01-01T00:03:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } },
+      { type: 'message', timestamp: '2025-01-01T00:03:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] }, cost: { inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } } },
     ]
     await writeEntries(TEST_SESSION, entries)
 
@@ -114,18 +116,20 @@ describe('session entries', () => {
     expect(sp).toBeUndefined()
   })
 
-  test('loadCostEntries returns only cost entries', async () => {
+  test('loadCostEntries extracts costs from message entries', async () => {
     const entries: SessionEntry[] = [
       { type: 'system_prompt', timestamp: '2025-01-01T00:00:00Z', content: 'test' },
       { type: 'message', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
-      { type: 'cost', timestamp: '2025-01-01T00:02:00Z', inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } },
-      { type: 'message', timestamp: '2025-01-01T00:03:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
-      { type: 'cost', timestamp: '2025-01-01T00:04:00Z', inputCost: 0.03, outputCost: 0.04, usage: { input: 2000, output: 1000, cacheRead: 100, cacheWrite: 50 } },
+      { type: 'message', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, cost: { inputCost: 0.01, outputCost: 0.02, usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } } },
+      { type: 'message', timestamp: '2025-01-01T00:03:00Z', message: { role: 'user', content: [{ type: 'text', text: 'more' }] } },
+      { type: 'message', timestamp: '2025-01-01T00:04:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'sure' }] }, cost: { inputCost: 0.03, outputCost: 0.04, usage: { input: 2000, output: 1000, cacheRead: 100, cacheWrite: 50 } } },
     ]
     await writeEntries(TEST_SESSION, entries)
 
-    const costs = (await readEntries(TEST_SESSION))
-      .filter((e): e is SessionEntry & { type: 'cost' } => e.type === 'cost')
+    const costs: MessageCost[] = (await readEntries(TEST_SESSION))
+      .filter((e): e is SessionEntry & { type: 'message' } => e.type === 'message')
+      .filter(e => e.cost != null)
+      .map(e => e.cost!)
     expect(costs).toHaveLength(2)
     expect(costs[0]!.inputCost).toBe(0.01)
     expect(costs[1]!.outputCost).toBe(0.04)

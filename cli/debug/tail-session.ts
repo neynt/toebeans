@@ -281,23 +281,27 @@ export default async function tailSession() {
   // print existing messages
   let linesPrinted = 0
 
-  function parseEntry(line: string): SessionEntry {
+  function parseEntry(line: string): SessionEntry | null {
     const parsed = JSON.parse(line)
-    if (parsed.type === 'system_prompt' || parsed.type === 'message' || parsed.type === 'cost') {
+    if (parsed.type === 'system_prompt' || parsed.type === 'message') {
       return parsed as SessionEntry
     }
+    // legacy: standalone cost entries — skip
+    if (parsed.type === 'cost') return null
     // legacy: raw Message object
     return { type: 'message', timestamp: '', message: parsed as Message }
   }
 
   function renderEntry(entry: SessionEntry): string {
     switch (entry.type) {
-      case 'message':
-        return renderMessage(entry.message, linesPrinted)
+      case 'message': {
+        const costStr = entry.cost
+          ? `\n${DIM}── cost: $${(entry.cost.inputCost + entry.cost.outputCost).toFixed(4)} (in: ${entry.cost.usage.input} out: ${entry.cost.usage.output} cache_r: ${entry.cost.usage.cacheRead} cache_w: ${entry.cost.usage.cacheWrite}) ──${RESET}`
+          : ''
+        return renderMessage(entry.message, linesPrinted) + costStr
+      }
       case 'system_prompt':
         return `${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`
-      case 'cost':
-        return `${DIM}── cost: $${(entry.inputCost + entry.outputCost).toFixed(4)} (in: ${entry.usage.input} out: ${entry.usage.output} cache_r: ${entry.usage.cacheRead} cache_w: ${entry.usage.cacheWrite}) ──${RESET}`
     }
   }
 
@@ -307,6 +311,7 @@ export default async function tailSession() {
     for (const line of newLines) {
       try {
         const entry = parseEntry(line)
+        if (!entry) { linesPrinted++; continue }
         if (linesPrinted > 0) console.log() // blank line between entries
         console.log(renderEntry(entry))
       } catch {
