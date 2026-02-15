@@ -6,6 +6,8 @@ import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../llm-providers/anthropic.ts'
+import { OpenAICompatibleProvider } from '../llm-providers/openai-compatible.ts'
+import type { LlmProvider } from './llm-provider.ts'
 import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
 
 interface WebSocketData {
@@ -47,15 +49,30 @@ async function main() {
   }
 
   // create provider from config
-  if (config.llm.provider !== 'anthropic') {
-    throw new Error(`unsupported provider: ${config.llm.provider}`)
+  let provider: LlmProvider
+  switch (config.llm.provider) {
+    case 'anthropic':
+      provider = new AnthropicProvider({
+        apiKey: config.llm.apiKey,
+        model: config.llm.model,
+        effort: config.llm.effort,
+        maxOutputTokens: config.llm.maxOutputTokens,
+      })
+      break
+    case 'openai-compatible':
+      provider = new OpenAICompatibleProvider({
+        apiKey: config.llm.apiKey,
+        baseUrl: config.llm.openai?.baseUrl,
+        model: config.llm.model,
+        maxOutputTokens: config.llm.maxOutputTokens,
+        thinking: config.llm.openai?.thinking,
+        temperature: config.llm.openai?.temperature,
+        topP: config.llm.openai?.topP,
+      })
+      break
+    default:
+      throw new Error(`unsupported provider: ${config.llm.provider}`)
   }
-  const provider = new AnthropicProvider({
-    apiKey: config.llm.apiKey,
-    model: config.llm.model,
-    effort: config.llm.effort,
-    maxOutputTokens: config.llm.maxOutputTokens,
-  })
 
   const model = config.llm.model
 

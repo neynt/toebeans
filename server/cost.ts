@@ -1,7 +1,7 @@
-// Anthropic model pricing (per million tokens)
+// Model pricing (per million tokens)
 // optimistic = cache read rates, pessimistic = standard input rates
 
-interface ModelPricing {
+export interface ModelPricing {
   input: number        // $/M tokens
   output: number       // $/M tokens
   cacheRead: number    // $/M tokens
@@ -16,6 +16,15 @@ const PRICING: Record<string, ModelPricing> = {
   // Claude 3.5
   'claude-3-5-sonnet':   { input: 3,   output: 15,  cacheRead: 0.3,  cacheWrite: 3.75 },
   'claude-3-5-haiku':    { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1.0 },
+  // Kimi K2.5 (Moonshot AI)
+  'kimi-k2.5':           { input: 2,   output: 8,   cacheRead: 0.2,  cacheWrite: 2.5 },
+}
+
+/**
+ * Register custom model pricing at runtime (e.g. from config).
+ */
+export function registerModelPricing(model: string, pricing: ModelPricing): void {
+  PRICING[model] = pricing
 }
 
 function findPricing(model: string): ModelPricing | null {
