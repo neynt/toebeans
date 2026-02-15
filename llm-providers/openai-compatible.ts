@@ -75,7 +75,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         // Kimi requires reasoning_content on ALL assistant messages when
         // thinking mode is enabled, not just ones with tool_calls
         if (this.thinking) {
-          ;(assistantMsg as any).reasoning_content = (assistantMsg as any).reasoning_content ?? ''
+          ;(assistantMsg as any).reasoning_content = (assistantMsg as any).reasoning_content || '.'
         }
 
         messages.push(assistantMsg)
