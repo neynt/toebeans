@@ -3,6 +3,7 @@ import type { Tool, ToolResult, Message } from '../../server/types.ts'
 import { getDataDir } from '../../server/session.ts'
 import { join } from 'path'
 import { mkdir } from 'node:fs/promises'
+import { formatLocalTime, getTimezone } from '../../server/time.ts'
 
 interface QueuedMessage {
   message: Message
@@ -264,7 +265,7 @@ export default function createTimersPlugin(): Plugin {
       const prevTime = schedule.prev.getTime()
       const lastFiredTime = lastFired[filename] ?? 0
       if (lastFiredTime < prevTime) {
-        console.log(`timers: missed fire detected for ${filename} (should have fired ${schedule.prev.toLocaleString()})`)
+        console.log(`timers: missed fire detected for ${filename} (should have fired ${formatLocalTime(schedule.prev)})`)
         // fire after a short delay to let the server finish starting up
         const catchupTimeout = setTimeout(() => fireTimer(filename, schedule), 2000)
         scheduledTimers.set(filename, { filename, timeout: catchupTimeout, nextFire: schedule.prev })
@@ -272,7 +273,7 @@ export default function createTimersPlugin(): Plugin {
       }
     }
 
-    console.log(`timers: scheduled ${filename} for ${schedule.next.toLocaleString()} (in ${formatTimeUntil(schedule.next)})`)
+    console.log(`timers: scheduled ${filename} for ${formatLocalTime(schedule.next)} (in ${formatTimeUntil(schedule.next)})`)
 
     const timeout = setTimeout(() => fireTimer(filename, schedule), Math.max(0, msUntil))
 
@@ -342,7 +343,7 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
           await saveLastFired(timersDir, lastFired)
           await scheduleTimer(filename)
           return {
-            content: `Timer created: ${filename}\nNext fire: ${schedule.next.toLocaleString()} (in ${formatTimeUntil(schedule.next)})\nRepeating: ${schedule.repeat}`,
+            content: `Timer created: ${filename}\nNext fire: ${formatLocalTime(schedule.next)} (in ${formatTimeUntil(schedule.next)})\nRepeating: ${schedule.repeat}`,
           }
         } catch (err) {
           return { content: `Failed to create timer: ${err}`, is_error: true }
@@ -364,7 +365,7 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
 
         const lines: string[] = []
         for (const [filename, timer] of scheduledTimers) {
-          lines.push(`${filename} - next: ${timer.nextFire.toLocaleString()} (in ${formatTimeUntil(timer.nextFire)})`)
+          lines.push(`${filename} - next: ${formatLocalTime(timer.nextFire)} (in ${formatTimeUntil(timer.nextFire)})`)
         }
         return { content: lines.join('\n') }
       },
@@ -431,7 +432,7 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
 
   return {
     name: 'timers',
-    description: `Schedule future tasks. Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}. Timer filenames encode the schedule (daily-HH:MM.md, weekly-day-HH:MM.md, hourly-MM.md, YYYY-MM-DDTHH:MM.md). YAML frontmatter supports session and output (e.g. "discord:channelId") fields. When a timer fires, you receive its content as a message.`,
+    description: `Schedule future tasks. Timezone: ${getTimezone()}. Timer filenames encode the schedule (daily-HH:MM.md, weekly-day-HH:MM.md, hourly-MM.md, YYYY-MM-DDTHH:MM.md). YAML frontmatter supports session and output (e.g. "discord:channelId") fields. When a timer fires, you receive its content as a message.`,
 
     tools,
     input: inputGenerator(),

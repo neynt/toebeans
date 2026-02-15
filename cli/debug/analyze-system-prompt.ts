@@ -1,6 +1,7 @@
 import { countTokens } from '@anthropic-ai/tokenizer'
 import { join } from 'path'
 import { homedir } from 'os'
+import { formatLocalDate } from '../../server/time.ts'
 
 const DATA_DIR = join(homedir(), '.toebeans')
 const KNOWLEDGE_DIR = join(DATA_DIR, 'knowledge')
@@ -85,7 +86,7 @@ export default async function analyzeSystem() {
   for (let i = 0; i < recentLogDays; i++) {
     const d = new Date(today)
     d.setDate(d.getDate() - i)
-    const dateStr = d.toISOString().slice(0, 10)
+    const dateStr = formatLocalDate(d)
     const content = await readFileOrNull(join(KNOWLEDGE_DIR, `${dateStr}.md`))
     if (content?.trim()) {
       logParts.push(content)

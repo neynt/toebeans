@@ -3,6 +3,7 @@ import { listSessions } from '../../server/session.ts'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../../server/types.ts'
+import { formatLocalTime } from '../../server/time.ts'
 
 const SESSIONS_DIR = join(homedir(), '.toebeans', 'sessions')
 
@@ -264,7 +265,7 @@ export default async function tailSession() {
     const sessions = await listSessions()
     sessions.sort((a, b) => b.lastActiveAt.getTime() - a.lastActiveAt.getTime())
     for (const s of sessions.slice(0, 10)) {
-      console.error(`  ${s.id}  ${DIM}(${s.lastActiveAt.toISOString()})${RESET}`)
+      console.error(`  ${s.id}  ${DIM}(${formatLocalTime(s.lastActiveAt)})${RESET}`)
     }
     process.exit(1)
   }

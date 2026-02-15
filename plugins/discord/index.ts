@@ -8,6 +8,7 @@ import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 import { countTokens } from '@anthropic-ai/tokenizer'
 import { countToolResultTokens } from '../../server/tokens.ts'
+import { formatLocalTime } from '../../server/time.ts'
 import https from 'https'
 import http from 'http'
 
@@ -733,8 +734,8 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const info = await config!.sessionManager.getSessionInfo(sessionId)
 
-            const createdStr = info.createdAt ? info.createdAt.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
-            const lastActivityStr = info.lastActivity ? info.lastActivity.toISOString().slice(0, 19).replace('T', ' ') : 'unknown'
+            const createdStr = info.createdAt ? formatLocalTime(info.createdAt) : 'unknown'
+            const lastActivityStr = info.lastActivity ? formatLocalTime(info.lastActivity) : 'unknown'
             const ageMinutes = info.createdAt ? Math.floor((Date.now() - info.createdAt.getTime()) / 60000) : 0
 
             let reply = '📊 **Session Info**\n'

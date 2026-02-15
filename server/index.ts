@@ -6,6 +6,7 @@ import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../llm-providers/anthropic.ts'
+import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -30,6 +31,7 @@ async function main() {
   await ensureDataDirs()
   process.chdir(getWorkspaceDir())
   const config = await loadConfig()
+  setTimezone(config.timezone)
 
   // load soul (or create from default)
   const soulPath = getSoulPath()
@@ -432,6 +434,7 @@ async function main() {
     parts.push(...pluginPrompts)
 
     // then context
+    parts.push(`Current time: ${formatLocalTime(new Date())} (${getTimezone()})`)
     parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
     // then plugin instructions (tool descriptions)

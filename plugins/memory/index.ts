@@ -2,6 +2,7 @@ import type { Plugin, PreCompactionContext } from '../../server/plugin.ts'
 import type { Message } from '../../server/types.ts'
 import { getKnowledgeDir } from '../../server/session.ts'
 import { join } from 'path'
+import { formatLocalDate, formatLocalTimeOnly } from '../../server/time.ts'
 
 function buildExtractionPrompt(): string {
   return `You are extracting knowledge from a conversation that is about to be compacted.
@@ -43,10 +44,11 @@ async function getDefaultUserMd(): Promise<string> {
 }
 
 async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date()
+  const today = formatLocalDate(now)
   const dailyLogPath = join(getKnowledgeDir(), `${today}.md`)
   const file = Bun.file(dailyLogPath)
-  const timestamp = new Date().toISOString().slice(11, 19)
+  const timestamp = formatLocalTimeOnly(now)
   const entry = `\n### ${timestamp} (session ${sessionId})\n\n${content}\n`
 
   if (await file.exists()) {

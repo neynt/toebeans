@@ -29,9 +29,10 @@ switch (command) {
   }
   case 'list-sessions': {
     const { listSessions } = await import('../../server/session.ts')
+    const { formatLocalTime } = await import('../../server/time.ts')
     const sessions = await listSessions()
     for (const s of sessions) {
-      console.log(`${s.id}  (last active: ${s.lastActiveAt.toISOString()})`)
+      console.log(`${s.id}  (last active: ${formatLocalTime(s.lastActiveAt)})`)
     }
     break
   }
