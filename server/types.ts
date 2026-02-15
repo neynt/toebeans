@@ -1,4 +1,4 @@
-// Anthropic-compatible message types
+// Internal message types (provider-agnostic)
 
 export type ImageSource = { type: 'url'; url: string } | { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }
 

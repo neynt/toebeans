@@ -18,7 +18,12 @@
     "maxOutputTokens": 16384,
     "maxToolResultTokens": 10000,
     "maxToolResultChars": 50000,
-    "thinkingBudget": 1024
+    "openai": {
+      "baseUrl": "",
+      "thinking": true,
+      "temperature": 1.0,
+      "topP": 0.95
+    }
   },
   "plugins": {},
   "notifyOnRestart": ""

@@ -11,9 +11,10 @@ export function countTokens(text: string): number {
 }
 
 /**
- * Estimate image tokens using Anthropic's formula: (width * height) / 750
+ * Estimate image tokens from dimensions. Uses (width * height) / 750 as a
+ * reasonable cross-provider heuristic (matches Anthropic; OpenAI differs but
+ * this is only used for internal budgeting, not billing).
  * Decodes dimensions from PNG/JPEG/GIF/WebP headers in base64 data.
- * Falls back to a conservative estimate if we can't parse dimensions.
  */
 export function estimateImageTokens(source: ImageSource): number {
   if (source.type === 'url') {
