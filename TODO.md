@@ -25,10 +25,10 @@
 - [ ] local llm support?
 - [x] visual web browser tool
 - [x] tui should display a full audit log, including a history of all tool calls
-- [ ] brave web search api
+- [x] brave web search api
 - [ ] google local places api
 - [ ] archive old state files
-- [ ] support agent skills
+- [x] support agent skills
 - [ ] bitwarden
 - [ ] help me with verizon plan
 - [ ] phone calling
