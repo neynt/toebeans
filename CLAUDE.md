@@ -18,7 +18,7 @@ bun run debug <command>
 ## Data location
 
 All user data is stored in `~/.toebeans/`:
-- `config.json` - plugin config, session settings
+- `config.json5` - plugin config, session settings
 - `sessions/` - session message history (JSONL)
 - `knowledge/` - markdown memory files
 - `plugins/` - user-installed plugins

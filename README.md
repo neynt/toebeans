@@ -21,7 +21,7 @@
 
 | path | contents |
 |-|-|
-| `~/.toebeans/config.json` | main config file |
+| `~/.toebeans/config.json5` | main config file |
 | `~/.toebeans/SOUL.md` | user-customizable start of the system message |
 | `~/.toebeans/secrets/` | where plugins store shared secrets / API keys |
 | `~/.toebeans/$plugin_name/` | typically where plugins store their data |
