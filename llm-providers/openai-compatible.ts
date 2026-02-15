@@ -65,6 +65,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
               arguments: JSON.stringify(tc.input),
             },
           }))
+          // some APIs (e.g. Kimi) require reasoning_content on assistant
+          // messages with tool_calls when thinking mode is enabled
+          if (this.thinking && !(assistantMsg as any).reasoning_content) {
+            ;(assistantMsg as any).reasoning_content = ''
+          }
         }
 
         messages.push(assistantMsg)
