@@ -5,6 +5,7 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
+import { readdir, stat } from 'fs/promises'
 import { getDataDir } from '../../server/session.ts'
 import { countTokens } from '../../server/tokens.ts'
 import { countToolResultTokens } from '../../server/tokens.ts'
@@ -135,6 +136,28 @@ async function transcribeAudio(audioPath: string, model: string = 'tiny'): Promi
   }
 }
 
+const ATTACHMENT_DIR = join(getDataDir(), 'discord-attachments')
+const ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+async function cleanupOldAttachments() {
+  try {
+    await mkdir(ATTACHMENT_DIR, { recursive: true })
+    const files = await readdir(ATTACHMENT_DIR)
+    const now = Date.now()
+    for (const file of files) {
+      try {
+        const filePath = join(ATTACHMENT_DIR, file)
+        const fileStat = await stat(filePath)
+        if (now - fileStat.mtimeMs > ATTACHMENT_MAX_AGE_MS) {
+          await unlink(filePath)
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error('discord: attachment cleanup failed:', err)
+  }
+}
+
 interface ServerContext {
   routeOutput: (target: string, message: any) => Promise<void>
   requestStop: (outputTarget: string) => Promise<boolean>
@@ -144,6 +167,7 @@ interface ServerContext {
 export default function createDiscordPlugin(serverContext?: ServerContext): Plugin {
   let client: Client | null = null
   let config: DiscordConfig | null = null
+  let cleanupInterval: ReturnType<typeof setInterval> | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
@@ -670,6 +694,21 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
                 console.error('Failed to transcribe audio:', err)
                 content += `\n\n[Voice message - transcription failed]`
               }
+              continue
+            }
+
+            // general attachment: download and save to disk
+            try {
+              await mkdir(ATTACHMENT_DIR, { recursive: true })
+              const safeName = (attachment.name || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_')
+              const filename = `${msg.id}_${attachment.id}_${safeName}`
+              const filePath = join(ATTACHMENT_DIR, filename)
+              await downloadFile(attachment.url, filePath)
+              content += `\n\n[attachment: ${filePath}]`
+              console.log(`discord: saved attachment ${filename} (${attachment.contentType || 'unknown type'})`)
+            } catch (err) {
+              console.error('Failed to download attachment:', err)
+              content += `\n\n[attachment: download failed - ${attachment.name || 'unknown'}]`
             }
           }
         }
@@ -759,9 +798,17 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
       })
 
       await client.login(config.token)
+
+      // run attachment cleanup on startup and every 6 hours
+      cleanupOldAttachments()
+      cleanupInterval = setInterval(cleanupOldAttachments, 6 * 60 * 60 * 1000)
     },
 
     async destroy() {
+      if (cleanupInterval) {
+        clearInterval(cleanupInterval)
+        cleanupInterval = null
+      }
       if (client) {
         await client.destroy()
         client = null
