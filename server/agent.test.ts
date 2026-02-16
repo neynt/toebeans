@@ -161,8 +161,83 @@ describe('runAgentTurn queued message handling', () => {
     const toolResultMsg = savedMessages.find(m =>
       m.role === 'user' && m.content.some(b => b.type === 'tool_result')
     )
-    expect(toolResultMsg).toBeDefined()
     // should only have tool_result blocks, no text
     expect(toolResultMsg!.content.every(b => b.type === 'tool_result')).toBe(true)
+  })
+
+  test('queued message mid-multi-tool interrupts remaining tools', async () => {
+    const savedMessages: Message[] = []
+    setupSessionMock({
+      appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
+    })
+
+    let toolExecutions = 0
+    // response 1: two tool uses, response 2: text acknowledging interrupt
+    const provider = makeMockProvider([
+      [
+        { type: 'tool_use', id: 'tu_1', name: 'test_tool', input: {} },
+        { type: 'tool_use', id: 'tu_2', name: 'test_tool', input: {} },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+      [
+        { type: 'text', text: 'acknowledged your interrupt' },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+    ])
+
+    let checkCount = 0
+    await runAgentTurn(
+      [{ type: 'text', text: 'do two things' }],
+      makeOptions({
+        provider,
+        tools: () => [{
+          name: 'test_tool',
+          description: 'a test tool',
+          inputSchema: { type: 'object', properties: {} },
+          execute: async () => {
+            toolExecutions++
+            return { content: `tool result ${toolExecutions}` }
+          },
+        }],
+        checkQueuedMessages: () => {
+          checkCount++
+          // return a queued message after the first tool completes
+          if (checkCount === 1) {
+            return [{ content: [{ type: 'text' as const, text: 'urgent update!' }], outputTarget: '' }]
+          }
+          return []
+        },
+      }),
+    )
+
+    // only the first tool should have actually executed
+    expect(toolExecutions).toBe(1)
+
+    // find the tool result message
+    const toolResultMsg = savedMessages.find(m =>
+      m.role === 'user' && m.content.some(b => b.type === 'tool_result')
+    )
+    expect(toolResultMsg).toBeDefined()
+
+    // should have: tool_result for tu_1 (executed), tool_result for tu_2 (interrupted), text (queued msg)
+    const blocks = toolResultMsg!.content
+    const results = blocks.filter(b => b.type === 'tool_result')
+    expect(results).toHaveLength(2)
+
+    // first tool result should be the actual result
+    const first = results[0]!
+    expect(first.type === 'tool_result' && first.tool_use_id).toBe('tu_1')
+    expect(first.type === 'tool_result' && first.is_error).toBeFalsy()
+
+    // second tool result should be the interrupted marker
+    const second = results[1]!
+    expect(second.type === 'tool_result' && second.tool_use_id).toBe('tu_2')
+    expect(second.type === 'tool_result' && second.is_error).toBe(true)
+
+    // queued text should be in the same message
+    const hasQueuedText = blocks.some(
+      b => b.type === 'text' && b.text === 'urgent update!'
+    )
+    expect(hasQueuedText).toBe(true)
   })
 })

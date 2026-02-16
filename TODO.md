@@ -22,13 +22,17 @@
 - [x] lower effort claude by default
 - [x] connect to gmail
 - [x] knowledge revamp -- why the hell is it 15k tokens of system context
-- [ ] local llm support?
 - [x] visual web browser tool
 - [x] tui should display a full audit log, including a history of all tool calls
 - [x] brave web search api
-- [ ] google local places api
-- [ ] archive old state files
+- [x] kimi k2.5
+- [x] help me with verizon plan
 - [x] support agent skills
 - [ ] bitwarden
-- [ ] help me with verizon plan
+- [ ] make /stop able to interrupt a running tool call
+- [ ] fix tts-server architecture. sucks it needs a port number
+- [ ] fix the incoming message queueing issue
+- [ ] google local places api
+- [ ] archive old state files
 - [ ] phone calling
+- [ ] local llm support?

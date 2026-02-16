@@ -226,10 +226,15 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
       // usage info (comes in the final chunk with stream_options.include_usage)
       if (chunk.usage) {
+        // Kimi returns cached token count in prompt_tokens_details.cached_tokens
+        // (automatic prefix caching — no special request params needed)
+        const details = (chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }).prompt_tokens_details
+        const cachedTokens = details?.cached_tokens ?? 0
         yield {
           type: 'usage',
-          input: chunk.usage.prompt_tokens,
+          input: chunk.usage.prompt_tokens - cachedTokens,
           output: chunk.usage.completion_tokens,
+          cacheRead: cachedTokens || undefined,
         }
       }
     }

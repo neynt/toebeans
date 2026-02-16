@@ -121,6 +121,12 @@ export default function createBashPlugin(): Plugin {
             stderr: 'pipe',
           })
 
+          // listen for abort signal from /stop command
+          const onAbort = () => {
+            proc.kill()
+          }
+          context.abortSignal?.addEventListener('abort', onAbort)
+
           const result = await Promise.race([
             proc.exited.then(async (code) => {
               const stdout = await new Response(proc.stdout).text()
@@ -134,6 +140,8 @@ export default function createBashPlugin(): Plugin {
               }, timeoutMs)
             ),
           ])
+
+          context.abortSignal?.removeEventListener('abort', onAbort)
 
           if (result.timedOut) {
             return {

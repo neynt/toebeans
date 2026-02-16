@@ -39,6 +39,7 @@ export interface ToolDef {
 
 // Tool execution context
 export interface ToolContext {
+  abortSignal?: AbortSignal
   sessionId: string
   workingDir: string
   outputTarget?: string

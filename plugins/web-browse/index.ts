@@ -16,6 +16,7 @@ interface WebBrowseConfig {
   sessionTimeoutMs?: number
   navigationTimeout?: number
   maxContentLength?: number
+  remoteDebuggingPort?: number
 }
 
 let pluginConfig: WebBrowseConfig = {}
@@ -78,12 +79,14 @@ let browserPool: Browser | null = null
 
 async function getBrowser(): Promise<Browser> {
   if (!browserPool) {
+    const args = ['--disable-blink-features=AutomationControlled']
+    if (pluginConfig.remoteDebuggingPort) {
+      args.push(`--remote-debugging-port=${pluginConfig.remoteDebuggingPort}`)
+    }
     browserPool = await chromium.launch({
       channel: 'chrome',
       headless: true,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-      ],
+      args,
     })
   }
   return browserPool

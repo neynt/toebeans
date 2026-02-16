@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join, basename } from 'path'
 import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../../server/types.ts'
@@ -251,7 +251,7 @@ function prefixLines(text: string, prefix: string): string {
   return text.split('\n').map(line => `${prefix} ${line}`).join('\n')
 }
 
-function startTailing(sessionId: string, filePath: string) {
+async function startTailing(sessionId: string, filePath: string, seed = true) {
   if (tailers.has(sessionId)) return
 
   const color = SESSION_COLORS[colorIndex % SESSION_COLORS.length]!
@@ -313,8 +313,15 @@ function startTailing(sessionId: string, filePath: string) {
     }
   }
 
-  // print existing content
-  printNewMessages()
+  // print existing content (only if seeding), otherwise skip to end
+  if (seed) {
+    await printNewMessages()
+  } else {
+    try {
+      const text = await Bun.file(filePath).text()
+      linesPrinted = text.trim().split('\n').filter(Boolean).length
+    } catch {}
+  }
 
   // watch for new content
   const watcher = watch(filePath, () => { printNewMessages() })
@@ -330,13 +337,22 @@ function sessionIdFromFilename(filename: string): string {
 export default async function tailAllSessions() {
   console.log(`${BOLD}tailing all sessions in ${SESSIONS_DIR}${RESET}\n`)
 
-  // start tailing all existing .jsonl files
+  // start tailing all existing .jsonl files, sorted by mtime (most recent first)
   const files = await readdir(SESSIONS_DIR)
-  const jsonlFiles = files.filter(f => f.endsWith('.jsonl')).sort()
+  const jsonlFiles = files.filter(f => f.endsWith('.jsonl'))
 
-  for (const file of jsonlFiles) {
+  const withMtime = await Promise.all(
+    jsonlFiles.map(async f => {
+      const s = await stat(join(SESSIONS_DIR, f))
+      return { file: f, mtime: s.mtimeMs }
+    })
+  )
+  withMtime.sort((a, b) => b.mtime - a.mtime)
+
+  for (let i = 0; i < withMtime.length; i++) {
+    const { file } = withMtime[i]!
     const sessionId = sessionIdFromFilename(file)
-    startTailing(sessionId, join(SESSIONS_DIR, file))
+    await startTailing(sessionId, join(SESSIONS_DIR, file), i === 0)
   }
 
   if (jsonlFiles.length === 0) {

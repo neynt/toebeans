@@ -14,7 +14,7 @@
 |-|-|
 | `server/` | serves the core agent loop. runs on your box |
 | `cli/` | some CLI commands. for bootstrapping before you've connected to chat, and debugging |
-| `llm-providers/` | common interface for LLM APIs. currently only claude |
+| `llm-providers/` | common interface for LLM APIs. currently supports claude and kimi k2.5 |
 | `plugins/` | pluggable units of functionality |
 
 ## configuration and files
@@ -38,6 +38,7 @@ plugins extend the assistant's functionality.
 | `memory` | remember things about you and what you talked about |
 | `timers` | schedule repeating or one-off wakeups |
 | `plugins` | add/remove plugins |
+| `skills` | stick [skills](https://agentskills.io/) in context |
 
 ### chat plugins
 

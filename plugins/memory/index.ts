@@ -139,8 +139,8 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
           `# Knowledge directory (${knowledgeDir})\n` +
           `Files:\n` +
           topicFiles.map(f => `- ${f}`).join('\n') + '\n\n' +
-          `Use bash to read any of these files when you need context. ` +
-          `You can also create or edit markdown files here and they'll be surfaced automatically in future conversations.`
+          `You should read these files on-demand. Prior to working on any task, read relevant files. ` +
+          `Markdown files created here will be surfaced here in future conversations.`
         )
       }
 
