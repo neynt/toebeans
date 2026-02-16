@@ -12,6 +12,7 @@ export async function ensureDataDirs(): Promise<void> {
   await mkdir(SESSIONS_DIR, { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'knowledge'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'plugins'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'skills'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'workspace'), { recursive: true })
 }
 
