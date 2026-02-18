@@ -23,7 +23,7 @@ interface DiscordConfig {
   allowDMs?: boolean  // respond to direct messages (default: true)
   transcribeVoice?: boolean  // transcribe voice messages (default: true)
   sessionManager?: any  // session manager instance for slash commands
-  whisperModel?: string  // whisper model for voice transcription (default: tiny)
+  whisperModel?: string  // whisper model for voice transcription (default: medium)
   typingDelayMaxMs?: number  // max typing delay in ms (default: 1000)
   typingDelayPerCharMs?: number  // per-character typing delay in ms (default: 10)
 }
@@ -117,23 +117,40 @@ async function downloadImageAsBase64(url: string): Promise<{ media_type: 'image/
   }
 }
 
-async function transcribeAudio(audioPath: string, model: string = 'tiny'): Promise<string> {
-  try {
-    const { stdout } = await execAsync(`uvx --from openai-whisper whisper "${audioPath}" --model ${model} --language en --output_format txt`)
-    // whisperx outputs a .txt file in the same directory
-    const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
+async function transcribeAudio(audioPath: string, model: string = 'medium'): Promise<string> {
+  const initialPrompt = 'commit, push, pull, git, merge, rebase, branch, repo, deploy, API, endpoint, TypeScript, JavaScript, Python, npm, Docker, Kubernetes, Claude, LLM'
+  // output_dir must be explicit since whisperx defaults to cwd
+  const outputDir = audioPath.replace(/\/[^/]+$/, '')
+  const baseCmd = `uvx whisperx "${audioPath}" --model ${model} --language en --output_format txt --output_dir "${outputDir}" --no_align --initial_prompt "${initialPrompt}"`
+
+  // try CUDA first, fall back to CPU
+  for (const device of ['cuda', 'cpu'] as const) {
+    const computeType = device === 'cuda' ? 'float16' : 'int8'
+    const cmd = `${baseCmd} --device ${device} --compute_type ${computeType}`
     try {
-      const { stdout: transcription } = await execAsync(`cat "${txtPath}"`)
-      await unlink(txtPath)
-      return transcription.trim()
-    } catch {
-      // if txt file doesn't exist, return stdout
-      return stdout.trim() || '(transcription failed)'
+      await execAsync(cmd, {
+        timeout: 120000,
+        env: { ...process.env, CUDA_VISIBLE_DEVICES: '0' },
+      })
+      // whisperx outputs a .txt file in the output directory
+      const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
+      try {
+        const txtContent = await Bun.file(txtPath).text()
+        await unlink(txtPath)
+        return txtContent.trim()
+      } catch {
+        return '(transcription failed: could not read output file)'
+      }
+    } catch (err) {
+      if (device === 'cuda') {
+        console.warn('Transcription: CUDA failed, falling back to CPU:', (err as Error).message?.slice(0, 100))
+        continue
+      }
+      console.error('Transcription error:', err)
+      return `(transcription failed: ${err})`
     }
-  } catch (err) {
-    console.error('Transcription error:', err)
-    return `(transcription failed: ${err})`
   }
+  return '(transcription failed)'
 }
 
 const ATTACHMENT_DIR = join(getDataDir(), 'discord-attachments')
@@ -179,6 +196,29 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
   const sendLocks = new Map<string, Promise<void>>()
   // track last message ID per channel (for "last" shorthand in discord_react)
   const lastMessageIds = new Map<string, string>()
+  // persistent typing indicators per channel
+  const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+
+  const MAX_TYPING_MS = 5 * 60 * 1000 // 5 min safety cap
+
+  function startTyping(channel: TextChannel | DMChannel) {
+    stopTyping(channel.id)
+    channel.sendTyping().catch(() => {})
+    const interval = setInterval(() => {
+      channel.sendTyping().catch(() => {})
+    }, 4000)
+    typingIntervals.set(channel.id, interval)
+    // safety: auto-clear after MAX_TYPING_MS
+    setTimeout(() => stopTyping(channel.id), MAX_TYPING_MS)
+  }
+
+  function stopTyping(channelId: string) {
+    const interval = typingIntervals.get(channelId)
+    if (interval) {
+      clearInterval(interval)
+      typingIntervals.delete(channelId)
+    }
+  }
 
   function queueMessage(channelId: string, content: string, author: string, isDM: boolean, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []) {
     const channelContext = isDM
@@ -275,7 +315,14 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
           const messages = await (channel as TextChannel).messages.fetch({ limit: Math.min(limit, 100) })
           const formatted = messages
             .reverse()
-            .map(m => `[${m.id}] [${m.author.username}] ${m.content}`)
+            .map(m => {
+              let line = `[${m.id}] [${m.author.username}] ${m.content}`
+              if (m.attachments.size > 0) {
+                const atts = [...m.attachments.values()].map(a => `${a.name} (${a.contentType || 'unknown'}, ${a.size} bytes)`).join(', ')
+                line += ` [attachments: ${atts}]`
+              }
+              return line
+            })
             .join('\n')
           return { content: formatted || '(no messages)' }
         } catch (err) {
@@ -359,6 +406,71 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
           return { content: `image sent to channel ${channel_id}` }
         } catch (err) {
           return { content: `Failed to send image: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_fetch_attachment',
+      description: 'Fetch a specific message by ID and download its attachment(s) to disk. Returns local file paths for further processing. Handles voice messages (audio), images, and general file attachments.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID containing the message' },
+          message_id: { type: 'string', description: 'Message ID to fetch attachments from' },
+          attachment_index: { type: 'number', description: 'Optional: download only the Nth attachment (0-indexed). If omitted, downloads all.' },
+        },
+        required: ['channel_id', 'message_id'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, message_id, attachment_index } = input as { channel_id: string; message_id: string; attachment_index?: number }
+        try {
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+
+          let msg: DiscordMessage
+          try {
+            msg = await (channel as TextChannel).messages.fetch(message_id)
+          } catch {
+            return { content: `Message ${message_id} not found in channel ${channel_id}`, is_error: true }
+          }
+
+          if (msg.attachments.size === 0) {
+            return { content: `Message ${message_id} has no attachments. Content: ${msg.content || '(empty)'}`, is_error: true }
+          }
+
+          const attachments = [...msg.attachments.values()]
+          let toDownload = attachments
+          if (attachment_index !== undefined) {
+            if (attachment_index < 0 || attachment_index >= attachments.length) {
+              return { content: `Attachment index ${attachment_index} out of range (message has ${attachments.length} attachment(s))`, is_error: true }
+            }
+            toDownload = [attachments[attachment_index]] as typeof attachments
+          }
+
+          await mkdir(ATTACHMENT_DIR, { recursive: true })
+          const results: string[] = []
+
+          for (const attachment of toDownload) {
+            const safeName = (attachment.name || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_')
+            const filename = `${msg.id}_${attachment.id}_${safeName}`
+            const filePath = join(ATTACHMENT_DIR, filename)
+            await downloadFile(attachment.url, filePath)
+            results.push(JSON.stringify({
+              path: filePath,
+              name: attachment.name,
+              contentType: attachment.contentType,
+              size: attachment.size,
+            }))
+          }
+
+          return { content: `Downloaded ${results.length} attachment(s):\n${results.join('\n')}` }
+        } catch (err) {
+          return { content: `Failed to fetch attachment: ${err}`, is_error: true }
         }
       },
     },
@@ -497,7 +609,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
                 const truncated = task.length > 50 ? task.slice(0, 47) + '...' : task
                 toolMessage += `: ${truncated}`
               }
-            } else if (message.name === 'discord_send' || message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react') {
+            } else if (message.name === 'discord_send' || message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
               // just the tool name, no params
             } else if (message.name === 'remember' || message.name === 'recall') {
               const topic = (message.input as any)?.topic || (message.input as any)?.query
@@ -566,12 +678,15 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             }
             messageBuffers.delete(sessionId)
             sendLocks.delete(sessionId)
+            stopTyping(channelId)
           } else if (message.type === 'error') {
             // send error message
             await textChannel.send(`❌ Error: ${message.message}`)
+            stopTyping(channelId)
           }
         } catch (err) {
           console.error(`discord output error:`, err)
+          stopTyping(channelId)
         }
       })
 
@@ -647,9 +762,8 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
           return
         }
 
-        // start typing immediately
-        const typingChannel = msg.channel as TextChannel | DMChannel
-        typingChannel.sendTyping().catch(() => {})
+        // start persistent typing indicator (re-fires every 4s until stopped)
+        startTyping(msg.channel as TextChannel | DMChannel)
 
         let content = msg.content
         const images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []
@@ -687,7 +801,11 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
                 await mkdir(audioDir, { recursive: true })
                 const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
                 await downloadFile(attachment.url, audioFile)
-                const transcription = await transcribeAudio(audioFile, config!.whisperModel ?? 'tiny')
+                const transcription = await transcribeAudio(audioFile, config!.whisperModel ?? 'medium')
+
+                // echo transcription back to the channel so user can verify
+                const echoChannel = msg.channel as TextChannel | DMChannel
+                await echoChannel.send(`[Voice transcription]: ${transcription}`)
 
                 content += `\n\n[Voice message transcription: ${transcription}]`
               } catch (err) {

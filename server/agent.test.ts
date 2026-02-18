@@ -80,7 +80,7 @@ describe('runAgentTurn queued message handling', () => {
     }
   }
 
-  test('queued messages are appended to tool result message after all tools complete', async () => {
+  test('queued messages are appended as separate user message after tool results', async () => {
     const savedMessages: Message[] = []
     setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
@@ -99,7 +99,7 @@ describe('runAgentTurn queued message handling', () => {
     ])
 
     let queueReturned = false
-    const result = await runAgentTurn(
+    await runAgentTurn(
       [{ type: 'text', text: 'do something' }],
       makeOptions({
         provider,
@@ -113,24 +113,25 @@ describe('runAgentTurn queued message handling', () => {
       }),
     )
 
-    // find the message that contains tool_result blocks
+    // find the tool result message
     const toolResultMsg = savedMessages.find(m =>
       m.role === 'user' && m.content.some(b => b.type === 'tool_result')
     )
     expect(toolResultMsg).toBeDefined()
 
-    // the queued text should be in the SAME message as the tool result (no [USER INTERRUPT] wrapper)
-    const hasQueuedText = toolResultMsg!.content.some(
-      b => b.type === 'text' && b.text === 'hey, new context!'
-    )
-    expect(hasQueuedText).toBe(true)
+    // tool result message should only have tool_result blocks (no queued text mixed in)
+    expect(toolResultMsg!.content.every(b => b.type === 'tool_result')).toBe(true)
 
-    // verify no consecutive user messages in the result
-    for (let i = 1; i < result.messages.length; i++) {
-      if (result.messages[i]!.role === 'user' && result.messages[i - 1]!.role === 'user') {
-        throw new Error(`consecutive user messages at index ${i - 1} and ${i}`)
-      }
-    }
+    // queued text should be in a separate user message after the tool results
+    const queuedMsg = savedMessages.find(m =>
+      m.role === 'user' && m.content.some(b => b.type === 'text' && b.text === 'hey, new context!')
+    )
+    expect(queuedMsg).toBeDefined()
+
+    // the queued message should come after the tool result message
+    const toolResultIdx = savedMessages.indexOf(toolResultMsg!)
+    const queuedIdx = savedMessages.indexOf(queuedMsg!)
+    expect(queuedIdx).toBeGreaterThan(toolResultIdx)
   })
 
   test('no queued messages produces clean tool result message', async () => {
@@ -165,14 +166,14 @@ describe('runAgentTurn queued message handling', () => {
     expect(toolResultMsg!.content.every(b => b.type === 'tool_result')).toBe(true)
   })
 
-  test('queued message mid-multi-tool interrupts remaining tools', async () => {
+  test('queued messages during multi-tool do not interrupt — all tools complete', async () => {
     const savedMessages: Message[] = []
     setupSessionMock({
       appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
     })
 
     let toolExecutions = 0
-    // response 1: two tool uses, response 2: text acknowledging interrupt
+    // response 1: two tool uses, response 2: text acknowledging queued msg
     const provider = makeMockProvider([
       [
         { type: 'tool_use', id: 'tu_1', name: 'test_tool', input: {} },
@@ -180,12 +181,11 @@ describe('runAgentTurn queued message handling', () => {
         { type: 'usage', input: 100, output: 50 },
       ],
       [
-        { type: 'text', text: 'acknowledged your interrupt' },
+        { type: 'text', text: 'acknowledged your message' },
         { type: 'usage', input: 100, output: 50 },
       ],
     ])
 
-    let checkCount = 0
     await runAgentTurn(
       [{ type: 'text', text: 'do two things' }],
       makeOptions({
@@ -200,18 +200,14 @@ describe('runAgentTurn queued message handling', () => {
           },
         }],
         checkQueuedMessages: () => {
-          checkCount++
-          // return a queued message after the first tool completes
-          if (checkCount === 1) {
-            return [{ content: [{ type: 'text' as const, text: 'urgent update!' }], outputTarget: '' }]
-          }
-          return []
+          // always return a queued message — should not interrupt tools
+          return [{ content: [{ type: 'text' as const, text: 'urgent update!' }], outputTarget: '' }]
         },
       }),
     )
 
-    // only the first tool should have actually executed
-    expect(toolExecutions).toBe(1)
+    // both tools should have executed (no interruption)
+    expect(toolExecutions).toBe(2)
 
     // find the tool result message
     const toolResultMsg = savedMessages.find(m =>
@@ -219,25 +215,19 @@ describe('runAgentTurn queued message handling', () => {
     )
     expect(toolResultMsg).toBeDefined()
 
-    // should have: tool_result for tu_1 (executed), tool_result for tu_2 (interrupted), text (queued msg)
-    const blocks = toolResultMsg!.content
-    const results = blocks.filter(b => b.type === 'tool_result')
+    const results = toolResultMsg!.content.filter(b => b.type === 'tool_result')
     expect(results).toHaveLength(2)
 
-    // first tool result should be the actual result
-    const first = results[0]!
-    expect(first.type === 'tool_result' && first.tool_use_id).toBe('tu_1')
-    expect(first.type === 'tool_result' && first.is_error).toBeFalsy()
+    // both tool results should be successful (not interrupted)
+    for (const r of results) {
+      expect(r.type === 'tool_result' && r.is_error).toBeFalsy()
+    }
 
-    // second tool result should be the interrupted marker
-    const second = results[1]!
-    expect(second.type === 'tool_result' && second.tool_use_id).toBe('tu_2')
-    expect(second.type === 'tool_result' && second.is_error).toBe(true)
-
-    // queued text should be in the same message
-    const hasQueuedText = blocks.some(
-      b => b.type === 'text' && b.text === 'urgent update!'
+    // queued text should be in a separate user message after tool results
+    const queuedMsg = savedMessages.find(m =>
+      m.role === 'user' && m.content.some(b => b.type === 'text' && b.text === 'urgent update!')
     )
-    expect(hasQueuedText).toBe(true)
+    expect(queuedMsg).toBeDefined()
+    expect(savedMessages.indexOf(queuedMsg!)).toBeGreaterThan(savedMessages.indexOf(toolResultMsg!))
   })
 })

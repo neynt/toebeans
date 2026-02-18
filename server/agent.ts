@@ -371,28 +371,6 @@ export async function runAgentTurn(
         content: result.content,
         is_error: result.is_error,
       })
-
-      // check for queued user messages after EACH tool (not just after all)
-      // this allows user messages to interrupt multi-tool sequences mid-stream
-      if (options.checkQueuedMessages) {
-        const queued = options.checkQueuedMessages()
-        if (queued.length > 0) {
-          console.log(`[agent] user message arrived during tool execution, interrupting ${toolUseBlocks.length - i - 1} remaining tool(s)`)
-          // mark remaining tools as interrupted
-          for (let j = i + 1; j < toolUseBlocks.length; j++) {
-            const remaining = toolUseBlocks[j]!
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: remaining.id,
-              content: '(interrupted — new user message received)',
-              is_error: true,
-            })
-          }
-          // append queued message content
-          toolResults.push(...queued.flatMap(q => q.content))
-          break // exit the tool loop early
-        }
-      }
     }
 
     // add tool results as a user message
@@ -404,6 +382,19 @@ export async function runAgentTurn(
     }
     messages.push(toolResultMessage)
     await appendMessage(sessionId, toolResultMessage)
+
+    // after all tools complete, check for queued user messages/timers
+    // and append them to conversation before the next LLM call
+    if (options.checkQueuedMessages) {
+      const queued = options.checkQueuedMessages()
+      if (queued.length > 0) {
+        console.log(`[agent] appending ${queued.length} queued message(s) after tool round`)
+        const queuedContent: ContentBlock[] = queued.flatMap(q => q.content)
+        const queuedMessage: Message = { role: 'user', content: queuedContent }
+        messages.push(queuedMessage)
+        await appendMessage(sessionId, queuedMessage)
+      }
+    }
 
     // check if abort was requested
     if (options.checkAbort?.()) {
