@@ -240,7 +240,15 @@ async function main() {
           // drain remaining queued messages as new turns
           while (!resumeCheckAbort()) {
             const remaining = resumeCheckQueued()
-            if (remaining.length === 0) break
+            if (remaining.length === 0) {
+              sessionBusy.set(sessionId, false)
+              // re-check after releasing lock to avoid TOCTOU race
+              if (messageQueues.get(sessionId)?.length) {
+                sessionBusy.set(sessionId, true)
+                continue
+              }
+              break
+            }
             console.log(`[server] draining ${remaining.length} queued message(s) as new turn`)
             const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
@@ -394,7 +402,15 @@ async function main() {
             // (checkQueuedMessages only runs after tool calls, so these would be stranded)
             while (!agentCheckAbort()) {
               const remaining = agentCheckQueued()
-              if (remaining.length === 0) break
+              if (remaining.length === 0) {
+                sessionBusy.set(conversationSessionId, false)
+                // re-check after releasing lock to avoid TOCTOU race
+                if (messageQueues.get(conversationSessionId)?.length) {
+                  sessionBusy.set(conversationSessionId, true)
+                  continue
+                }
+                break
+              }
               console.log(`[${name}] draining ${remaining.length} queued message(s) as new turn`)
               const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
@@ -550,7 +566,15 @@ async function main() {
           // drain remaining queued messages as new turns
           while (!wsCheckAbort()) {
             const remaining = wsCheckQueued()
-            if (remaining.length === 0) break
+            if (remaining.length === 0) {
+              sessionBusy.set(wsSessionId, false)
+              // re-check after releasing lock to avoid TOCTOU race
+              if (messageQueues.get(wsSessionId)?.length) {
+                sessionBusy.set(wsSessionId, true)
+                continue
+              }
+              break
+            }
             console.log(`[websocket] draining ${remaining.length} queued message(s) as new turn`)
             const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
