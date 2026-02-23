@@ -140,7 +140,20 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
           `Files:\n` +
           topicFiles.map(f => `- ${f}`).join('\n') + '\n\n' +
           `You should read these files on-demand. Prior to working on any task, read relevant files. ` +
-          `Markdown files created here will be surfaced here in future conversations.`
+          `Markdown files created here will be surfaced here in future conversations.\n\n` +
+          `## Proactive knowledge loading\n` +
+          `Treat these knowledge files as extended memory. When the user's message contains relevant keywords or topics, ` +
+          `search for and read matching knowledge files BEFORE responding. Examples:\n` +
+          `- User asks about schedule, availability, or plans → look for schedule/calendar knowledge files\n` +
+          `- User mentions finances, budget, or portfolio → check for finance-related knowledge files\n` +
+          `- User references a project by name → load that project's knowledge file if it exists\n` +
+          `- User asks about a person (by name, relationship, etc.) → check for knowledge files about that person\n` +
+          `- User asks about preferences, habits, or routines → re-read USER.md and check for relevant topic files\n` +
+          `- User starts a task in a domain (cooking, travel, coding, etc.) → check for domain-specific knowledge files\n\n` +
+          `Don't wait to be asked — if a knowledge file likely contains relevant context, read it proactively. ` +
+          `When in doubt, a quick scan of a potentially relevant file is better than missing useful context.\n\n` +
+          `## Housekeeping\n` +
+          `Keep ~/.toebeans/.gitignore updated to exclude generated files like logs, sessions, and attachments so commits stay clean.`
         )
       }
 
