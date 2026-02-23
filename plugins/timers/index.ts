@@ -261,15 +261,24 @@ export default function createTimersPlugin(): Plugin {
     }
 
     // detect missed fires for recurring timers
+    // only catch up if the missed occurrence was recent (within CATCHUP_WINDOW_MS),
+    // otherwise just wait for the next natural occurrence
+    const CATCHUP_WINDOW_MS = 2 * 60 * 60 * 1000 // 2 hours
     if (schedule.repeat && schedule.prev) {
       const prevTime = schedule.prev.getTime()
       const lastFiredTime = lastFired[filename] ?? 0
-      if (lastFiredTime < prevTime) {
-        console.log(`timers: missed fire detected for ${filename} (should have fired ${formatLocalTime(schedule.prev)})`)
+      const missedAge = Date.now() - prevTime
+      if (lastFiredTime < prevTime && missedAge <= CATCHUP_WINDOW_MS) {
+        console.log(`timers: missed fire detected for ${filename} (should have fired ${formatLocalTime(schedule.prev)}, ${Math.round(missedAge / 60000)}m ago)`)
         // fire after a short delay to let the server finish starting up
         const catchupTimeout = setTimeout(() => fireTimer(filename, schedule), 2000)
         scheduledTimers.set(filename, { filename, timeout: catchupTimeout, nextFire: schedule.prev })
         return
+      } else if (lastFiredTime < prevTime) {
+        console.log(`timers: skipping stale catch-up for ${filename} (missed ${formatLocalTime(schedule.prev)}, ${Math.round(missedAge / 60000)}m ago)`)
+        // update lastFired so we don't log this again on next reschedule
+        lastFired[filename] = Date.now()
+        await saveLastFired(timersDir, lastFired)
       }
     }
 

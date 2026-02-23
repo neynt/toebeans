@@ -1,5 +1,5 @@
 // nano-banana plugin for toebeans
-// generates images using google's gemini api and sends them to discord
+// generates images using google's gemini api and saves them locally
 
 import type { Plugin, Tool, ToolResult } from '../../server/types.ts'
 import { mkdir } from 'node:fs/promises'
