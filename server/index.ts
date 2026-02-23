@@ -9,6 +9,30 @@ import { AnthropicProvider } from '../llm-providers/anthropic.ts'
 import { OpenAICompatibleProvider } from '../llm-providers/openai-compatible.ts'
 import type { LlmProvider } from './llm-provider.ts'
 import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'os'
+import { join } from 'path'
+
+// set up file logging — tee all console output to ~/.toebeans/server.log
+const LOG_DIR = join(homedir(), '.toebeans')
+const LOG_PATH = join(LOG_DIR, 'server.log')
+mkdirSync(LOG_DIR, { recursive: true })
+
+function writeToLog(level: string, args: unknown[]) {
+  const timestamp = new Date().toISOString()
+  const msg = args.map(a =>
+    typeof a === 'string' ? a : (a instanceof Error ? a.stack ?? a.message : JSON.stringify(a))
+  ).join(' ')
+  appendFileSync(LOG_PATH, `${timestamp} [${level}] ${msg}\n`)
+}
+
+const origLog = console.log.bind(console)
+const origError = console.error.bind(console)
+const origWarn = console.warn.bind(console)
+
+console.log = (...args: unknown[]) => { origLog(...args); writeToLog('INFO', args) }
+console.error = (...args: unknown[]) => { origError(...args); writeToLog('ERROR', args) }
+console.warn = (...args: unknown[]) => { origWarn(...args); writeToLog('WARN', args) }
 
 interface WebSocketData {
   subscriptions: Set<string>
@@ -289,7 +313,116 @@ async function main() {
     }
   }
 
+  // per-session processing: runs agent turns and drains queued messages
+  // keyed by sessionId to prevent concurrent processing of the same session
+  const sessionProcessing = new Map<string, Promise<void>>()
+
+  async function processSession(
+    conversationSessionId: string,
+    initialContent: ContentBlock[],
+    effectiveOutputTarget: string | null,
+    route: string,
+    pluginName: string,
+  ) {
+    const outputFn: ((message: ServerMessage) => Promise<void>) | null =
+      effectiveOutputTarget ? (message) => routeOutput(effectiveOutputTarget, message) : null
+
+    // track output target for auto-resume after restart
+    if (effectiveOutputTarget) {
+      await setLastOutputTarget(effectiveOutputTarget)
+    }
+
+    try {
+      const agentOnChunk = async (chunk: ServerMessage) => {
+        broadcast(conversationSessionId, chunk)
+        if (outputFn) {
+          await outputFn(chunk)
+        }
+      }
+      const agentCheckQueued = () => {
+        const buffer = messageQueues.get(conversationSessionId) || []
+        messageQueues.set(conversationSessionId, [])
+        return buffer
+      }
+      const agentCheckAbort = () => {
+        return sessionAbort.get(conversationSessionId) || false
+      }
+
+      // create abort controller for this turn (allows /stop to cancel in-progress ops)
+      const abortController = new AbortController()
+      sessionAbortControllers.set(conversationSessionId, abortController)
+
+      await runAgentTurn(initialContent, {
+        provider,
+        system: buildSystemPrompt,
+        tools: getTools,
+        sessionId: conversationSessionId,
+        workingDir: getWorkspaceDir(),
+        onChunk: agentOnChunk,
+        checkQueuedMessages: agentCheckQueued,
+        checkAbort: agentCheckAbort,
+        abortSignal: abortController.signal,
+        outputTarget: effectiveOutputTarget || undefined,
+        ...agentLlmConfig,
+      })
+
+      // drain any remaining queued messages that arrived during a no-tool-use response
+      // (checkQueuedMessages only runs after tool calls, so these would be stranded)
+      while (!agentCheckAbort()) {
+        const remaining = agentCheckQueued()
+        if (remaining.length === 0) {
+          sessionBusy.set(conversationSessionId, false)
+          // re-check after releasing lock to avoid TOCTOU race
+          if (messageQueues.get(conversationSessionId)?.length) {
+            sessionBusy.set(conversationSessionId, true)
+            continue
+          }
+          break
+        }
+        console.log(`[${pluginName}] draining ${remaining.length} queued message(s) as new turn`)
+        const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
+
+        // fresh controller for drain turns
+        const drainController = new AbortController()
+        sessionAbortControllers.set(conversationSessionId, drainController)
+
+        await runAgentTurn(queuedContent, {
+          provider,
+          system: buildSystemPrompt,
+          tools: getTools,
+          sessionId: conversationSessionId,
+          workingDir: getWorkspaceDir(),
+          onChunk: agentOnChunk,
+          checkQueuedMessages: agentCheckQueued,
+          checkAbort: agentCheckAbort,
+          abortSignal: drainController.signal,
+          outputTarget: effectiveOutputTarget || undefined,
+          ...agentLlmConfig,
+        })
+      }
+
+      // check if session needs compaction
+      await sessionManager.checkCompaction(conversationSessionId, route)
+    } catch (err) {
+      console.error(`agent error for ${conversationSessionId}:`, err)
+      broadcast(conversationSessionId, { type: 'error', message: String(err) })
+
+      // send error output
+      if (outputFn) {
+        await outputFn({ type: 'error', message: String(err) })
+      }
+    } finally {
+      // mark session as not busy and clear abort flag
+      sessionBusy.set(conversationSessionId, false)
+      sessionAbort.set(conversationSessionId, false)
+      sessionAbortControllers.delete(conversationSessionId)
+      sessionProcessing.delete(conversationSessionId)
+    }
+  }
+
   // start consuming inputs from all loaded plugins
+  // the consumer loop never blocks on agent turns — it only routes messages
+  // to the server's messageQueues, where checkQueuedMessages picks them up
   for (const [name, loaded] of pluginManager.getAllPlugins()) {
     if (!loaded.plugin.input) continue
 
@@ -327,16 +460,12 @@ async function main() {
           const content = message.content
           if (content.length === 0) continue
 
-          // determine output function and target
           const effectiveOutputTarget = outputTarget || null
-          let outputFn: ((message: ServerMessage) => Promise<void>) | null = null
-          if (effectiveOutputTarget) {
-            outputFn = (message) => routeOutput(effectiveOutputTarget, message)
-          }
 
           // check if session is busy (agent is currently processing)
           if (sessionBusy.get(conversationSessionId)) {
-            // queue this message for delivery after current tool calls complete
+            // queue this message for delivery before the next LLM call
+            // (checkQueuedMessages in agent.ts picks these up after tool rounds)
             console.log(`[${name}] session ${conversationSessionId} busy, queuing message`)
             if (!messageQueues.has(conversationSessionId)) {
               messageQueues.set(conversationSessionId, [])
@@ -355,100 +484,12 @@ async function main() {
             continue
           }
 
-          // mark session as busy and clear any previous abort flag
+          // mark session as busy and kick off processing without blocking the consumer
           sessionBusy.set(conversationSessionId, true)
           sessionAbort.set(conversationSessionId, false)
 
-          // track output target for auto-resume after restart
-          if (effectiveOutputTarget) {
-            await setLastOutputTarget(effectiveOutputTarget)
-          }
-
-          try {
-            const agentOnChunk = async (chunk: ServerMessage) => {
-              broadcast(conversationSessionId, chunk)
-              if (outputFn) {
-                await outputFn(chunk)
-              }
-            }
-            const agentCheckQueued = () => {
-              const buffer = messageQueues.get(conversationSessionId) || []
-              messageQueues.set(conversationSessionId, [])
-              return buffer
-            }
-            const agentCheckAbort = () => {
-              return sessionAbort.get(conversationSessionId) || false
-            }
-
-            // create abort controller for this turn (allows /stop to cancel in-progress ops)
-            const abortController = new AbortController()
-            sessionAbortControllers.set(conversationSessionId, abortController)
-
-            await runAgentTurn(content, {
-              provider,
-              system: buildSystemPrompt,
-              tools: getTools,
-              sessionId: conversationSessionId,
-              workingDir: getWorkspaceDir(),
-              onChunk: agentOnChunk,
-              checkQueuedMessages: agentCheckQueued,
-              checkAbort: agentCheckAbort,
-              abortSignal: abortController.signal,
-              outputTarget: effectiveOutputTarget || undefined,
-              ...agentLlmConfig,
-            })
-
-            // drain any remaining queued messages that arrived during a no-tool-use response
-            // (checkQueuedMessages only runs after tool calls, so these would be stranded)
-            while (!agentCheckAbort()) {
-              const remaining = agentCheckQueued()
-              if (remaining.length === 0) {
-                sessionBusy.set(conversationSessionId, false)
-                // re-check after releasing lock to avoid TOCTOU race
-                if (messageQueues.get(conversationSessionId)?.length) {
-                  sessionBusy.set(conversationSessionId, true)
-                  continue
-                }
-                break
-              }
-              console.log(`[${name}] draining ${remaining.length} queued message(s) as new turn`)
-              const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
-
-              // fresh controller for drain turns
-              const drainController = new AbortController()
-              sessionAbortControllers.set(conversationSessionId, drainController)
-
-              await runAgentTurn(queuedContent, {
-                provider,
-                system: buildSystemPrompt,
-                tools: getTools,
-                sessionId: conversationSessionId,
-                workingDir: getWorkspaceDir(),
-                onChunk: agentOnChunk,
-                checkQueuedMessages: agentCheckQueued,
-                checkAbort: agentCheckAbort,
-                abortSignal: drainController.signal,
-                outputTarget: effectiveOutputTarget || undefined,
-                ...agentLlmConfig,
-              })
-            }
-
-            // check if session needs compaction
-            await sessionManager.checkCompaction(conversationSessionId, route)
-          } catch (err) {
-            console.error(`agent error for ${conversationSessionId}:`, err)
-            broadcast(conversationSessionId, { type: 'error', message: String(err) })
-
-            // send error output
-            if (outputFn) {
-              await outputFn({ type: 'error', message: String(err) })
-            }
-          } finally {
-            // mark session as not busy and clear abort flag
-            sessionBusy.set(conversationSessionId, false)
-            sessionAbort.set(conversationSessionId, false)
-            sessionAbortControllers.delete(conversationSessionId)
-          }
+          const processing = processSession(conversationSessionId, content, effectiveOutputTarget, route, name)
+          sessionProcessing.set(conversationSessionId, processing)
         }
       } catch (err) {
         console.error(`plugin input error (${name}):`, err)

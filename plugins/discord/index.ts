@@ -15,6 +15,130 @@ import http from 'http'
 
 const execAsync = promisify(exec)
 
+// --- helpers for /session enrichment ---
+
+interface ClaudeCodeMeta {
+  sessionId: string
+  task: string
+  workingDir: string
+  startedAt: string
+  pid: number
+  exitCode?: number
+  endedAt?: string
+}
+
+async function getActiveClaudeCodeSessions(): Promise<ClaudeCodeMeta[]> {
+  const dir = join(getDataDir(), 'claude-code')
+  try {
+    const files = await readdir(dir)
+    const metaFiles = files.filter(f => f.endsWith('.meta.json'))
+
+    const active: ClaudeCodeMeta[] = []
+    for (const file of metaFiles) {
+      try {
+        const meta: ClaudeCodeMeta = await Bun.file(join(dir, file)).json()
+        if (meta.endedAt) continue
+        // check if process is still alive
+        try {
+          process.kill(meta.pid, 0)
+          active.push(meta)
+        } catch {
+          // process dead, skip
+        }
+      } catch {
+        // bad meta file, skip
+      }
+    }
+    return active.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+  } catch {
+    return []
+  }
+}
+
+interface UpcomingTimer {
+  filename: string
+  nextFire: Date
+}
+
+function parseTimerSchedule(filename: string): { next: Date } | null {
+  const name = filename.replace('.md', '')
+
+  // absolute: 2024-02-05T14:30:00
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(name)) {
+    const date = new Date(name)
+    if (isNaN(date.getTime()) || date <= new Date()) return null
+    return { next: date }
+  }
+
+  const now = new Date()
+
+  // daily: daily-HH:MM
+  const dailyMatch = name.match(/^daily-(\d{2}):(\d{2})$/)
+  if (dailyMatch) {
+    const next = new Date(now)
+    next.setHours(parseInt(dailyMatch[1]!), parseInt(dailyMatch[2]!), 0, 0)
+    if (next <= now) next.setDate(next.getDate() + 1)
+    return { next }
+  }
+
+  // weekly: weekly-day-HH:MM
+  const weeklyMatch = name.match(/^weekly-(mon|tue|wed|thu|fri|sat|sun)-(\d{2}):(\d{2})$/)
+  if (weeklyMatch) {
+    const days: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+    const targetDay = days[weeklyMatch[1]!] ?? 0
+    const next = new Date(now)
+    next.setHours(parseInt(weeklyMatch[2]!), parseInt(weeklyMatch[3]!), 0, 0)
+    let daysUntil = targetDay - now.getDay()
+    if (daysUntil < 0 || (daysUntil === 0 && next <= now)) daysUntil += 7
+    next.setDate(next.getDate() + daysUntil)
+    return { next }
+  }
+
+  // hourly: hourly-MM
+  const hourlyMatch = name.match(/^hourly-(\d{2})$/)
+  if (hourlyMatch) {
+    const next = new Date(now)
+    next.setMinutes(parseInt(hourlyMatch[1]!), 0, 0)
+    if (next <= now) next.setHours(next.getHours() + 1)
+    return { next }
+  }
+
+  return null
+}
+
+async function getUpcomingTimers(limit: number = 5): Promise<UpcomingTimer[]> {
+  const dir = join(getDataDir(), 'timers')
+  try {
+    const files = await readdir(dir)
+    const timers: UpcomingTimer[] = []
+    for (const file of files) {
+      if (!file.endsWith('.md') || file.startsWith('.')) continue
+      const schedule = parseTimerSchedule(file)
+      if (schedule) {
+        timers.push({ filename: file, nextFire: schedule.next })
+      }
+    }
+    timers.sort((a, b) => a.nextFire.getTime() - b.nextFire.getTime())
+    return timers.slice(0, limit)
+  } catch {
+    return []
+  }
+}
+
+function formatTimeUntil(date: Date): string {
+  const ms = date.getTime() - Date.now()
+  if (ms < 0) return 'past'
+  const secs = Math.floor(ms / 1000)
+  const mins = Math.floor(secs / 60)
+  const hours = Math.floor(mins / 60)
+  const days = Math.floor(hours / 24)
+
+  if (days > 0) return `${days}d ${hours % 24}h`
+  if (hours > 0) return `${hours}h ${mins % 60}m`
+  if (mins > 0) return `${mins}m`
+  return `${secs}s`
+}
+
 interface DiscordConfig {
   token: string
   allowedUsers: string[]  // user IDs allowed to interact (required for safety)
@@ -123,9 +247,15 @@ async function transcribeAudio(audioPath: string, model: string = 'medium'): Pro
   const outputDir = audioPath.replace(/\/[^/]+$/, '')
   const baseCmd = `uvx whisperx "${audioPath}" --model ${model} --language en --output_format txt --output_dir "${outputDir}" --no_align --initial_prompt "${initialPrompt}"`
 
-  // try CUDA first, fall back to CPU
-  for (const device of ['cuda', 'cpu'] as const) {
-    const computeType = device === 'cuda' ? 'float16' : 'int8'
+  // detect CUDA availability, fall back to CPU
+  const devices: Array<{ device: string; computeType: string }> = []
+  try {
+    await execAsync('nvidia-smi', { timeout: 5000 })
+    devices.push({ device: 'cuda', computeType: 'float16' })
+  } catch {}
+  devices.push({ device: 'cpu', computeType: 'int8' })
+
+  for (const { device, computeType } of devices) {
     const cmd = `${baseCmd} --device ${device} --compute_type ${computeType}`
     try {
       await execAsync(cmd, {
@@ -142,8 +272,8 @@ async function transcribeAudio(audioPath: string, model: string = 'medium'): Pro
         return '(transcription failed: could not read output file)'
       }
     } catch (err) {
-      if (device === 'cuda') {
-        console.warn('Transcription: CUDA failed, falling back to CPU:', (err as Error).message?.slice(0, 100))
+      if (device !== 'cpu') {
+        console.warn(`Transcription: ${device} failed, falling back:`, (err as Error).message?.slice(0, 100))
         continue
       }
       console.error('Transcription error:', err)
@@ -198,21 +328,31 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
   const lastMessageIds = new Map<string, string>()
   // persistent typing indicators per channel
   const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+  const typingDelays = new Map<string, ReturnType<typeof setTimeout>>()
 
   const MAX_TYPING_MS = 5 * 60 * 1000 // 5 min safety cap
+  const TYPING_START_DELAY_MS = 300
 
   function startTyping(channel: TextChannel | DMChannel) {
     stopTyping(channel.id)
-    channel.sendTyping().catch(() => {})
-    const interval = setInterval(() => {
+    const delay = setTimeout(() => {
+      typingDelays.delete(channel.id)
       channel.sendTyping().catch(() => {})
-    }, 4000)
-    typingIntervals.set(channel.id, interval)
-    // safety: auto-clear after MAX_TYPING_MS
-    setTimeout(() => stopTyping(channel.id), MAX_TYPING_MS)
+      const interval = setInterval(() => {
+        channel.sendTyping().catch(() => {})
+      }, 4000)
+      typingIntervals.set(channel.id, interval)
+      setTimeout(() => stopTyping(channel.id), MAX_TYPING_MS)
+    }, TYPING_START_DELAY_MS)
+    typingDelays.set(channel.id, delay)
   }
 
   function stopTyping(channelId: string) {
+    const delay = typingDelays.get(channelId)
+    if (delay) {
+      clearTimeout(delay)
+      typingDelays.delete(channelId)
+    }
     const interval = typingIntervals.get(channelId)
     if (interval) {
       clearInterval(interval)
@@ -902,6 +1042,26 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             reply += `**Created:** ${createdStr}\n`
             reply += `**Last Activity:** ${lastActivityStr}\n`
             reply += `**Age:** ${ageMinutes} minutes`
+
+            // active claude code sessions
+            const ccSessions = await getActiveClaudeCodeSessions()
+            if (ccSessions.length > 0) {
+              reply += '\n\n🖥️ **Active Claude Code Sessions**\n'
+              for (const s of ccSessions) {
+                const mins = Math.floor((Date.now() - new Date(s.startedAt).getTime()) / 60000)
+                const task = s.task.length > 60 ? s.task.slice(0, 60) + '...' : s.task
+                reply += `\`${s.sessionId}\` (${mins}m) — ${task}\n`
+              }
+            }
+
+            // upcoming timers
+            const timers = await getUpcomingTimers(5)
+            if (timers.length > 0) {
+              reply += '\n⏰ **Upcoming Timers**\n'
+              for (const t of timers) {
+                reply += `\`${t.filename}\` — ${formatLocalTime(t.nextFire)} (in ${formatTimeUntil(t.nextFire)})\n`
+              }
+            }
 
             await interaction.editReply(reply)
           }

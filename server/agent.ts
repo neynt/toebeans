@@ -201,6 +201,19 @@ export async function runAgentTurn(
       return { messages, usage: totalUsage, aborted: true }
     }
 
+    // drain any queued user messages before the next LLM call
+    // (messages may have arrived during streaming or tool execution)
+    if (options.checkQueuedMessages) {
+      const queued = options.checkQueuedMessages()
+      if (queued.length > 0) {
+        console.log(`[agent] draining ${queued.length} queued message(s) before LLM call`)
+        const queuedContent: ContentBlock[] = queued.flatMap(q => q.content)
+        const queuedMessage: Message = { role: 'user', content: queuedContent }
+        messages.push(queuedMessage)
+        await appendMessage(sessionId, queuedMessage)
+      }
+    }
+
     // refresh tools and system prompt each iteration (for load_plugin)
     const tools = getTools()
     const system = await getSystem()
@@ -383,18 +396,7 @@ export async function runAgentTurn(
     messages.push(toolResultMessage)
     await appendMessage(sessionId, toolResultMessage)
 
-    // after all tools complete, check for queued user messages/timers
-    // and append them to conversation before the next LLM call
-    if (options.checkQueuedMessages) {
-      const queued = options.checkQueuedMessages()
-      if (queued.length > 0) {
-        console.log(`[agent] appending ${queued.length} queued message(s) after tool round`)
-        const queuedContent: ContentBlock[] = queued.flatMap(q => q.content)
-        const queuedMessage: Message = { role: 'user', content: queuedContent }
-        messages.push(queuedMessage)
-        await appendMessage(sessionId, queuedMessage)
-      }
-    }
+    // queued messages are drained at the top of the loop, right before the next LLM call
 
     // check if abort was requested
     if (options.checkAbort?.()) {

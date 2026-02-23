@@ -98,14 +98,17 @@ describe('runAgentTurn queued message handling', () => {
       ],
     ])
 
-    let queueReturned = false
+    // simulate a message arriving during tool execution (not on the first drain)
+    let checkCount = 0
     await runAgentTurn(
       [{ type: 'text', text: 'do something' }],
       makeOptions({
         provider,
         checkQueuedMessages: () => {
-          if (!queueReturned) {
-            queueReturned = true
+          checkCount++
+          // first check is at top of loop iteration 1 (before first LLM call) — nothing queued yet
+          // second check is at top of loop iteration 2 (after tool results) — message arrived during tools
+          if (checkCount === 2) {
             return [{ content: [{ type: 'text', text: 'hey, new context!' }], outputTarget: '' }]
           }
           return []
@@ -186,6 +189,8 @@ describe('runAgentTurn queued message handling', () => {
       ],
     ])
 
+    // simulate messages arriving during tool execution (not before first LLM call)
+    let checkCount = 0
     await runAgentTurn(
       [{ type: 'text', text: 'do two things' }],
       makeOptions({
@@ -200,7 +205,10 @@ describe('runAgentTurn queued message handling', () => {
           },
         }],
         checkQueuedMessages: () => {
-          // always return a queued message — should not interrupt tools
+          checkCount++
+          // skip the first drain (top of loop before first LLM call)
+          if (checkCount <= 1) return []
+          // subsequent drains simulate messages arriving during tool execution
           return [{ content: [{ type: 'text' as const, text: 'urgent update!' }], outputTarget: '' }]
         },
       }),

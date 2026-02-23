@@ -360,7 +360,7 @@ export default function createClaudeCodePlugin(): Plugin {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'The task/prompt to send to Claude Code' },
-          workingDir: { type: 'string', description: 'Working directory for the claude code process (optional)' },
+          workingDir: { type: 'string', description: 'Working directory for the claude code process (optional). Must be an absolute path — tilde (~) is NOT expanded. Example: "/home/neynt/code/toebeans", not "~/code/toebeans".' },
           worktree: { type: 'string', description: 'Branch/task name for git worktree isolation. When provided with workingDir, creates a git worktree and runs the task there. The branch is merged back on completion.' },
         },
         required: ['task'],

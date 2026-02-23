@@ -27,7 +27,7 @@ const FG_GRAY = '\x1b[90m'
 const BG_RED = '\x1b[41m'
 const BG_BLUE = '\x1b[44m'
 
-// rotating colors for session prefixes
+// rotating colors for session headers
 const SESSION_COLORS = [
   '\x1b[36m', // cyan
   '\x1b[33m', // yellow
@@ -246,9 +246,13 @@ interface SessionTailer {
 
 const tailers = new Map<string, SessionTailer>()
 let colorIndex = 0
+let lastPrintedSessionId = ''
 
-function prefixLines(text: string, prefix: string): string {
-  return text.split('\n').map(line => `${prefix} ${line}`).join('\n')
+function printSessionHeader(sessionId: string, color: string) {
+  if (lastPrintedSessionId !== sessionId) {
+    console.log(`\n${color}${BOLD}── ${sessionId} ──${RESET}`)
+    lastPrintedSessionId = sessionId
+  }
 }
 
 async function startTailing(sessionId: string, filePath: string, seed = true) {
@@ -257,7 +261,6 @@ async function startTailing(sessionId: string, filePath: string, seed = true) {
   const color = SESSION_COLORS[colorIndex % SESSION_COLORS.length]!
   colorIndex++
 
-  const prefix = `${color}${BOLD}[${sessionId}]${RESET}`
   console.log(`${DIM}── now tailing ${color}${sessionId}${RESET}${DIM} ──${RESET}`)
 
   let linesPrinted = 0
@@ -293,18 +296,20 @@ async function startTailing(sessionId: string, filePath: string, seed = true) {
             const costStr = entry.cost
               ? ` ${DIM}($${(entry.cost.inputCost + entry.cost.outputCost).toFixed(4)})${RESET}`
               : ''
-            const header = `${prefix} ${roleLabel} ${DIM}#${linesPrinted}${RESET}${costStr}`
+            printSessionHeader(sessionId, color)
+            const header = `${roleLabel} ${DIM}#${linesPrinted}${RESET}${costStr}`
             const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
-            const prefixed = prefixLines(blocks, prefix)
 
             if (linesPrinted > 0) console.log()
             console.log(header)
-            console.log(prefixed)
+            console.log(blocks)
           } else if (entry.type === 'system_prompt') {
-            console.log(`${prefix} ${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`)
+            printSessionHeader(sessionId, color)
+            console.log(`${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`)
           }
         } catch {
-          console.error(`${prefix} ${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
+          printSessionHeader(sessionId, color)
+          console.error(`${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
         }
         linesPrinted++
       }

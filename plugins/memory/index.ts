@@ -59,8 +59,9 @@ async function appendToDailyLog(content: string, sessionId: string): Promise<voi
   }
 }
 
-export default function createMemoryPlugin(serverContext?: { config?: { session?: { compactionTrimLength?: number } } }): Plugin {
+export default function createMemoryPlugin(serverContext?: { config?: { session?: { compactionTrimLength?: number; extractionPrompt?: string } } }): Plugin {
   const compactionTrimLength = serverContext?.config?.session?.compactionTrimLength ?? 200
+  const extractionPrompt = serverContext?.config?.session?.extractionPrompt ?? buildExtractionPrompt()
 
   return {
     name: 'memory',
@@ -73,7 +74,6 @@ export default function createMemoryPlugin(serverContext?: { config?: { session?
       const trimmed = trimForCompaction(messages, compactionTrimLength)
 
       // append extraction prompt
-      const extractionPrompt = buildExtractionPrompt()
       const lastMsg = trimmed[trimmed.length - 1]
       if (lastMsg?.role === 'user') {
         lastMsg.content.push({ type: 'text', text: extractionPrompt })
