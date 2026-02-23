@@ -71,6 +71,8 @@ export type ServerMessage =
   | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }
   | { type: 'done'; usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }; cost?: { session: number; turn: number } }
   | { type: 'error'; message: string }
+  | { type: 'queued'; metadata?: Record<string, unknown> }
+  | { type: 'dequeued'; metadata?: Record<string, unknown> }
 
 // Session entry types — the JSONL format
 export interface TokenUsage {

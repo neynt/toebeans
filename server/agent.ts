@@ -147,7 +147,7 @@ export interface AgentOptions {
   workingDir: string
   model: string
   onChunk?: (chunk: ServerMessage) => void
-  checkQueuedMessages?: () => { content: ContentBlock[]; outputTarget: string }[]
+  checkQueuedMessages?: () => { content: ContentBlock[]; outputTarget: string; metadata?: Record<string, unknown> }[]
   checkAbort?: () => boolean
   abortSignal?: AbortSignal
   maxToolResultChars?: number

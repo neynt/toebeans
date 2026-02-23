@@ -155,6 +155,7 @@ interface DiscordConfig {
 interface QueuedMessage {
   message: Message
   outputTarget?: string
+  metadata?: Record<string, unknown>
   stopRequested?: boolean
 }
 
@@ -320,6 +321,8 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
 
   // track buffered content per session (for sentence-based sending)
   const messageBuffers = new Map<string, string>()
+  // track queued reactions per channel: channelId -> discordMessageId (for ⏳ reaction management)
+  const queuedReactions = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them
   const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
   // lock to prevent concurrent sends per session
@@ -360,7 +363,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
     }
   }
 
-  function queueMessage(channelId: string, content: string, author: string, isDM: boolean, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []) {
+  function queueMessage(channelId: string, content: string, author: string, isDM: boolean, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = [], discordMessageId?: string) {
     const channelContext = isDM
       ? `[DM from ${author}, channel_id: ${channelId}]`
       : `[#channel ${channelId}, from ${author}]`
@@ -380,6 +383,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
         content: contentBlocks,
       },
       outputTarget: `discord:${channelId}`,
+      metadata: discordMessageId ? { discordMessageId } : undefined,
     }
     messageQueue.push(msg)
     if (resolveWaiter) {
@@ -693,6 +697,36 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             return messages[0] // return first message for tracking
           }
 
+          // handle queued/dequeued control messages (reaction management)
+          if (message.type === 'queued') {
+            const discordMessageId = (message.metadata?.discordMessageId as string) || undefined
+            if (discordMessageId) {
+              try {
+                const msg = await textChannel.messages.fetch(discordMessageId)
+                await msg.react('⏳')
+                queuedReactions.set(channelId, discordMessageId)
+              } catch (err) {
+                console.error('discord: failed to add ⏳ reaction:', err)
+              }
+            }
+            return
+          }
+
+          if (message.type === 'dequeued') {
+            const discordMessageId = (message.metadata?.discordMessageId as string) || queuedReactions.get(channelId)
+            if (discordMessageId) {
+              try {
+                const msg = await textChannel.messages.fetch(discordMessageId)
+                const botReaction = msg.reactions.cache.get('⏳')
+                if (botReaction) await botReaction.users.remove(client!.user!.id)
+              } catch (err) {
+                console.error('discord: failed to remove ⏳ reaction:', err)
+              }
+              queuedReactions.delete(channelId)
+            }
+            return
+          }
+
           // handle different message types
           if (message.type === 'text') {
             // accumulate text in buffer
@@ -819,6 +853,16 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             messageBuffers.delete(sessionId)
             sendLocks.delete(sessionId)
             stopTyping(channelId)
+            // clean up any stale queued reactions for this channel
+            const staleReactionMsgId = queuedReactions.get(channelId)
+            if (staleReactionMsgId) {
+              try {
+                const staleMsg = await textChannel.messages.fetch(staleReactionMsgId)
+                const botReaction = staleMsg.reactions.cache.get('⏳')
+                if (botReaction) await botReaction.users.remove(client!.user!.id)
+              } catch {}
+              queuedReactions.delete(channelId)
+            }
           } else if (message.type === 'error') {
             // send error message
             await textChannel.send(`❌ Error: ${message.message}`)
@@ -974,7 +1018,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
         // track last message ID for this channel (enables "last" shorthand in discord_react)
         lastMessageIds.set(msg.channelId, msg.id)
 
-        queueMessage(msg.channelId, content, msg.author.username, isDM, images)
+        queueMessage(msg.channelId, content, msg.author.username, isDM, images, msg.id)
       })
 
       client.on(Events.ClientReady, async () => {

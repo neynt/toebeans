@@ -45,6 +45,7 @@ const sessionSubscribers = new Map<string, Set<ServerWebSocket<WebSocketData>>>(
 interface QueuedMessage {
   content: ContentBlock[]
   outputTarget: string
+  metadata?: Record<string, unknown>
 }
 const messageQueues = new Map<string, QueuedMessage[]>()
 const sessionBusy = new Map<string, boolean>()
@@ -238,6 +239,13 @@ async function main() {
           const resumeCheckQueued = () => {
             const buffer = messageQueues.get(sessionId) || []
             messageQueues.set(sessionId, [])
+            // send dequeued notifications for each message being consumed
+            for (const queued of buffer) {
+              if (queued.outputTarget && queued.metadata) {
+                routeOutput(queued.outputTarget, { type: 'dequeued', metadata: queued.metadata })
+                  .catch(() => {})
+              }
+            }
             return buffer
           }
           const resumeCheckAbort = () => {
@@ -342,6 +350,13 @@ async function main() {
       const agentCheckQueued = () => {
         const buffer = messageQueues.get(conversationSessionId) || []
         messageQueues.set(conversationSessionId, [])
+        // send dequeued notifications for each message being consumed
+        for (const queued of buffer) {
+          if (queued.outputTarget && queued.metadata) {
+            routeOutput(queued.outputTarget, { type: 'dequeued', metadata: queued.metadata })
+              .catch(() => {})
+          }
+        }
         return buffer
       }
       const agentCheckAbort = () => {
@@ -431,7 +446,7 @@ async function main() {
       try {
         console.log(`[server] entering input loop for plugin: ${name}`)
         for await (const queuedMsg of loaded.plugin.input!) {
-          const { message, outputTarget } = queuedMsg as any
+          const { message, outputTarget, metadata } = queuedMsg as any
           // route = outputTarget (e.g. "discord:1466679760976609393")
           // this ensures each channel/DM/source gets its own session
           const route = outputTarget || name
@@ -473,12 +488,12 @@ async function main() {
             messageQueues.get(conversationSessionId)!.push({
               content,
               outputTarget: effectiveOutputTarget || '',
+              metadata,
             })
 
-            // notify the sender that their message will be injected
+            // notify the sender that their message has been queued
             if (effectiveOutputTarget) {
-              routeOutput(effectiveOutputTarget, { type: 'text', text: '(queued)' })
-                .then(() => routeOutput(effectiveOutputTarget, { type: 'text_block_end' }))
+              routeOutput(effectiveOutputTarget, { type: 'queued', metadata })
                 .catch(() => {}) // best-effort notification
             }
             continue
@@ -565,8 +580,7 @@ async function main() {
             outputTarget: '',
           })
           // notify via websocket broadcast
-          broadcast(wsSessionId, { type: 'text', text: '(queued)' })
-          broadcast(wsSessionId, { type: 'text_block_end' })
+          broadcast(wsSessionId, { type: 'queued' })
           break
         }
 
