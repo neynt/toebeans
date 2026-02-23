@@ -263,7 +263,7 @@ export default function createTimersPlugin(): Plugin {
     // detect missed fires for recurring timers
     // only catch up if the missed occurrence was recent (within CATCHUP_WINDOW_MS),
     // otherwise just wait for the next natural occurrence
-    const CATCHUP_WINDOW_MS = 2 * 60 * 60 * 1000 // 2 hours
+    const CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000 // 24 hours
     if (schedule.repeat && schedule.prev) {
       const prevTime = schedule.prev.getTime()
       const lastFiredTime = lastFired[filename] ?? 0
