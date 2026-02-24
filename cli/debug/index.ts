@@ -8,6 +8,7 @@ if (!command) {
 commands:
   print-llm-query <session-id>   show the raw LLM query for a session
   print-system                   show the system prompt
+  print-tools                    show all available tools by plugin
   list-sessions                  list available sessions
   analyze-system-prompt          token breakdown of the system prompt
   tail-session <session-id>      pretty-print session and tail for updates
@@ -24,6 +25,11 @@ switch (command) {
   }
   case 'print-system': {
     const mod = await import('./print-system.ts')
+    await mod.default()
+    break
+  }
+  case 'print-tools': {
+    const mod = await import('./print-tools.ts')
     await mod.default()
     break
   }
