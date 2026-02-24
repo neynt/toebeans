@@ -728,6 +728,23 @@ async function main() {
         })
       }
 
+      // debug endpoint: GET /debug/tools (grouped by plugin)
+      if (url.pathname === '/debug/tools') {
+        const grouped: Record<string, { name: string; description: string; input_schema: Record<string, unknown> }[]> = {}
+        for (const [pluginName, loaded] of pluginManager.getAllPlugins()) {
+          if (loaded.plugin.tools?.length) {
+            grouped[pluginName] = loaded.plugin.tools.map(t => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.inputSchema,
+            }))
+          }
+        }
+        return new Response(JSON.stringify(grouped, null, 2), {
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
       // debug endpoint: GET /debug/:sessionId
       const debugMatch = url.pathname.match(/^\/debug\/(.+)$/)
       if (debugMatch) {
