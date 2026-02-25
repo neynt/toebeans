@@ -346,13 +346,6 @@ export default function create(serverContext?: any) {
 
   // --- whisper transcription ---
 
-  // per-call debug directory for saving WAVs
-  function callDebugDir(callControlId: string): string {
-    // sanitize call ID for filesystem (replace colons etc.)
-    const safe = callControlId.replace(/[^a-zA-Z0-9_-]/g, '_')
-    return `/tmp/telnyx-voice/calls/${safe}`
-  }
-
   async function transcribeAudio(audioBuffer: Buffer, call: ActiveCall): Promise<string> {
     // skip chunks shorter than 0.5s — too short for useful transcription
     // at 8kHz 16-bit mono: 0.5s = 8000 bytes; at 16kHz: 16000 bytes
@@ -379,115 +372,33 @@ export default function create(serverContext?: any) {
     }
     console.log(`telnyx-voice: audio stats: ${audioBuffer.length} bytes, ${durationSec.toFixed(2)}s, encoding=${encoding}, rate=${sampleRate}Hz, rms=${rms.toFixed(0)}`)
 
-    // write audio to temp file, run whisper
-    const { mkdir } = await import('node:fs/promises')
-    const debugDir = callDebugDir(call.callControlId)
-    await mkdir(debugDir, { recursive: true })
-
-    const timestamp = Date.now()
-
-    // write raw PCM to WAV file for whisper
-    const wavPath = `${debugDir}/chunk-${timestamp}.wav`
-    const wavBuffer = createWavBuffer(audioBuffer, sampleRate, encoding)
-    // log first few samples of the WAV data section for diagnostics
-    if (wavBuffer.length >= 48) {
-      const s0 = wavBuffer.readInt16LE(44)
-      const s1 = wavBuffer.readInt16LE(46)
-      console.log(`telnyx-voice: WAV data first samples: ${s0}, ${s1} (hex: ${wavBuffer.subarray(44, 52).toString('hex')})`)
-    }
-    await Bun.write(wavPath, wavBuffer)
-
     try {
-      // use whisperx for transcription (same as discord plugin)
-      const initialPrompt = 'commit, push, pull, git, merge, rebase, branch, repo, deploy, API, endpoint, TypeScript, JavaScript, Python, npm, Docker, Kubernetes, Claude, LLM'
-      const outputDir = `${debugDir}/whisperx-out`
-      await mkdir(outputDir, { recursive: true })
-      const baseArgs = [
-        'uvx', 'whisperx', wavPath,
-        '--model', 'large-v3',
-        '--language', 'en',
-        '--output_format', 'txt',
-        '--output_dir', outputDir,
-        '--no_align',
-        '--initial_prompt', initialPrompt,
-      ]
+      await ensureWhisperServer()
 
-      // detect CUDA availability — nvidia-smi can exit 0 even with broken driver
-      let hasCuda = false
-      try {
-        const nvProc = Bun.spawn(['nvidia-smi'], { stdout: 'pipe', stderr: 'pipe' })
-        const nvExit = await nvProc.exited
-        const nvOut = await new Response(nvProc.stdout).text()
-        hasCuda = nvExit === 0 && !nvOut.toLowerCase().includes('failed')
-      } catch {}
+      // build WAV in memory and POST to whisper server
+      const wavBuffer = createWavBuffer(audioBuffer, sampleRate, encoding)
 
-      const devices = [
-        ...(hasCuda ? [{ device: 'cuda', computeType: 'float16' }] : []),
-        { device: 'cpu', computeType: 'int8' },
-      ]
+      const { status, data } = await unixRequest(
+        WHISPER_SOCKET_PATH,
+        'POST',
+        '/transcribe',
+        wavBuffer,
+        'audio/wav',
+      )
 
-      let allFailed = true
-      for (const { device, computeType } of devices) {
-        const args = [...baseArgs, '--device', device, '--compute_type', computeType]
-        console.log(`telnyx-voice: running whisperx: ${args.join(' ')}`)
-        const proc = Bun.spawn(args, {
-            env: { ...process.env, CUDA_VISIBLE_DEVICES: '0' },
-            stdout: 'pipe',
-            stderr: 'pipe',
-          }
-        )
-        // consume BOTH stdout and stderr to prevent pipe buffer deadlock
-        const [exitCode, stdout, stderr] = await Promise.all([
-          proc.exited,
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ])
-        console.log(`telnyx-voice: whisper[${device}] exit=${exitCode}`)
-        if (stdout.trim()) {
-          console.log(`telnyx-voice: whisper[${device}] stdout: ${stdout.trim().slice(-500)}`)
-        }
-        if (stderr.trim()) {
-          // log all stderr, not just filtered lines — the filtering was hiding errors
-          console.log(`telnyx-voice: whisper[${device}] stderr: ${stderr.trim().slice(-1000)}`)
-        }
-        if (exitCode === 0) {
-          allFailed = false
-          break
-        }
-        if (device === 'cpu') {
-          console.error(`telnyx-voice: whisper CPU failed (${exitCode}), no more devices to try`)
-        }
+      if (status !== 200) {
+        console.error(`telnyx-voice: whisper server error: ${status} ${data.toString()}`)
+        return ''
       }
 
-      const txtPath = `${outputDir}/chunk-${timestamp}.txt`
-      let transcription = ''
+      const result = JSON.parse(data.toString()) as { text: string; language: string; duration: number }
+      const transcription = result.text.trim()
 
-      // list what whisperx actually produced in the output dir
-      const { readdir, unlink } = await import('node:fs/promises')
-      try {
-        const files = await readdir(outputDir)
-        console.log(`telnyx-voice: whisperx output dir contents: [${files.join(', ')}]`)
-      } catch (e) {
-        console.log(`telnyx-voice: could not list output dir: ${e}`)
-      }
-
-      try {
-        transcription = (await Bun.file(txtPath).text()).trim()
-      } catch {
-        console.log(`telnyx-voice: expected output file missing: ${txtPath}`)
-      }
-
-      // log outcome — WAV is kept in debug dir for inspection regardless
-      if (allFailed) {
-        console.log(`telnyx-voice: whisper failed, debug WAV at ${wavPath}`)
-      } else if (!transcription) {
-        console.log(`telnyx-voice: empty transcription (VAD filtered?), debug WAV at ${wavPath}`)
+      if (!transcription) {
+        console.log('telnyx-voice: empty transcription from whisper server')
       } else {
-        console.log(`telnyx-voice: whisperx result: "${transcription}"`)
+        console.log(`telnyx-voice: whisper result: "${transcription}"`)
       }
-
-      // cleanup whisperx output (txt), but keep the WAV
-      try { await unlink(txtPath) } catch {}
 
       return transcription
     } catch (err) {
@@ -592,9 +503,85 @@ export default function create(serverContext?: any) {
     return out
   }
 
-  // --- TTS server management ---
+  // --- whisper server management ---
 
   const TOEBEANS_DIR = join(homedir(), '.toebeans')
+  const WHISPER_SOCKET_PATH = join(TOEBEANS_DIR, 'whisper.sock')
+  const WHISPER_PIDFILE_PATH = join(TOEBEANS_DIR, 'whisper.pid')
+  const WHISPER_SERVER_SCRIPT = join(import.meta.dir, 'whisper-server.py')
+  let whisperServerProcess: ChildProcess | null = null
+  let whisperServerReady = false
+
+  async function isWhisperServerReady(): Promise<boolean> {
+    try {
+      const { status } = await unixRequest(WHISPER_SOCKET_PATH, 'GET', '/health')
+      return status === 200
+    } catch {
+      return false
+    }
+  }
+
+  async function ensureWhisperServer(): Promise<void> {
+    if (whisperServerReady && await isWhisperServerReady()) return
+
+    // check if an existing server is alive
+    try {
+      const pidContent = await Bun.file(WHISPER_PIDFILE_PATH).text()
+      const pid = parseInt(pidContent.trim(), 10)
+      if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+        if (await isWhisperServerReady()) {
+          whisperServerReady = true
+          return
+        }
+      }
+    } catch {}
+
+    // clean up stale files and spawn fresh
+    const { unlink: unlinkFile } = await import('node:fs/promises')
+    for (const path of [WHISPER_SOCKET_PATH, WHISPER_PIDFILE_PATH]) {
+      try { await unlinkFile(path) } catch {}
+    }
+
+    console.log('telnyx-voice: spawning whisper server...')
+    whisperServerProcess = spawn('python3', [
+      WHISPER_SERVER_SCRIPT,
+      '--socket', WHISPER_SOCKET_PATH,
+      '--pidfile', WHISPER_PIDFILE_PATH,
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+    whisperServerProcess.unref()
+
+    whisperServerProcess.stdout?.on('data', (data: Buffer) => {
+      console.log(`telnyx-voice/whisper-server: ${data.toString().trim()}`)
+    })
+    whisperServerProcess.stderr?.on('data', (data: Buffer) => {
+      console.error(`telnyx-voice/whisper-server: ${data.toString().trim()}`)
+    })
+    whisperServerProcess.on('exit', (code: number | null) => {
+      console.log(`telnyx-voice/whisper-server exited with code ${code}`)
+      whisperServerReady = false
+      whisperServerProcess = null
+    })
+
+    // wait for server to respond (model loading can take a while)
+    const timeout = 120_000
+    const start = Date.now()
+    while (Date.now() - start < timeout) {
+      if (await isWhisperServerReady()) {
+        whisperServerReady = true
+        console.log('telnyx-voice: whisper server is ready!')
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+
+    throw new Error('telnyx-voice: whisper server did not start within 120s')
+  }
+
+  // --- TTS server management ---
+
   const TTS_SOCKET_PATH = join(TOEBEANS_DIR, 'tts.sock')
   const TTS_PIDFILE_PATH = join(TOEBEANS_DIR, 'tts.pid')
   const TTS_PLUGIN_DIR = join(TOEBEANS_DIR, 'plugins', 'tts')
@@ -605,14 +592,20 @@ export default function create(serverContext?: any) {
     socketPath: string,
     method: string,
     path: string,
-    body?: string,
+    body?: string | Buffer,
+    contentType?: string,
   ): Promise<{ status: number; data: Buffer }> {
     return new Promise((resolve, reject) => {
+      const headers: Record<string, string | number> = {}
+      if (body) {
+        headers['Content-Type'] = contentType || 'application/json'
+        headers['Content-Length'] = typeof body === 'string' ? Buffer.byteLength(body) : body.length
+      }
       const options: http.RequestOptions = {
         socketPath,
         method,
         path,
-        headers: body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : undefined,
+        headers: body ? headers : undefined,
       }
       const req = http.request(options, (res) => {
         const chunks: Buffer[] = []
@@ -1334,6 +1327,11 @@ export default function create(serverContext?: any) {
 
       // start silence checker
       startSilenceChecker()
+
+      // start whisper server in the background (don't block init)
+      ensureWhisperServer().catch(err => {
+        console.error('telnyx-voice: failed to start whisper server:', err)
+      })
     },
 
     async destroy() {
@@ -1354,6 +1352,13 @@ export default function create(serverContext?: any) {
       mediaWsServer?.stop()
       webhookServer = null
       mediaWsServer = null
+
+      // stop whisper server
+      if (whisperServerProcess) {
+        whisperServerProcess.kill()
+        whisperServerProcess = null
+        whisperServerReady = false
+      }
     },
   }
 }
