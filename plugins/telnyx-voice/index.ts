@@ -21,6 +21,7 @@ import { join } from 'path'
 
 interface TelnyxVoiceConfig {
   apiKey: string                    // telnyx API key (v2)
+  connectionId?: string             // telnyx connection ID (SIP/credential) for outbound calls
   phoneNumber?: string              // telnyx phone number (for outbound calls)
   webhookPort?: number              // port for telnyx webhooks (default: 8089)
   mediaWsPort?: number              // port for media websocket (default: 8090)
@@ -204,6 +205,60 @@ export default function create(serverContext?: any) {
     } catch (err) {
       console.error(`telnyx-voice: hangup failed:`, err)
     }
+  }
+
+  async function createOutboundCall(to: string): Promise<string> {
+    if (!config!.connectionId) {
+      throw new Error('connectionId not configured — required for outbound calls')
+    }
+    if (!config!.phoneNumber) {
+      throw new Error('phoneNumber not configured — required as caller ID for outbound calls')
+    }
+    if (!config!.publicHost) {
+      throw new Error('publicHost not configured — required for media streaming')
+    }
+
+    const codec = config!.streamBidirectionalCodec || 'L16'
+    const streamUrl = `wss://${config!.publicHost}/media`
+
+    const res = await telnyxApi('POST', '/calls', {
+      connection_id: config!.connectionId,
+      to,
+      from: config!.phoneNumber,
+      stream_url: streamUrl,
+      stream_track: 'inbound_track',
+      stream_bidirectional_mode: 'rtp',
+      stream_bidirectional_codec: codec,
+    })
+
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`telnyx API error ${res.status}: ${err}`)
+    }
+
+    const body = await res.json() as { data: { call_control_id: string; call_leg_id: string; call_session_id: string } }
+    const callControlId = body.data.call_control_id
+    console.log(`telnyx-voice: outbound call created to ${to}, call_control_id=${callControlId}`)
+
+    // pre-register in activeCalls so webhook events find it
+    activeCalls.set(callControlId, {
+      callControlId,
+      streamId: null,
+      from: config!.phoneNumber!,
+      to,
+      ws: null,
+      mediaFormat: null,
+      audioChunks: [],
+      audioStartTime: null,
+      lastAudioTime: 0,
+      silenceStart: null,
+      isProcessing: false,
+      pendingAudio: [],
+      abortController: null,
+      textBuffer: '',
+    })
+
+    return callControlId
   }
 
   // --- voice activity detection ---
@@ -878,12 +933,36 @@ export default function create(serverContext?: any) {
             textBuffer: '',
           })
           await answerCall(callControlId)
+        } else if (payload.direction === 'outgoing') {
+          // outbound call — already registered by createOutboundCall, just log
+          console.log(`telnyx-voice: outbound call initiated to ${payload.to}`)
+          if (!activeCalls.has(callControlId)) {
+            // shouldn't happen, but handle race condition
+            activeCalls.set(callControlId, {
+              callControlId,
+              streamId: null,
+              from: payload.from,
+              to: payload.to,
+              ws: null,
+              mediaFormat: null,
+              audioChunks: [],
+              audioStartTime: null,
+              lastAudioTime: 0,
+              silenceStart: null,
+              isProcessing: false,
+              pendingAudio: [],
+              abortController: null,
+              textBuffer: '',
+            })
+          }
         }
         break
       }
 
       case 'call.answered': {
         console.log(`telnyx-voice: call answered ${callControlId}`)
+        // for outbound calls, the media stream is set up at call creation time
+        // via stream_url, so no extra action needed here
         break
       }
 
@@ -1104,11 +1183,36 @@ export default function create(serverContext?: any) {
     description: [
       'Real-time phone conversation via Telnyx voice API.',
       'When receiving phone calls, user speech is transcribed and sent as messages prefixed with [phone call from <number>].',
+      'You can also make outbound calls using the phone_call tool.',
       'Your text responses are automatically converted to speech and played back to the caller.',
       'Keep voice responses concise and conversational — the caller hears them spoken aloud.',
     ].join(' '),
 
     tools: [
+      {
+        name: 'phone_call',
+        description: 'Make an outbound phone call. The call will be connected to your voice conversation just like incoming calls.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            to: { type: 'string', description: 'Phone number to call (E.164 format, e.g. +15551234567)' },
+            purpose: { type: 'string', description: 'Brief context about why you are making this call (for your own reference)' },
+          },
+          required: ['to'],
+        },
+        async execute(input: unknown) {
+          const { to, purpose } = input as { to: string; purpose?: string }
+          try {
+            const callControlId = await createOutboundCall(to)
+            const msg = purpose
+              ? `calling ${to} (${purpose}), call_control_id: ${callControlId}`
+              : `calling ${to}, call_control_id: ${callControlId}`
+            return { content: msg }
+          } catch (err: any) {
+            return { content: `failed to place call: ${err.message}`, is_error: true }
+          }
+        },
+      },
       {
         name: 'phone_hangup',
         description: 'Hang up an active phone call.',
