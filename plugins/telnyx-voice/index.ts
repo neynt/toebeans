@@ -543,7 +543,8 @@ export default function create(serverContext?: any) {
     }
 
     console.log('telnyx-voice: spawning whisper server...')
-    whisperServerProcess = spawn('python3', [
+    const WHISPER_VENV_PYTHON = join(homedir(), '.toebeans', 'venvs', 'telnyx-voice', 'bin', 'python3')
+    whisperServerProcess = spawn(WHISPER_VENV_PYTHON, [
       WHISPER_SERVER_SCRIPT,
       '--socket', WHISPER_SOCKET_PATH,
       '--pidfile', WHISPER_PIDFILE_PATH,
