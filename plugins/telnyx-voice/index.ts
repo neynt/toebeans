@@ -14,10 +14,7 @@
 //   outgoing: { event: 'media', media: { payload: '<base64 audio>' } }
 
 import type { ServerWebSocket } from 'bun'
-import { spawn, type ChildProcess } from 'node:child_process'
-import * as http from 'node:http'
-import { homedir } from 'os'
-import { join } from 'path'
+import { transcribe, ensureWhisperServer, stopWhisperServer, speak, stopTtsServer, type TtsOptions } from '../../server/services/index.ts'
 
 interface TelnyxVoiceConfig {
   apiKey: string                    // telnyx API key (v2)
@@ -373,26 +370,9 @@ export default function create(serverContext?: any) {
     console.log(`telnyx-voice: audio stats: ${audioBuffer.length} bytes, ${durationSec.toFixed(2)}s, encoding=${encoding}, rate=${sampleRate}Hz, rms=${rms.toFixed(0)}`)
 
     try {
-      await ensureWhisperServer()
-
-      // build WAV in memory and POST to whisper server
+      // build WAV in memory and send to shared whisper service
       const wavBuffer = createWavBuffer(audioBuffer, sampleRate, encoding)
-
-      const { status, data } = await unixRequest(
-        WHISPER_SOCKET_PATH,
-        'POST',
-        '/transcribe',
-        wavBuffer,
-        'audio/wav',
-      )
-
-      if (status !== 200) {
-        console.error(`telnyx-voice: whisper server error: ${status} ${data.toString()}`)
-        return ''
-      }
-
-      const result = JSON.parse(data.toString()) as { text: string; language: string; duration: number }
-      const transcription = result.text.trim()
+      const transcription = await transcribe(wavBuffer)
 
       if (!transcription) {
         console.log('telnyx-voice: empty transcription from whisper server')
@@ -503,204 +483,6 @@ export default function create(serverContext?: any) {
     return out
   }
 
-  // --- whisper server management ---
-
-  const TOEBEANS_DIR = join(homedir(), '.toebeans')
-  const WHISPER_SOCKET_PATH = join(TOEBEANS_DIR, 'whisper.sock')
-  const WHISPER_PIDFILE_PATH = join(TOEBEANS_DIR, 'whisper.pid')
-  const WHISPER_SERVER_SCRIPT = join(import.meta.dir, 'whisper-server.py')
-  let whisperServerProcess: ChildProcess | null = null
-  let whisperServerReady = false
-
-  async function isWhisperServerReady(): Promise<boolean> {
-    try {
-      const { status } = await unixRequest(WHISPER_SOCKET_PATH, 'GET', '/health')
-      return status === 200
-    } catch {
-      return false
-    }
-  }
-
-  async function ensureWhisperServer(): Promise<void> {
-    if (whisperServerReady && await isWhisperServerReady()) return
-
-    // check if an existing server is alive
-    try {
-      const pidContent = await Bun.file(WHISPER_PIDFILE_PATH).text()
-      const pid = parseInt(pidContent.trim(), 10)
-      if (!Number.isNaN(pid) && isProcessAlive(pid)) {
-        if (await isWhisperServerReady()) {
-          whisperServerReady = true
-          return
-        }
-      }
-    } catch {}
-
-    // clean up stale files and spawn fresh
-    const { unlink: unlinkFile } = await import('node:fs/promises')
-    for (const path of [WHISPER_SOCKET_PATH, WHISPER_PIDFILE_PATH]) {
-      try { await unlinkFile(path) } catch {}
-    }
-
-    console.log('telnyx-voice: spawning whisper server...')
-    const WHISPER_VENV_PYTHON = join(homedir(), '.toebeans', 'venvs', 'telnyx-voice', 'bin', 'python3')
-    whisperServerProcess = spawn(WHISPER_VENV_PYTHON, [
-      WHISPER_SERVER_SCRIPT,
-      '--socket', WHISPER_SOCKET_PATH,
-      '--pidfile', WHISPER_PIDFILE_PATH,
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    })
-    whisperServerProcess.unref()
-
-    whisperServerProcess.stdout?.on('data', (data: Buffer) => {
-      console.log(`telnyx-voice/whisper-server: ${data.toString().trim()}`)
-    })
-    whisperServerProcess.stderr?.on('data', (data: Buffer) => {
-      console.error(`telnyx-voice/whisper-server: ${data.toString().trim()}`)
-    })
-    whisperServerProcess.on('exit', (code: number | null) => {
-      console.log(`telnyx-voice/whisper-server exited with code ${code}`)
-      whisperServerReady = false
-      whisperServerProcess = null
-    })
-
-    // wait for server to respond (model loading can take a while)
-    const timeout = 120_000
-    const start = Date.now()
-    while (Date.now() - start < timeout) {
-      if (await isWhisperServerReady()) {
-        whisperServerReady = true
-        console.log('telnyx-voice: whisper server is ready!')
-        return
-      }
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-
-    throw new Error('telnyx-voice: whisper server did not start within 120s')
-  }
-
-  // --- TTS server management ---
-
-  const TTS_SOCKET_PATH = join(TOEBEANS_DIR, 'tts.sock')
-  const TTS_PIDFILE_PATH = join(TOEBEANS_DIR, 'tts.pid')
-  const TTS_PLUGIN_DIR = join(TOEBEANS_DIR, 'plugins', 'tts')
-  let ttsServerProcess: ChildProcess | null = null
-  let ttsServerReady = false
-
-  function unixRequest(
-    socketPath: string,
-    method: string,
-    path: string,
-    body?: string | Buffer,
-    contentType?: string,
-  ): Promise<{ status: number; data: Buffer }> {
-    return new Promise((resolve, reject) => {
-      const headers: Record<string, string | number> = {}
-      if (body) {
-        headers['Content-Type'] = contentType || 'application/json'
-        headers['Content-Length'] = typeof body === 'string' ? Buffer.byteLength(body) : body.length
-      }
-      const options: http.RequestOptions = {
-        socketPath,
-        method,
-        path,
-        headers: body ? headers : undefined,
-      }
-      const req = http.request(options, (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, data: Buffer.concat(chunks) }))
-      })
-      req.on('error', reject)
-      if (body) req.write(body)
-      req.end()
-    })
-  }
-
-  async function isTtsServerReady(): Promise<boolean> {
-    try {
-      const { status } = await unixRequest(TTS_SOCKET_PATH, 'GET', '/health')
-      return status === 200
-    } catch {
-      return false
-    }
-  }
-
-  function isProcessAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  async function ensureTtsServer(): Promise<void> {
-    if (ttsServerReady && await isTtsServerReady()) return
-
-    // check if an existing server is alive (may have been started by the tts plugin)
-    try {
-      const pidContent = await Bun.file(TTS_PIDFILE_PATH).text()
-      const pid = parseInt(pidContent.trim(), 10)
-      if (!Number.isNaN(pid) && isProcessAlive(pid)) {
-        if (await isTtsServerReady()) {
-          ttsServerReady = true
-          return
-        }
-      }
-    } catch {}
-
-    // clean up stale files and spawn fresh
-    const { unlink } = await import('node:fs/promises')
-    for (const path of [TTS_SOCKET_PATH, TTS_PIDFILE_PATH]) {
-      try { await unlink(path) } catch {}
-    }
-
-    console.log('telnyx-voice: spawning TTS server...')
-    const startScript = join(TTS_PLUGIN_DIR, 'start.sh')
-
-    const env: Record<string, string> = { ...process.env as Record<string, string> }
-    if (config?.voiceInstruct) {
-      env.VOICE_INSTRUCT = config.voiceInstruct
-    }
-
-    ttsServerProcess = spawn(startScript, ['--socket', TTS_SOCKET_PATH, '--pidfile', TTS_PIDFILE_PATH], {
-      cwd: TTS_PLUGIN_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-      env,
-    })
-    ttsServerProcess.unref()
-
-    ttsServerProcess.stdout?.on('data', (data: Buffer) => {
-      console.log(`telnyx-voice/tts-server: ${data.toString().trim()}`)
-    })
-    ttsServerProcess.stderr?.on('data', (data: Buffer) => {
-      console.error(`telnyx-voice/tts-server: ${data.toString().trim()}`)
-    })
-    ttsServerProcess.on('exit', (code: number | null) => {
-      console.log(`telnyx-voice/tts-server exited with code ${code}`)
-      ttsServerReady = false
-      ttsServerProcess = null
-    })
-
-    // wait for server to respond
-    const timeout = 120_000
-    const start = Date.now()
-    while (Date.now() - start < timeout) {
-      if (await isTtsServerReady()) {
-        ttsServerReady = true
-        console.log('telnyx-voice: TTS server is ready!')
-        return
-      }
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-
-    throw new Error('telnyx-voice: TTS server did not start within 120s')
-  }
-
   // --- TTS output: generate speech and send back through telnyx websocket ---
 
   async function sendTtsToCall(text: string, call: ActiveCall) {
@@ -710,28 +492,13 @@ export default function create(serverContext?: any) {
     }
 
     try {
-      const socketPath = config!.ttsSocketPath || TTS_SOCKET_PATH
-      await ensureTtsServer()
-
-      const requestBody: { text: string; language: string; instruct?: string } = {
-        text,
+      const ttsOpts: TtsOptions = {
         language: 'english',
-      }
-      if (config!.voiceInstruct) {
-        requestBody.instruct = config!.voiceInstruct
-      }
-
-      const ttsResponse = await unixRequest(socketPath, 'POST', '/tts', JSON.stringify(requestBody))
-
-      if (ttsResponse.status !== 200) {
-        console.error(`telnyx-voice: TTS error: ${ttsResponse.status}`)
-        return
+        voiceInstruct: config?.voiceInstruct,
+        instruct: config?.voiceInstruct,
       }
 
-      // ttsResponse.data is a WAV file
-      // we need to extract PCM data, resample to the call's sample rate,
-      // and send as base64 chunks through the websocket
-      const wavData = ttsResponse.data
+      const wavData = await speak(text, ttsOpts)
       const pcmData = extractPcmFromWav(wavData)
 
       if (!pcmData) {
@@ -1354,12 +1121,9 @@ export default function create(serverContext?: any) {
       webhookServer = null
       mediaWsServer = null
 
-      // stop whisper server
-      if (whisperServerProcess) {
-        whisperServerProcess.kill()
-        whisperServerProcess = null
-        whisperServerReady = false
-      }
+      // stop shared services (no-op if another plugin is still using them)
+      stopWhisperServer()
+      stopTtsServer()
     },
   }
 }

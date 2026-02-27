@@ -1,8 +1,6 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { Tool, ToolResult, Message, ServerMessage } from '../../server/types.ts'
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import { writeFile, mkdir, unlink } from 'fs/promises'
 import { join } from 'path'
 import { readdir, stat } from 'fs/promises'
@@ -10,10 +8,9 @@ import { getDataDir } from '../../server/session.ts'
 import { countTokens } from '../../server/tokens.ts'
 import { countToolResultTokens } from '../../server/tokens.ts'
 import { formatLocalTime } from '../../server/time.ts'
+import { transcribe } from '../../server/services/index.ts'
 import https from 'https'
 import http from 'http'
-
-const execAsync = promisify(exec)
 
 // --- helpers for /session enrichment ---
 
@@ -242,46 +239,30 @@ async function downloadImageAsBase64(url: string): Promise<{ media_type: 'image/
   }
 }
 
-async function transcribeAudio(audioPath: string, model: string = 'medium'): Promise<string> {
-  const initialPrompt = 'commit, push, pull, git, merge, rebase, branch, repo, deploy, API, endpoint, TypeScript, JavaScript, Python, npm, Docker, Kubernetes, Claude, LLM'
-  // output_dir must be explicit since whisperx defaults to cwd
-  const outputDir = audioPath.replace(/\/[^/]+$/, '')
-  const baseCmd = `uvx whisperx "${audioPath}" --model ${model} --language en --output_format txt --output_dir "${outputDir}" --no_align --initial_prompt "${initialPrompt}"`
-
-  // detect CUDA availability, fall back to CPU
-  const devices: Array<{ device: string; computeType: string }> = []
+async function transcribeAudio(audioPath: string): Promise<string> {
   try {
-    await execAsync('nvidia-smi', { timeout: 5000 })
-    devices.push({ device: 'cuda', computeType: 'float16' })
-  } catch {}
-  devices.push({ device: 'cpu', computeType: 'int8' })
-
-  for (const { device, computeType } of devices) {
-    const cmd = `${baseCmd} --device ${device} --compute_type ${computeType}`
-    try {
-      await execAsync(cmd, {
-        timeout: 120000,
-        env: { ...process.env, CUDA_VISIBLE_DEVICES: '0' },
-      })
-      // whisperx outputs a .txt file in the output directory
-      const txtPath = audioPath.replace(/\.[^.]+$/, '.txt')
-      try {
-        const txtContent = await Bun.file(txtPath).text()
-        await unlink(txtPath)
-        return txtContent.trim()
-      } catch {
-        return '(transcription failed: could not read output file)'
-      }
-    } catch (err) {
-      if (device !== 'cpu') {
-        console.warn(`Transcription: ${device} failed, falling back:`, (err as Error).message?.slice(0, 100))
-        continue
-      }
-      console.error('Transcription error:', err)
-      return `(transcription failed: ${err})`
+    // convert to WAV (16kHz mono 16-bit) for the whisper server
+    // discord voice messages can be ogg/opus/mp3/etc
+    const wavPath = audioPath.replace(/\.[^.]+$/, '.wav')
+    const proc = Bun.spawn(['ffmpeg', '-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-f', 'wav', wavPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text()
+      throw new Error(`ffmpeg conversion failed: ${stderr.slice(0, 200)}`)
     }
+
+    const wavBuffer = Buffer.from(await Bun.file(wavPath).arrayBuffer())
+    try { await unlink(wavPath) } catch {}
+
+    const result = await transcribe(wavBuffer)
+    return result || '(empty transcription)'
+  } catch (err) {
+    console.error('discord: transcription error:', err)
+    return `(transcription failed: ${err})`
   }
-  return '(transcription failed)'
 }
 
 const ATTACHMENT_DIR = join(getDataDir(), 'discord-attachments')
@@ -985,7 +966,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
                 await mkdir(audioDir, { recursive: true })
                 const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
                 await downloadFile(attachment.url, audioFile)
-                const transcription = await transcribeAudio(audioFile, config!.whisperModel ?? 'medium')
+                const transcription = await transcribeAudio(audioFile)
 
                 // echo transcription back to the channel so user can verify
                 const echoChannel = msg.channel as TextChannel | DMChannel
