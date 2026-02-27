@@ -162,7 +162,7 @@ async function handleWorktreeMerge(
   return `[Claude Code task ${taskStatus} — merge conflict]\nSession: ${sessionId}\nTask: ${taskPreview}\nBranch "${worktree}" had merge conflicts. A conflict resolution session has been spawned in ${originalWorkingDir}.\nThe worktree at ${worktreePath} has NOT been removed (branch still exists for reference).\nLog: ${logPath}\n\nUse read_claude_code_output to review the results.`
 }
 
-export default function createClaudeCodePlugin(): Plugin {
+export default function create(): Plugin {
   let config: ClaudeCodeConfig | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null

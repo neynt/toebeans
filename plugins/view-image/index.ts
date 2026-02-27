@@ -2,7 +2,7 @@ import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { resolve } from 'path'
 
-export default function createViewImagePlugin(): Plugin {
+export default function create(): Plugin {
   return {
     name: 'view-image',
     description: 'View image files with vision. Use view_image to look at screenshots, photos, diagrams, etc.',

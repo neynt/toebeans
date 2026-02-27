@@ -5,7 +5,7 @@ import { chromium } from 'patchright'
 import type { Browser, BrowserContext, Page } from 'patchright'
 
 import TurndownService from 'turndown'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { mkdir } from 'node:fs/promises'
 
 // --- plugin config ---
@@ -98,6 +98,7 @@ async function createContextWithCookies(browser: Browser): Promise<BrowserContex
     locale: pluginConfig.locale ?? 'en-US',
     timezoneId: pluginConfig.timezone ?? 'America/New_York',
     userAgent: CHROME_USER_AGENT,
+    acceptDownloads: true,
   })
   await context.addInitScript(WEBGL_SPOOF_SCRIPT)
   const cookies = await loadCookies()
@@ -235,7 +236,7 @@ async function takeScreenshot(page: Page): Promise<string> {
 
 // --- plugin ---
 
-export default function createWebBrowsePlugin(): Plugin {
+export default function create(): Plugin {
   return {
     name: 'web-browse',
     description: 'Browse web pages with JavaScript rendering. Supports stateless browsing (web_browse), interactive sessions (web_interact), and screenshots (web_screenshot).',
@@ -302,7 +303,7 @@ export default function createWebBrowsePlugin(): Plugin {
       // --- web_interact ---
       {
         name: 'web_interact',
-        description: 'Interact with a web page using a persistent browser session. Perform sequential actions like navigation, clicking, typing, and more. Returns markdown of the final page state.',
+        description: 'Interact with a web page using a persistent browser session. Perform sequential actions like navigation, clicking, typing, downloading files, and more. Returns markdown of the final page state.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -313,13 +314,14 @@ export default function createWebBrowsePlugin(): Plugin {
               items: {
                 type: 'object',
                 properties: {
-                  type: { type: 'string', enum: ['goto', 'click', 'type', 'press', 'wait', 'wait_for', 'evaluate', 'screenshot'], description: 'Action type' },
+                  type: { type: 'string', enum: ['goto', 'click', 'type', 'press', 'wait', 'wait_for', 'evaluate', 'screenshot', 'download'], description: 'Action type' },
                   url: { type: 'string', description: 'URL for goto action' },
                   selector: { type: 'string', description: 'CSS selector for click/type/wait_for actions' },
                   text: { type: 'string', description: 'Text for type action' },
                   key: { type: 'string', description: 'Key for press action (e.g. "Enter")' },
                   ms: { type: 'number', description: 'Milliseconds for wait action' },
                   js: { type: 'string', description: 'JavaScript code for evaluate action' },
+                  download_path: { type: 'string', description: 'File path to save downloaded file for download action' },
                 },
                 required: ['type'],
               },
@@ -331,13 +333,14 @@ export default function createWebBrowsePlugin(): Plugin {
           const { session_id, actions } = input as {
             session_id?: string
             actions: Array<{
-              type: 'goto' | 'click' | 'type' | 'press' | 'wait' | 'wait_for' | 'evaluate' | 'screenshot'
+              type: 'goto' | 'click' | 'type' | 'press' | 'wait' | 'wait_for' | 'evaluate' | 'screenshot' | 'download'
               url?: string
               selector?: string
               text?: string
               key?: string
               ms?: number
               js?: string
+              download_path?: string
             }>
           }
 
@@ -347,6 +350,7 @@ export default function createWebBrowsePlugin(): Plugin {
           const doWork = async (): Promise<ToolResult> => {
             const screenshots: string[] = []
             const evalResults: string[] = []
+            const downloads: { filename: string; saved_to: string; size_bytes: number }[] = []
 
             for (const action of actions) {
               switch (action.type) {
@@ -393,6 +397,36 @@ export default function createWebBrowsePlugin(): Plugin {
                   screenshots.push(path)
                   break
                 }
+                case 'download': {
+                  if (!action.download_path) throw new Error('download action requires download_path')
+                  if (!action.selector && !action.url) throw new Error('download action requires selector or url')
+
+                  const downloadPromise = page.waitForEvent('download', { timeout: pluginConfig.navigationTimeout ?? 15000 })
+
+                  if (action.selector) {
+                    await page.click(action.selector)
+                  } else {
+                    // goto rejects with "Download is starting" when the URL triggers a download — that's fine
+                    await page.goto(action.url!, { timeout: pluginConfig.navigationTimeout ?? 15000 }).catch((err: Error) => {
+                      if (!err.message.includes('Download is starting')) throw err
+                    })
+                  }
+
+                  const download = await downloadPromise
+                  const failure = await download.failure()
+                  if (failure) throw new Error(`download failed: ${failure}`)
+
+                  await mkdir(dirname(action.download_path), { recursive: true })
+                  await download.saveAs(action.download_path)
+
+                  const fileSize = Bun.file(action.download_path).size
+                  downloads.push({
+                    filename: download.suggestedFilename(),
+                    saved_to: action.download_path,
+                    size_bytes: fileSize,
+                  })
+                  break
+                }
                 default:
                   throw new Error(`unknown action type: ${(action as any).type}`)
               }
@@ -410,6 +444,7 @@ export default function createWebBrowsePlugin(): Plugin {
             }
             if (screenshots.length > 0) resultObj.screenshots = screenshots
             if (evalResults.length > 0) resultObj.eval_results = evalResults
+            if (downloads.length > 0) resultObj.downloads = downloads
 
             return { content: JSON.stringify(resultObj, null, 2) }
           }

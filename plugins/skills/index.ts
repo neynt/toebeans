@@ -83,7 +83,7 @@ async function resolveSkillDir(skill: string): Promise<{ path: string; source: S
   return null
 }
 
-export default function createSkillsPlugin(): Plugin {
+export default function create(): Plugin {
   return {
     name: 'skills',
     description: `Manages reusable Skills — core skills in repo, user skills in ${USER_SKILLS_DIR}/`,

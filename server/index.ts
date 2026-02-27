@@ -518,18 +518,14 @@ async function main() {
     // soul first - sets the tone
     parts.push(soul)
 
-    // plugin-contributed prompts (memory, etc.)
-    const pluginPrompts = await pluginManager.buildSystemPrompts()
-    parts.push(...pluginPrompts)
-
     // then context
     parts.push(`Current time: ${formatLocalTime(new Date())} (${getTimezone()})`)
     parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
-    // then plugin instructions (tool descriptions)
-    const pluginSection = pluginManager.getSystemPromptSection()
-    if (pluginSection) {
-      parts.push(`# Enabled plugins\n\n${pluginSection}`)
+    // unified plugins section (descriptions + plugin-contributed prompts)
+    const pluginsSection = await pluginManager.buildPluginsSection()
+    if (pluginsSection) {
+      parts.push(pluginsSection)
     }
 
     return parts.join('\n\n')

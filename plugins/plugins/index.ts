@@ -7,7 +7,7 @@ import { mkdir } from 'node:fs/promises'
 
 const TEMPLATE_PATH = new URL('../template/index.ts', import.meta.url).pathname
 
-export default function createPluginsPlugin(serverContext?: { routeOutput: (target: string, message: any) => Promise<void>, config: { notifyOnRestart?: string } }): Plugin {
+export default function create(serverContext?: { routeOutput: (target: string, message: any) => Promise<void>, config: { notifyOnRestart?: string } }): Plugin {
   return {
     name: 'plugins',
     description: `Create, enable, and disable plugins. User plugins live in ~/.toebeans/plugins/.`,

@@ -293,7 +293,7 @@ interface ServerContext {
   config: any
 }
 
-export default function createDiscordPlugin(serverContext?: ServerContext): Plugin {
+export default function create(serverContext?: ServerContext): Plugin {
   let client: Client | null = null
   let config: DiscordConfig | null = null
   let cleanupInterval: ReturnType<typeof setInterval> | null = null
@@ -387,7 +387,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
   const tools: Tool[] = [
     {
       name: 'discord_send',
-      description: 'Send a message to a Discord channel.',
+      description: 'Send a message to a Discord channel. Do NOT use this if your message was triggered by a source with an outputTarget already set to a Discord channel (e.g. a timer with `output: discord:channelId`), because your text response is automatically routed there. Calling discord_send in that case causes duplicate messages.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -742,57 +742,79 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
               : JSON.stringify(message.input)
             const inputTokens = countTokens(inputStr)
 
-            // create concise single-line tool message
+            // create tool message with verbose details
+            const trunc = (s: string, n = 100) => s.length > n ? s.slice(0, n - 3) + '...' : s
             let toolMessage = `🔧 ${message.name}`
 
-            // add brief summary based on tool type
+            // add detailed summary based on tool type
             if (message.name === 'bash') {
               const cmd = (message.input as any)?.command
+              const desc = (message.input as any)?.description
               if (cmd) {
-                const truncated = cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd
-                toolMessage += `: ${truncated}`
+                toolMessage += `: ${trunc(cmd)}`
+              }
+              if (desc) {
+                toolMessage += ` — ${trunc(desc, 80)}`
               }
             } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
               const path = (message.input as any)?.path || (message.input as any)?.file_path
               if (path) {
-                const basename = path.split('/').pop() || path
-                toolMessage += `: ${basename}`
+                toolMessage += `: ${path}`
+              }
+              if (message.name === 'edit_file') {
+                const oldStr = (message.input as any)?.old_string
+                const newStr = (message.input as any)?.new_string
+                if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 60)}`
+                if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 60)}`
+              } else if (message.name === 'write_file') {
+                const content = (message.input as any)?.content
+                if (content) toolMessage += ` (${content.length} chars)`
               }
             } else if (message.name === 'spawn_claude_code') {
               const task = (message.input as any)?.task
               if (task) {
-                const truncated = task.length > 50 ? task.slice(0, 47) + '...' : task
-                toolMessage += `: ${truncated}`
+                toolMessage += `: ${trunc(task)}`
               }
-            } else if (message.name === 'discord_send' || message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
-              // just the tool name, no params
-            } else if (message.name === 'remember' || message.name === 'recall') {
-              const topic = (message.input as any)?.topic || (message.input as any)?.query
-              if (topic) {
-                const truncated = topic.length > 50 ? topic.slice(0, 47) + '...' : topic
-                toolMessage += `: ${truncated}`
+            } else if (message.name === 'discord_send') {
+              const text = (message.input as any)?.text || (message.input as any)?.content || (message.input as any)?.message
+              if (text) toolMessage += `: ${trunc(text, 80)}`
+            } else if (message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
+              const inp = message.input as any
+              const channel = inp?.channel_id || inp?.channel
+              if (channel) toolMessage += ` in #${channel}`
+              if (message.name === 'discord_react') {
+                const emoji = inp?.emoji
+                if (emoji) toolMessage += ` with ${emoji}`
               }
-            } else if (message.name === 'timer_create' || message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
+            } else if (message.name === 'remember') {
+              const topic = (message.input as any)?.topic
+              const content = (message.input as any)?.content
+              if (topic) toolMessage += `: ${trunc(topic, 60)}`
+              if (content) toolMessage += ` — ${trunc(content, 60)}`
+            } else if (message.name === 'recall') {
+              const query = (message.input as any)?.query
+              if (query) toolMessage += `: ${trunc(query)}`
+            } else if (message.name === 'timer_create') {
               const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
-              if (filename) {
-                toolMessage += `: ${filename}`
-              }
+              const interval = (message.input as any)?.interval || (message.input as any)?.cron
+              if (filename) toolMessage += `: ${filename}`
+              if (interval) toolMessage += ` (${interval})`
+            } else if (message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
+              const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+              if (filename) toolMessage += `: ${filename}`
             } else if (message.name === 'web_browse') {
               const url = (message.input as any)?.url
-              if (url) {
-                const truncated = url.length > 50 ? url.slice(0, 47) + '...' : url
-                toolMessage += `: ${truncated}`
-              }
+              const instruction = (message.input as any)?.instruction || (message.input as any)?.prompt
+              if (url) toolMessage += `: ${trunc(url)}`
+              if (instruction) toolMessage += ` — ${trunc(instruction, 60)}`
             } else if (message.name === 'generate_image') {
               const prompt = (message.input as any)?.prompt
-              if (prompt) {
-                const truncated = prompt.length > 50 ? prompt.slice(0, 47) + '...' : prompt
-                toolMessage += `: ${truncated}`
-              }
+              const size = (message.input as any)?.size
+              if (prompt) toolMessage += `: ${trunc(prompt)}`
+              if (size) toolMessage += ` (${size})`
             } else {
-              // fallback: first 50 chars of JSON
-              const truncated = inputStr.length > 50 ? inputStr.slice(0, 47) + '...' : inputStr
-              toolMessage += `: ${truncated}`
+              // fallback: first 100 chars of JSON
+              toolMessage += `: ${trunc(inputStr)}`
             }
 
             // append token count
@@ -1010,7 +1032,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
           await client!.application?.commands.set([
             { name: 'compact', description: 'Force compact the current session' },
             { name: 'reset', description: 'Reset session without summary (clean slate)' },
-            { name: 'session', description: 'Show current session info' },
+            { name: 'status', description: 'Show current session info' },
             { name: 'stop', description: 'Stop the current operation immediately' },
           ])
           console.log('discord: registered slash commands')
@@ -1051,7 +1073,7 @@ export default function createDiscordPlugin(serverContext?: ServerContext): Plug
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const newId = await config!.sessionManager.resetSession(sessionId, route)
             await interaction.editReply(`✅ reset session \`${sessionId}\` → \`${newId}\``)
-          } else if (interaction.commandName === 'session') {
+          } else if (interaction.commandName === 'status') {
             await interaction.deferReply()
             const sessionId = await config!.sessionManager.getSessionForMessage(route)
             const info = await config!.sessionManager.getSessionInfo(sessionId)

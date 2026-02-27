@@ -45,6 +45,93 @@ describe('repairMessages', () => {
       expect(block.is_error).toBe(true)
     }
   })
+
+  test('reorders user text wedged between tool_use and tool_results', () => {
+    const msgs: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'plan my day' }] },
+      { role: 'assistant', content: [
+        { type: 'text', text: 'scheduling...' },
+        { type: 'tool_use', id: 'tu_1', name: 'calendar', input: {} },
+        { type: 'tool_use', id: 'tu_2', name: 'calendar', input: {} },
+      ]},
+      // user message arrived during tool execution — wedged in
+      { role: 'user', content: [{ type: 'text', text: 'hey, new message!' }] },
+      // tool results came after
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'event created' },
+        { type: 'tool_result', tool_use_id: 'tu_2', content: 'event created' },
+      ]},
+    ]
+    const repaired = repairMessages(msgs)
+
+    // tool_results should come right after assistant, then the wedged user message
+    expect(repaired).toHaveLength(4)
+    expect(repaired[0]!.role).toBe('user')
+    expect(repaired[1]!.role).toBe('assistant')
+    // tool_results immediately after assistant
+    expect(repaired[2]!.role).toBe('user')
+    expect(repaired[2]!.content.every(b => b.type === 'tool_result')).toBe(true)
+    // wedged message comes after tool_results
+    expect(repaired[3]!.role).toBe('user')
+    expect(repaired[3]!.content[0]!.type).toBe('text')
+    expect((repaired[3]!.content[0]! as { type: 'text'; text: string }).text).toBe('hey, new message!')
+  })
+
+  test('merges consecutive assistant messages', () => {
+    const msgs: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'response 1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'response 2' }] },
+    ]
+    const repaired = repairMessages(msgs)
+    expect(repaired).toHaveLength(2)
+    expect(repaired[1]!.role).toBe('assistant')
+    expect(repaired[1]!.content).toHaveLength(2)
+    expect((repaired[1]!.content[0]! as { type: 'text'; text: string }).text).toBe('response 1')
+    expect((repaired[1]!.content[1]! as { type: 'text'; text: string }).text).toBe('response 2')
+  })
+
+  test('merges consecutive assistant messages and handles tool_use in merged result', () => {
+    const msgs: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do stuff' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'planning done' }] },
+      { role: 'assistant', content: [
+        { type: 'text', text: 'downloading...' },
+        { type: 'tool_use', id: 'tu_1', name: 'web', input: {} },
+      ]},
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'page loaded' },
+      ]},
+    ]
+    const repaired = repairMessages(msgs)
+    expect(repaired).toHaveLength(3)
+    expect(repaired[1]!.role).toBe('assistant')
+    // merged: text from first + text and tool_use from second
+    expect(repaired[1]!.content).toHaveLength(3)
+    expect(repaired[2]!.role).toBe('user')
+    expect(repaired[2]!.content[0]!.type).toBe('tool_result')
+  })
+
+  test('handles missing results when user text is wedged in', () => {
+    const msgs: Message[] = [
+      { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu_1', name: 'bash', input: {} },
+      ]},
+      { role: 'user', content: [{ type: 'text', text: 'interruption' }] },
+      // no tool_results at all — session was interrupted
+    ]
+    const repaired = repairMessages(msgs)
+    // should get: assistant, synthetic tool_result, then the interruption text
+    expect(repaired).toHaveLength(3)
+    expect(repaired[0]!.role).toBe('assistant')
+    expect(repaired[1]!.role).toBe('user')
+    expect(repaired[1]!.content[0]!.type).toBe('tool_result')
+    if (repaired[1]!.content[0]!.type === 'tool_result') {
+      expect(repaired[1]!.content[0]!.is_error).toBe(true)
+    }
+    expect(repaired[2]!.role).toBe('user')
+    expect((repaired[2]!.content[0]! as { type: 'text'; text: string }).text).toBe('interruption')
+  })
 })
 
 describe('runAgentTurn queued message handling', () => {

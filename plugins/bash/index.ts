@@ -48,7 +48,7 @@ async function readLastLines(filePath: string, lineCount: number): Promise<strin
   }
 }
 
-export default function createBashPlugin(): Plugin {
+export default function create(): Plugin {
   const messageQueue: { message: Message; outputTarget?: string }[] = []
   let resolveWaiter: (() => void) | null = null
 

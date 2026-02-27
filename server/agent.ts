@@ -8,55 +8,97 @@ import { computeInputOutputCost } from './cost.ts'
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000
 const DEFAULT_MAX_TOOL_RESULT_TOKENS = 10_000
 
-// repair message history to handle interrupted tool calls
-// ensures every tool_use has a matching tool_result
+// repair message history to handle interrupted tool calls and race conditions
+// - ensures every tool_use has a matching tool_result
+// - reorders user text messages that got wedged between tool_use and tool_results
+// - merges consecutive assistant messages (from concurrent response races)
 export function repairMessages(messages: Message[]): Message[] {
   const repaired: Message[] = []
 
-  for (let i = 0; i < messages.length; i++) {
+  let i = 0
+  while (i < messages.length) {
     const msg = messages[i]!
+
+    // merge consecutive assistant messages (can happen from concurrent response races)
+    if (msg.role === 'assistant' && repaired.length > 0 && repaired[repaired.length - 1]!.role === 'assistant') {
+      repaired[repaired.length - 1]!.content = [...repaired[repaired.length - 1]!.content, ...msg.content]
+      i++
+      continue
+    }
+
     repaired.push(msg)
+    i++
 
-    // check if this assistant message has tool_use blocks
-    if (msg.role === 'assistant') {
-      const toolUseIds = msg.content
-        .filter(b => b.type === 'tool_use')
-        .map(b => (b as { type: 'tool_use'; id: string; name: string; input: unknown }).id)
+    if (msg.role !== 'assistant') continue
 
-      if (toolUseIds.length === 0) continue
+    const toolUseIds = msg.content
+      .filter(b => b.type === 'tool_use')
+      .map(b => (b as { type: 'tool_use'; id: string; name: string; input: unknown }).id)
 
-      // check next message for tool_results
-      const nextMsg = messages[i + 1]
-      const existingResultIds = new Set<string>()
+    if (toolUseIds.length === 0) continue
 
-      if (nextMsg?.role === 'user') {
+    const pendingIds = new Set(toolUseIds)
+
+    // scan forward for tool_results — they may not be in the immediately next message
+    // if a user text message arrived during tool execution and got wedged in between
+    const deferred: Message[] = []
+    let foundResults = false
+
+    while (i < messages.length) {
+      const nextMsg = messages[i]!
+      if (nextMsg.role === 'assistant') break
+
+      // check if this user message has matching tool_results
+      const hasResults = nextMsg.content.some(
+        b => b.type === 'tool_result' && 'tool_use_id' in b && pendingIds.has(b.tool_use_id)
+      )
+
+      if (hasResults) {
+        // mark found results
         for (const block of nextMsg.content) {
           if (block.type === 'tool_result' && 'tool_use_id' in block) {
-            existingResultIds.add(block.tool_use_id)
+            pendingIds.delete(block.tool_use_id)
           }
         }
-      }
 
-      // find missing tool_results
-      const missingIds = toolUseIds.filter(id => !existingResultIds.has(id))
-
-      if (missingIds.length > 0) {
-        // insert synthetic tool_result message
-        const syntheticResults: ContentBlock[] = missingIds.map(id => ({
-          type: 'tool_result' as const,
-          tool_use_id: id,
-          content: '(interrupted - no result received)',
-          is_error: true,
-        }))
-
-        // if next message is user with some tool_results, prepend missing ones
-        if (nextMsg?.role === 'user' && existingResultIds.size > 0) {
-          // merge into existing user message (will be added in next iteration)
+        // prepend synthetic results for any still-missing tool_use IDs
+        if (pendingIds.size > 0) {
+          const syntheticResults: ContentBlock[] = [...pendingIds].map(id => ({
+            type: 'tool_result' as const,
+            tool_use_id: id,
+            content: '(interrupted - no result received)',
+            is_error: true,
+          }))
           nextMsg.content = [...syntheticResults, ...nextMsg.content]
-        } else {
-          // insert new user message with synthetic results
-          repaired.push({ role: 'user', content: syntheticResults })
         }
+
+        // push tool_results first, THEN any deferred intervening messages
+        repaired.push(nextMsg)
+        i++
+        if (deferred.length > 0) {
+          repaired.push(...deferred)
+        }
+        foundResults = true
+        break
+      } else {
+        // intervening message (user text that arrived during tool execution) — defer it
+        deferred.push(nextMsg)
+        i++
+      }
+    }
+
+    if (!foundResults) {
+      // no tool_results found at all — insert synthetic results
+      const syntheticResults: ContentBlock[] = [...pendingIds].map(id => ({
+        type: 'tool_result' as const,
+        tool_use_id: id,
+        content: '(interrupted - no result received)',
+        is_error: true,
+      }))
+      repaired.push({ role: 'user', content: syntheticResults })
+      // push deferred messages after synthetic results
+      if (deferred.length > 0) {
+        repaired.push(...deferred)
       }
     }
   }

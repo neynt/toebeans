@@ -401,6 +401,45 @@ const tools: Tool[] = [
       }
     },
   },
+  {
+    name: 'gmail_modify_labels',
+    description: 'Add or remove labels from a Gmail message.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'The message ID to modify' },
+        add_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Label IDs to add (optional)',
+        },
+        remove_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Label IDs to remove (optional)',
+        },
+      },
+      required: ['message_id'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { message_id, add_labels = [], remove_labels = [] } = input as {
+        message_id: string
+        add_labels?: string[]
+        remove_labels?: string[]
+      }
+
+      try {
+        await gmailPost(`/messages/${message_id}/modify`, {
+          addLabelIds: add_labels,
+          removeLabelIds: remove_labels,
+        })
+        return { content: `labels modified on message ${message_id}` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to modify labels: ${error.message}`, is_error: true }
+      }
+    },
+  },
 ]
 
 export default function create(): Plugin {

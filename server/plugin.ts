@@ -154,6 +154,29 @@ export class PluginManager {
     return results
   }
 
+  // unified section: plugin descriptions + plugin-contributed prompts under one # Plugins heading
+  async buildPluginsSection(): Promise<string> {
+    const subsections: string[] = []
+
+    for (const [name, loaded] of this.plugins) {
+      // plugin description (tool usage instructions, etc.)
+      if (loaded.plugin.description) {
+        subsections.push(`## ${name}\n${loaded.plugin.description}`)
+      }
+
+      // plugin-contributed system prompt content (memory, skills, device lists, etc.)
+      if (loaded.plugin.buildSystemPrompt) {
+        const content = await loaded.plugin.buildSystemPrompt()
+        if (content) {
+          subsections.push(content)
+        }
+      }
+    }
+
+    if (subsections.length === 0) return ''
+    return `# Plugins\n\n${subsections.join('\n\n')}`
+  }
+
   async destroy(): Promise<void> {
     for (const [, loaded] of this.plugins) {
       if (loaded.plugin.destroy) {

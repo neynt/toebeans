@@ -59,7 +59,7 @@ async function appendToDailyLog(content: string, sessionId: string): Promise<voi
   }
 }
 
-export default function createMemoryPlugin(serverContext?: { config?: { session?: { compactionTrimLength?: number }; plugins?: { memory?: { extractionPrompt?: string } } } }): Plugin {
+export default function create(serverContext?: { config?: { session?: { compactionTrimLength?: number }; plugins?: { memory?: { extractionPrompt?: string } } } }): Plugin {
   const compactionTrimLength = serverContext?.config?.session?.compactionTrimLength ?? 200
   const extractionPrompt = serverContext?.config?.plugins?.memory?.extractionPrompt ?? buildExtractionPrompt()
 

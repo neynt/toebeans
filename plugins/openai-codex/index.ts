@@ -68,7 +68,7 @@ interface OpenAICodexConfig {
   notifyTarget?: string
 }
 
-export default function createOpenAICodexPlugin(): Plugin {
+export default function create(): Plugin {
   let config: OpenAICodexConfig | null = null
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null

@@ -188,7 +188,7 @@ async function saveLastFired(timersDir: string, lastFired: Record<string, number
   await Bun.write(join(timersDir, '.lastFired.json'), JSON.stringify(lastFired))
 }
 
-export default function createTimersPlugin(): Plugin {
+export default function create(): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
   const scheduledTimers = new Map<string, ScheduledTimer>()
