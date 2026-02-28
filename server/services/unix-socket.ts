@@ -37,6 +37,38 @@ export function unixRequest(
 }
 
 /**
+ * make a streaming HTTP request over a unix domain socket.
+ * returns the response stream for incremental consumption (chunked transfer encoding).
+ */
+export function unixRequestStream(
+  socketPath: string,
+  method: string,
+  path: string,
+  body?: string | Buffer,
+  contentType?: string,
+): Promise<{ status: number; stream: http.IncomingMessage }> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string | number> = {}
+    if (body) {
+      headers['Content-Type'] = contentType || 'application/json'
+      headers['Content-Length'] = typeof body === 'string' ? Buffer.byteLength(body) : body.length
+    }
+    const options: http.RequestOptions = {
+      socketPath,
+      method,
+      path,
+      headers: body ? headers : undefined,
+    }
+    const req = http.request(options, (res) => {
+      resolve({ status: res.statusCode ?? 0, stream: res })
+    })
+    req.on('error', reject)
+    if (body) req.write(body)
+    req.end()
+  })
+}
+
+/**
  * check if a process is alive by sending signal 0.
  */
 export function isProcessAlive(pid: number): boolean {
@@ -46,4 +78,27 @@ export function isProcessAlive(pid: number): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * read a pidfile and kill the process if alive. cleans up the pidfile afterward.
+ */
+export async function killPidfile(pidfilePath: string): Promise<void> {
+  try {
+    const pidContent = await Bun.file(pidfilePath).text()
+    const pid = parseInt(pidContent.trim(), 10)
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      console.log(`killing process from pidfile ${pidfilePath} (pid ${pid})`)
+      process.kill(pid, 'SIGTERM')
+      // wait briefly for graceful shutdown, then force kill
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      if (isProcessAlive(pid)) {
+        process.kill(pid, 'SIGKILL')
+      }
+    }
+  } catch {}
+  try {
+    const { unlink } = await import('node:fs/promises')
+    await unlink(pidfilePath)
+  } catch {}
 }

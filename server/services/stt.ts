@@ -5,7 +5,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { unlink } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import { unixRequest, isProcessAlive } from './unix-socket.ts'
+import { unixRequest, isProcessAlive, killPidfile } from './unix-socket.ts'
 
 const TOEBEANS_DIR = join(homedir(), '.toebeans')
 const WHISPER_SOCKET_PATH = join(TOEBEANS_DIR, 'whisper.sock')
@@ -15,6 +15,7 @@ const WHISPER_VENV_PYTHON = join(TOEBEANS_DIR, 'venvs', 'whisper', 'bin', 'pytho
 
 let whisperProcess: ChildProcess | null = null
 let whisperReady = false
+let whisperStarting: Promise<void> | null = null
 
 async function isWhisperReady(): Promise<boolean> {
   try {
@@ -27,12 +28,36 @@ async function isWhisperReady(): Promise<boolean> {
 
 /**
  * ensure the whisper server is running and ready.
- * checks for existing server via pidfile, spawns if needed.
+ * uses a mutex to prevent concurrent callers from spawning duplicate processes.
  */
 export async function ensureWhisperServer(): Promise<void> {
   if (whisperReady && await isWhisperReady()) return
 
-  // check if an existing server is alive (may have been started by another plugin)
+  if (whisperStarting) {
+    await whisperStarting
+    return
+  }
+
+  let resolve!: () => void
+  let reject!: (err: Error) => void
+  whisperStarting = new Promise<void>((res, rej) => { resolve = res; reject = rej })
+
+  try {
+    await doEnsureWhisperServer()
+    resolve()
+  } catch (err) {
+    reject(err as Error)
+    throw err
+  } finally {
+    whisperStarting = null
+  }
+}
+
+async function doEnsureWhisperServer(): Promise<void> {
+  // re-check after acquiring lock
+  if (whisperReady && await isWhisperReady()) return
+
+  // check if an existing server is alive
   try {
     const pidContent = await Bun.file(WHISPER_PIDFILE_PATH).text()
     const pid = parseInt(pidContent.trim(), 10)
@@ -40,6 +65,13 @@ export async function ensureWhisperServer(): Promise<void> {
       if (await isWhisperReady()) {
         whisperReady = true
         return
+      }
+      // process alive but not healthy — kill it before spawning a new one
+      console.log(`stt: killing unhealthy existing server (pid ${pid})`)
+      process.kill(pid, 'SIGTERM')
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      if (isProcessAlive(pid)) {
+        process.kill(pid, 'SIGKILL')
       }
     }
   } catch {}
@@ -111,12 +143,15 @@ export async function transcribe(wavBuffer: Buffer): Promise<string> {
 }
 
 /**
- * stop the whisper server if we spawned it.
+ * stop the whisper server — kills tracked process AND any process from pidfile.
  */
-export function stopWhisperServer(): void {
+export async function stopWhisperServer(): Promise<void> {
+  whisperReady = false
+
   if (whisperProcess) {
     whisperProcess.kill()
     whisperProcess = null
-    whisperReady = false
   }
+
+  await killPidfile(WHISPER_PIDFILE_PATH)
 }

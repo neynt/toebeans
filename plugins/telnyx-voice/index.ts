@@ -18,9 +18,8 @@ import { transcribe, ensureWhisperServer, stopWhisperServer, ensureTtsServer, sp
 
 interface TelnyxVoiceConfig {
   apiKey: string                    // telnyx API key (v2)
-  connectionId?: string             // telnyx connection ID (SIP/credential) for outbound calls
-  outboundVoiceProfileId?: string   // telnyx outbound voice profile ID (alternative to connectionId)
-  phoneNumber?: string              // telnyx phone number (for outbound calls)
+  connectionId?: string             // telnyx Call Control App ID (required for outbound calls)
+  fromNumber?: string               // telnyx phone number (for outbound calls)
   webhookPort?: number              // port for telnyx webhooks (default: 8089)
   mediaWsPort?: number              // port for media websocket (default: 8090)
   publicHost?: string               // public hostname/IP for telnyx to reach us
@@ -32,6 +31,12 @@ interface TelnyxVoiceConfig {
   // TTS settings
   ttsSocketPath?: string            // unix socket for qwen3-tts server
   voiceInstruct?: string            // voice description for TTS
+  voiceSeed?: number                // torch random seed for consistent voice across TTS calls
+  voiceTemperature?: number         // sampling temperature (lower = more consistent, default: 0.3)
+  // recording settings
+  recordCalls?: boolean             // record call audio (default: true)
+  recordingsPath?: string           // directory for recordings (default: ~/.toebeans/recordings/)
+  retentionDays?: number            // auto-delete recordings older than this many days
 }
 
 // telnyx websocket message types
@@ -123,6 +128,16 @@ interface ActiveCall {
 
   // promise chain for serializing TTS frame sending per call
   ttsSending: Promise<void>
+
+  // optional message to speak via TTS when the call connects
+  initialMessage: string | null
+
+  // recording state
+  recording: {
+    inboundChunks: Buffer[]
+    outboundChunks: Buffer[]
+    startTime: number  // Date.now() when recording started
+  } | null
 }
 
 interface WsData {
@@ -153,6 +168,167 @@ export default function create(serverContext?: any) {
   // message queue for channel plugin input (transcribed speech → agent)
   const messageQueue: QueuedInput[] = []
   let resolveWaiter: (() => void) | null = null
+
+  // --- recording helpers ---
+
+  function getRecordingsDir(): string {
+    return config?.recordingsPath || `${process.env.HOME}/.toebeans/recordings`
+  }
+
+  function shouldRecord(): boolean {
+    return config?.recordCalls !== false // default true
+  }
+
+  function initRecording(call: ActiveCall) {
+    if (!shouldRecord()) return
+    call.recording = {
+      inboundChunks: [],
+      outboundChunks: [],
+      startTime: Date.now(),
+    }
+    console.log(`telnyx-voice: recording started for call ${call.callControlId}`)
+  }
+
+  function recordInbound(call: ActiveCall, audioData: Buffer) {
+    if (call.recording) {
+      call.recording.inboundChunks.push(audioData)
+    }
+  }
+
+  function recordOutbound(call: ActiveCall, audioData: Buffer) {
+    if (call.recording) {
+      call.recording.outboundChunks.push(audioData)
+    }
+  }
+
+  async function finalizeRecording(call: ActiveCall) {
+    if (!call.recording) return
+
+    const rec = call.recording
+    call.recording = null
+
+    const inboundPcm = Buffer.concat(rec.inboundChunks)
+    const outboundPcm = Buffer.concat(rec.outboundChunks)
+
+    if (inboundPcm.length === 0 && outboundPcm.length === 0) {
+      console.log(`telnyx-voice: no audio recorded for call ${call.callControlId}, skipping save`)
+      return
+    }
+
+    const sampleRate = call.mediaFormat?.sampleRate || 8000
+    const encoding = call.mediaFormat?.encoding || 'L16'
+
+    // convert to 16-bit LE PCM if needed
+    const inboundPcm16 = encodingToPcm16(inboundPcm, encoding)
+    const outboundPcm16 = encodingToPcm16(outboundPcm, encoding)
+
+    // create stereo WAV: left = inbound (remote), right = outbound (local)
+    const maxLen = Math.max(inboundPcm16.length, outboundPcm16.length)
+    const stereoSamples = maxLen / 2 // number of samples per channel
+    const stereoPcm = Buffer.alloc(stereoSamples * 4) // 2 channels × 2 bytes
+
+    for (let i = 0; i < stereoSamples; i++) {
+      const inSample = i * 2 < inboundPcm16.length ? inboundPcm16.readInt16LE(i * 2) : 0
+      const outSample = i * 2 < outboundPcm16.length ? outboundPcm16.readInt16LE(i * 2) : 0
+      stereoPcm.writeInt16LE(inSample, i * 4)       // left channel
+      stereoPcm.writeInt16LE(outSample, i * 4 + 2)  // right channel
+    }
+
+    // build WAV
+    const numChannels = 2
+    const bitsPerSample = 16
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8)
+    const blockAlign = numChannels * (bitsPerSample / 8)
+    const dataSize = stereoPcm.length
+    const headerSize = 44
+    const wav = Buffer.alloc(headerSize + dataSize)
+
+    wav.write('RIFF', 0)
+    wav.writeUInt32LE(36 + dataSize, 4)
+    wav.write('WAVE', 8)
+    wav.write('fmt ', 12)
+    wav.writeUInt32LE(16, 16)
+    wav.writeUInt16LE(1, 20)
+    wav.writeUInt16LE(numChannels, 22)
+    wav.writeUInt32LE(sampleRate, 24)
+    wav.writeUInt32LE(byteRate, 28)
+    wav.writeUInt16LE(blockAlign, 32)
+    wav.writeUInt16LE(bitsPerSample, 34)
+    wav.write('data', 36)
+    wav.writeUInt32LE(dataSize, 40)
+    stereoPcm.copy(wav, 44)
+
+    // save to disk
+    const startDate = new Date(rec.startTime)
+    const dateDir = startDate.toISOString().slice(0, 10) // YYYY-MM-DD
+    const timestamp = startDate.toISOString().replace(/[:.]/g, '-')
+    const callIdShort = call.callControlId.slice(0, 12)
+    const dir = `${getRecordingsDir()}/${dateDir}`
+    const baseName = `call-${callIdShort}-${timestamp}`
+    const wavPath = `${dir}/${baseName}.wav`
+    const metaPath = `${dir}/${baseName}.json`
+
+    try {
+      await Bun.file(dir + '/.keep').exists() || await Bun.$`mkdir -p ${dir}`.quiet()
+
+      await Bun.write(wavPath, wav)
+
+      const durationSec = stereoSamples / sampleRate
+      const metadata = {
+        callControlId: call.callControlId,
+        from: call.from,
+        to: call.to,
+        startTime: startDate.toISOString(),
+        durationSeconds: Math.round(durationSec * 10) / 10,
+        sampleRate,
+        encoding,
+        format: 'stereo WAV (L=inbound, R=outbound)',
+        inboundBytes: inboundPcm.length,
+        outboundBytes: outboundPcm.length,
+      }
+      await Bun.write(metaPath, JSON.stringify(metadata, null, 2))
+
+      console.log(`telnyx-voice: recording saved: ${wavPath} (${durationSec.toFixed(1)}s, ${(wav.length / 1024).toFixed(0)}KB)`)
+    } catch (err) {
+      console.error(`telnyx-voice: failed to save recording:`, err)
+    }
+  }
+
+  function encodingToPcm16(data: Buffer, encoding: string): Buffer {
+    if (encoding === 'PCMU') return decodeMuLaw(data)
+    if (encoding === 'PCMA') return decodeALaw(data)
+    return data // L16 is already 16-bit LE PCM
+  }
+
+  async function cleanOldRecordings() {
+    const days = config?.retentionDays
+    if (!days || days <= 0) return
+
+    const baseDir = getRecordingsDir()
+    const cutoff = Date.now() - days * 86400000
+
+    try {
+      const { readdir, stat, unlink, rmdir } = await import('node:fs/promises')
+      const dateDirs = await readdir(baseDir).catch(() => [] as string[])
+
+      for (const dateDir of dateDirs) {
+        // parse YYYY-MM-DD directory names
+        const dirDate = new Date(dateDir + 'T00:00:00Z')
+        if (isNaN(dirDate.getTime())) continue
+        if (dirDate.getTime() > cutoff) continue
+
+        const dirPath = `${baseDir}/${dateDir}`
+        const files = await readdir(dirPath).catch(() => [] as string[])
+        for (const file of files) {
+          await unlink(`${dirPath}/${file}`).catch(() => {})
+        }
+        await rmdir(dirPath).catch(() => {})
+        console.log(`telnyx-voice: cleaned old recordings from ${dateDir}`)
+      }
+    } catch (err) {
+      console.error('telnyx-voice: retention cleanup error:', err)
+    }
+  }
 
   function queueMessage(text: string, callControlId: string) {
     messageQueue.push({
@@ -218,12 +394,36 @@ export default function create(serverContext?: any) {
     }
   }
 
-  async function createOutboundCall(to: string): Promise<string> {
-    if (!config!.connectionId && !config!.outboundVoiceProfileId) {
-      throw new Error('connectionId or outboundVoiceProfileId not configured — one is required for outbound calls')
+  // send DTMF tones on an active call
+  // digits: 0-9, A-D, *, #, w (0.5s pause), W (1s pause)
+  async function sendDtmf(callControlId: string, digits: string, durationMs?: number) {
+    console.log(`telnyx-voice: sending DTMF "${digits}" on call ${callControlId}`)
+    const body: Record<string, unknown> = { digits }
+    if (durationMs) body.duration_millis = Math.max(100, Math.min(500, durationMs))
+    const res = await telnyxApi('POST', `/calls/${callControlId}/actions/send_dtmf`, body)
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`telnyx-voice: DTMF send failed: ${res.status} ${err}`)
+      throw new Error(`DTMF send failed: ${res.status} ${err}`)
     }
-    if (!config!.phoneNumber) {
-      throw new Error('phoneNumber not configured — required as caller ID for outbound calls')
+    // wait for tones to play out before returning
+    // each digit ~duration_millis (default ~250ms), pauses are w=500ms W=1000ms
+    const perDigitMs = durationMs || 250
+    let totalMs = 0
+    for (const ch of digits) {
+      if (ch === 'w') totalMs += 500
+      else if (ch === 'W') totalMs += 1000
+      else totalMs += perDigitMs
+    }
+    await new Promise(r => setTimeout(r, totalMs))
+  }
+
+  async function createOutboundCall(to: string, initialMessage?: string): Promise<string> {
+    if (!config!.connectionId) {
+      throw new Error('connectionId not configured — required for outbound calls (this is your Call Control App ID in the Telnyx portal)')
+    }
+    if (!config!.fromNumber) {
+      throw new Error('fromNumber not configured — required as caller ID for outbound calls')
     }
     if (!config!.publicHost) {
       throw new Error('publicHost not configured — required for media streaming')
@@ -233,11 +433,9 @@ export default function create(serverContext?: any) {
     const streamUrl = `wss://${config!.publicHost}/media`
 
     const res = await telnyxApi('POST', '/calls', {
-      ...(config!.outboundVoiceProfileId
-        ? { outbound_voice_profile_id: config!.outboundVoiceProfileId }
-        : { connection_id: config!.connectionId }),
+      connection_id: config!.connectionId,
       to,
-      from: config!.phoneNumber,
+      from: config!.fromNumber,
       stream_url: streamUrl,
       stream_track: 'inbound_track',
       stream_bidirectional_mode: 'rtp',
@@ -257,7 +455,7 @@ export default function create(serverContext?: any) {
     activeCalls.set(callControlId, {
       callControlId,
       streamId: null,
-      from: config!.phoneNumber!,
+      from: config!.fromNumber!,
       to,
       ws: null,
       mediaFormat: null,
@@ -270,6 +468,8 @@ export default function create(serverContext?: any) {
       abortController: null,
       textBuffer: '',
       ttsSending: Promise.resolve(),
+      initialMessage: initialMessage ?? null,
+      recording: null,
     })
 
     return callControlId
@@ -513,6 +713,9 @@ export default function create(serverContext?: any) {
         language: 'english',
         voiceInstruct: config?.voiceInstruct,
         instruct: config?.voiceInstruct,
+        seed: config?.voiceSeed,
+        temperature: config?.voiceTemperature ?? 0.3,
+        subtalkerTemperature: config?.voiceTemperature ?? 0.3,
       }
 
       const ttsStart = performance.now()
@@ -559,6 +762,9 @@ export default function create(serverContext?: any) {
       console.warn('telnyx-voice/audio-out: no websocket for call, cannot send frames')
       return
     }
+
+    // record all outbound audio
+    recordOutbound(call, encodedAudio)
 
     const callSampleRate = call.mediaFormat?.sampleRate || 8000
     const callEncoding = call.mediaFormat?.encoding || 'L16'
@@ -856,6 +1062,8 @@ export default function create(serverContext?: any) {
             abortController: null,
             textBuffer: '',
             ttsSending: Promise.resolve(),
+            initialMessage: null,
+            recording: null,
           })
           await answerCall(callControlId)
         } else if (payload.direction === 'outgoing') {
@@ -879,6 +1087,8 @@ export default function create(serverContext?: any) {
               abortController: null,
               textBuffer: '',
               ttsSending: Promise.resolve(),
+              initialMessage: null,
+              recording: null,
             })
           }
         }
@@ -901,6 +1111,10 @@ export default function create(serverContext?: any) {
         console.log(`telnyx-voice: call ended ${callControlId}`)
         const call = activeCalls.get(callControlId)
         if (call) {
+          // finalize recording before cleaning up
+          finalizeRecording(call).catch(err => {
+            console.error('telnyx-voice: recording finalize error:', err)
+          })
           if (call.streamId) streamToCall.delete(call.streamId)
           call.abortController?.abort()
           activeCalls.delete(callControlId)
@@ -956,6 +1170,16 @@ export default function create(serverContext?: any) {
             channels: media_format.channels,
           }
           streamToCall.set(streamId, call_control_id)
+          initRecording(call)
+
+          // if this is an outbound call with an initial message, speak it now
+          if (call.initialMessage) {
+            const msg = call.initialMessage
+            call.initialMessage = null // consume it so it doesn't replay
+            console.log(`telnyx-voice: sending initial message for outbound call ${call_control_id}: "${msg}"`)
+            ensureTtsServer()
+            sendTtsToCall(msg, call)
+          }
         } else {
           console.warn(`telnyx-voice: stream start for unknown call ${call_control_id}`)
         }
@@ -972,6 +1196,9 @@ export default function create(serverContext?: any) {
         // decode the audio payload
         const audioData = Buffer.from(msg.media.payload, 'base64')
         const now = Date.now()
+
+        // record all inbound audio (before VAD, so we capture everything)
+        recordInbound(call, audioData)
 
         // log first audio chunk for diagnostics
         if (!call.audioStartTime) {
@@ -1065,6 +1292,63 @@ export default function create(serverContext?: any) {
     }, 100) // check every 100ms
   }
 
+  // --- DTMF parsing ---
+  // matches [DTMF: ...] markers in text, e.g. [DTMF: 1w23#]
+  const DTMF_PATTERN = /\[DTMF:\s*([0-9A-D*#wW,\s]+)\]/gi
+
+  interface TextSegment { type: 'text'; text: string }
+  interface DtmfSegment { type: 'dtmf'; digits: string }
+  type ResponseSegment = TextSegment | DtmfSegment
+
+  // split a response into alternating text and DTMF segments
+  function parseResponseSegments(text: string): ResponseSegment[] {
+    const segments: ResponseSegment[] = []
+    let lastIndex = 0
+
+    for (const match of text.matchAll(DTMF_PATTERN)) {
+      const matchStart = match.index!
+      // text before this DTMF marker
+      if (matchStart > lastIndex) {
+        const before = text.slice(lastIndex, matchStart).trim()
+        if (before) segments.push({ type: 'text', text: before })
+      }
+      // normalize digits: strip whitespace, convert commas to w (0.5s pause)
+      const digits = match[1]!.replace(/[\s]/g, '').replace(/,/g, 'w')
+      segments.push({ type: 'dtmf', digits })
+      lastIndex = matchStart + match[0].length
+    }
+
+    // trailing text
+    if (lastIndex < text.length) {
+      const after = text.slice(lastIndex).trim()
+      if (after) segments.push({ type: 'text', text: after })
+    }
+
+    return segments
+  }
+
+  // process mixed text+DTMF: speak text segments via TTS, send DTMF segments via API
+  async function sendMixedResponse(text: string, call: ActiveCall) {
+    const segments = parseResponseSegments(text)
+
+    // if no DTMF markers, just do normal TTS
+    if (segments.length === 1 && segments[0]!.type === 'text') {
+      await sendTtsToCall(segments[0]!.text, call)
+      return
+    }
+
+    for (const seg of segments) {
+      if (seg.type === 'text') {
+        await sendTtsToCall(seg.text, call)
+        // wait for TTS to finish playing before sending DTMF
+        await call.ttsSending
+      } else {
+        console.log(`telnyx-voice: sending DTMF segment: ${seg.digits}`)
+        await sendDtmf(call.callControlId, seg.digits)
+      }
+    }
+  }
+
   // --- channel plugin interface ---
 
   async function* inputGenerator(): AsyncGenerator<QueuedInput> {
@@ -1090,15 +1374,25 @@ export default function create(serverContext?: any) {
       call.textBuffer += message.text
 
       // check for sentence boundaries for streaming TTS
-      const sentenceEnd = call.textBuffer.search(/[.!?]\s|[.!?]$|\n/)
-      if (sentenceEnd !== -1) {
-        const sentence = call.textBuffer.slice(0, sentenceEnd + 1).trim()
-        call.textBuffer = call.textBuffer.slice(sentenceEnd + 1)
+      // also split on DTMF markers so they get sent immediately
+      const splitPoint = call.textBuffer.search(/[.!?]\s|[.!?]$|\n|\[DTMF:/i)
+      if (splitPoint !== -1) {
+        // if we hit a DTMF marker, include it in this chunk (find closing bracket)
+        let endIdx = splitPoint
+        if (call.textBuffer.slice(splitPoint).match(/^\[DTMF:/i)) {
+          const closeBracket = call.textBuffer.indexOf(']', splitPoint)
+          if (closeBracket === -1) return // wait for more text to close the marker
+          endIdx = closeBracket + 1
+        } else {
+          endIdx = splitPoint + 1
+        }
+        const sentence = call.textBuffer.slice(0, endIdx).trim()
+        call.textBuffer = call.textBuffer.slice(endIdx)
         if (sentence) {
           const seq = ++outputSeq
           console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: output #${seq} sentence split: "${sentence}" (remaining buf: ${call.textBuffer.length} chars)`)
           audioLog.reset()
-          await sendTtsToCall(sentence, call)
+          await sendMixedResponse(sentence, call)
         }
       }
     } else if (message.type === 'text_block_end') {
@@ -1109,7 +1403,7 @@ export default function create(serverContext?: any) {
         const seq = ++outputSeq
         console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: output #${seq} flush: "${remaining.trim()}"`)
         audioLog.reset()
-        await sendTtsToCall(remaining.trim(), call)
+        await sendMixedResponse(remaining.trim(), call)
       }
     }
     // ignore tool_use, tool_result, done, error for voice output
@@ -1123,6 +1417,12 @@ export default function create(serverContext?: any) {
       'You can also make outbound calls using the phone_call tool.',
       'Your text responses are automatically converted to speech and played back to the caller.',
       'Keep voice responses concise and conversational — the caller hears them spoken aloud.',
+      '\n\nDTMF (phone menu navigation):',
+      'To send DTMF tones during a call, use the send_dtmf tool or embed [DTMF: digits] in your text response.',
+      'Valid digits: 0-9, *, #, A-D. Use commas or w for 0.5s pauses between digits.',
+      'Example: "Let me press 1 for billing. [DTMF: 1] Now waiting for the next menu."',
+      'The text before and after DTMF markers will be spoken via TTS; the DTMF tones are sent in between.',
+      'When navigating IVR menus, narrate what you are doing so the user can follow along.',
     ].join(' '),
 
     tools: [
@@ -1134,13 +1434,14 @@ export default function create(serverContext?: any) {
           properties: {
             to: { type: 'string', description: 'Phone number to call (E.164 format, e.g. +15551234567)' },
             purpose: { type: 'string', description: 'Brief context about why you are making this call (for your own reference)' },
+            initialMessage: { type: 'string', description: 'Message to speak via TTS as soon as the call connects, before waiting for the other party to speak' },
           },
           required: ['to'],
         },
         async execute(input: unknown) {
-          const { to, purpose } = input as { to: string; purpose?: string }
+          const { to, purpose, initialMessage } = input as { to: string; purpose?: string; initialMessage?: string }
           try {
-            const callControlId = await createOutboundCall(to)
+            const callControlId = await createOutboundCall(to, initialMessage)
             const msg = purpose
               ? `calling ${to} (${purpose}), call_control_id: ${callControlId}`
               : `calling ${to}, call_control_id: ${callControlId}`
@@ -1175,6 +1476,43 @@ export default function create(serverContext?: any) {
 
           await hangupCall(targetId)
           return { content: `hanging up call ${targetId}` }
+        },
+      },
+      {
+        name: 'send_dtmf',
+        description: 'Send DTMF tones on an active phone call. Use this to navigate phone menus (IVR systems). Digits: 0-9, *, #, A-D. Use w for a 0.5s pause, W for a 1s pause between digits.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            digits: { type: 'string', description: 'DTMF digits to send (0-9, *, #, A-D, w/W for pauses). Example: "1w2w3" sends 1, pauses, 2, pauses, 3.' },
+            call_id: { type: 'string', description: 'Call control ID. If not provided, uses the most recent active call.' },
+            duration_ms: { type: 'number', description: 'Duration per digit in ms (100-500, default 250).' },
+          },
+          required: ['digits'],
+        },
+        async execute(input: unknown) {
+          const { digits, call_id, duration_ms } = input as { digits: string; call_id?: string; duration_ms?: number }
+
+          // validate digits
+          if (!/^[0-9A-D*#wW]+$/.test(digits)) {
+            return { content: 'invalid DTMF digits. valid: 0-9, A-D, *, #, w (0.5s pause), W (1s pause)', is_error: true }
+          }
+
+          let targetId = call_id
+          if (!targetId) {
+            const calls = [...activeCalls.keys()]
+            targetId = calls[calls.length - 1]
+          }
+          if (!targetId || !activeCalls.has(targetId)) {
+            return { content: 'no active call to send DTMF on', is_error: true }
+          }
+
+          try {
+            await sendDtmf(targetId, digits, duration_ms)
+            return { content: `sent DTMF "${digits}" on call ${targetId}` }
+          } catch (err: any) {
+            return { content: `DTMF failed: ${err.message}`, is_error: true }
+          }
         },
       },
       {
@@ -1277,6 +1615,11 @@ export default function create(serverContext?: any) {
       ensureWhisperServer().catch(err => {
         console.error('telnyx-voice: failed to start whisper server:', err)
       })
+
+      // clean up old recordings in the background
+      cleanOldRecordings().catch(err => {
+        console.error('telnyx-voice: retention cleanup failed:', err)
+      })
     },
 
     async destroy() {
@@ -1285,8 +1628,9 @@ export default function create(serverContext?: any) {
         silenceCheckInterval = null
       }
 
-      // hang up all active calls
+      // finalize recordings and hang up all active calls
       for (const [id, call] of activeCalls) {
+        await finalizeRecording(call).catch(() => {})
         call.abortController?.abort()
         await hangupCall(id).catch(() => {})
       }
@@ -1299,8 +1643,8 @@ export default function create(serverContext?: any) {
       mediaWsServer = null
 
       // stop shared services (no-op if another plugin is still using them)
-      stopWhisperServer()
-      stopTtsServer()
+      await stopWhisperServer()
+      await stopTtsServer()
     },
   }
 }

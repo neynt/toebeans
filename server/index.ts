@@ -519,7 +519,7 @@ async function main() {
     parts.push(soul)
 
     // then context
-    parts.push(`Current time: ${formatLocalTime(new Date())} (${getTimezone()})`)
+    parts.push(`Time session started: ${formatLocalTime(new Date())} (${getTimezone()})`)
     parts.push(`Current working directory: ${getWorkspaceDir()}`)
 
     // unified plugins section (descriptions + plugin-contributed prompts)
@@ -808,6 +808,23 @@ async function main() {
   })
 
   console.log(`server running on http://localhost:${server.port}`)
+
+  // graceful shutdown — clean up plugin processes (TTS, whisper, etc.) on exit
+  let shuttingDown = false
+  async function shutdown(signal: string) {
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log(`\n[server] received ${signal}, shutting down...`)
+    try {
+      await pluginManager.destroy()
+    } catch (err) {
+      console.error('[server] error during plugin cleanup:', err)
+    }
+    process.exit(0)
+  }
+
+  process.on('SIGINT', () => shutdown('SIGINT'))
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
 }
 
 main().catch(console.error)

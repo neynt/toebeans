@@ -116,7 +116,7 @@ export default function create(serverContext?: { config?: { session?: { compacti
       const userContent = await Bun.file(userKnowledgePath).text()
       if (userContent.trim()) {
         parts.push(
-          `# User info (${userKnowledgePath})\n` +
+          `### User info (${userKnowledgePath})\n` +
           `Below the line is what you know about the user. If you learn anything more about the user that could be useful in the future, add it to the file with bash. Pay special attention to expressed preferences and corrections.\n` +
           `---\n` +
           userContent
@@ -136,12 +136,12 @@ export default function create(serverContext?: { config?: { session?: { compacti
       if (topicFiles.length > 0) {
         topicFiles.sort()
         parts.push(
-          `# Knowledge directory (${knowledgeDir})\n` +
+          `### Knowledge directory (${knowledgeDir})\n` +
           `Files:\n` +
           topicFiles.map(f => `- ${f}`).join('\n') + '\n\n' +
           `You should read these files on-demand. Prior to working on any task, read relevant files. ` +
           `Markdown files created here will be surfaced here in future conversations.\n\n` +
-          `## Proactive knowledge loading\n` +
+          `### Proactive knowledge loading\n` +
           `Treat these knowledge files as extended memory. When the user's message contains relevant keywords or topics, ` +
           `search for and read matching knowledge files BEFORE responding. Examples:\n` +
           `- User asks about schedule, availability, or plans → look for schedule/calendar knowledge files\n` +
@@ -151,9 +151,7 @@ export default function create(serverContext?: { config?: { session?: { compacti
           `- User asks about preferences, habits, or routines → re-read USER.md and check for relevant topic files\n` +
           `- User starts a task in a domain (cooking, travel, coding, etc.) → check for domain-specific knowledge files\n\n` +
           `Don't wait to be asked — if a knowledge file likely contains relevant context, read it proactively. ` +
-          `When in doubt, a quick scan of a potentially relevant file is better than missing useful context.\n\n` +
-          `## Housekeeping\n` +
-          `Keep ~/.toebeans/.gitignore updated to exclude generated files like logs, sessions, and attachments so commits stay clean.`
+          `When in doubt, a quick scan of a potentially relevant file is better than missing useful context.`
         )
       }
 

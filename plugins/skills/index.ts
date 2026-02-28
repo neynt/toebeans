@@ -205,7 +205,7 @@ export default function create(): Plugin {
           return `- **${s.name}** ${tag}: ${s.description}`
         })
         return (
-          `## Available Skills\n\n` +
+          `### Available Skills\n\n` +
           `Skills are loaded from two locations:\n` +
           `- Core: ${CORE_SKILLS_DIR}/\n` +
           `- User: ${USER_SKILLS_DIR}/ (overrides core)\n\n` +

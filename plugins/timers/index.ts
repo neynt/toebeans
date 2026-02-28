@@ -446,6 +446,15 @@ The body (after frontmatter) is the message you'll receive when the timer fires.
     tools,
     input: inputGenerator(),
 
+    async buildSystemPrompt(): Promise<string | null> {
+      if (scheduledTimers.size === 0) return null
+      const lines: string[] = ['#### Scheduled timers']
+      for (const [filename, timer] of scheduledTimers) {
+        lines.push(`- ${filename} → next: ${formatLocalTime(timer.nextFire)} (in ${formatTimeUntil(timer.nextFire)})`)
+      }
+      return lines.join('\n')
+    },
+
     async init() {
       await loadAllTimers()
     },

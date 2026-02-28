@@ -283,7 +283,7 @@ export default function create(): Plugin {
     },
 
     async buildSystemPrompt() {
-      const lines: string[] = ['## Govee Smart Lights']
+      const lines: string[] = ['### Govee Smart Lights']
 
       if (cachedDevices.length > 0) {
         lines.push('', 'discovered devices:')
