@@ -19,6 +19,7 @@ import { transcribe, ensureWhisperServer, stopWhisperServer, ensureTtsServer, sp
 interface TelnyxVoiceConfig {
   apiKey: string                    // telnyx API key (v2)
   connectionId?: string             // telnyx connection ID (SIP/credential) for outbound calls
+  outboundVoiceProfileId?: string   // telnyx outbound voice profile ID (alternative to connectionId)
   phoneNumber?: string              // telnyx phone number (for outbound calls)
   webhookPort?: number              // port for telnyx webhooks (default: 8089)
   mediaWsPort?: number              // port for media websocket (default: 8090)
@@ -218,8 +219,8 @@ export default function create(serverContext?: any) {
   }
 
   async function createOutboundCall(to: string): Promise<string> {
-    if (!config!.connectionId) {
-      throw new Error('connectionId not configured — required for outbound calls')
+    if (!config!.connectionId && !config!.outboundVoiceProfileId) {
+      throw new Error('connectionId or outboundVoiceProfileId not configured — one is required for outbound calls')
     }
     if (!config!.phoneNumber) {
       throw new Error('phoneNumber not configured — required as caller ID for outbound calls')
@@ -232,7 +233,9 @@ export default function create(serverContext?: any) {
     const streamUrl = `wss://${config!.publicHost}/media`
 
     const res = await telnyxApi('POST', '/calls', {
-      connection_id: config!.connectionId,
+      ...(config!.outboundVoiceProfileId
+        ? { outbound_voice_profile_id: config!.outboundVoiceProfileId }
+        : { connection_id: config!.connectionId }),
       to,
       from: config!.phoneNumber,
       stream_url: streamUrl,

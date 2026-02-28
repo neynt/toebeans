@@ -375,6 +375,21 @@ export default function create(): Plugin {
         let cwd = originalCwd
 
         try {
+          // check for uncommitted changes before creating a worktree
+          if (workingDir && worktree) {
+            const statusResult = Bun.spawnSync(
+              ['git', 'status', '--porcelain'],
+              { cwd: workingDir }
+            )
+            const dirtyFiles = statusResult.stdout.toString().trim()
+            if (dirtyFiles) {
+              return {
+                content: `Cannot spawn worktree: repo has uncommitted changes. Commit or stash first: git status in ${workingDir}`,
+                is_error: true,
+              }
+            }
+          }
+
           // set up git worktree if requested
           if (worktree) {
             if (!workingDir) {
