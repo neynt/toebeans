@@ -34,6 +34,7 @@ const configSchema = z.object({
   }).passthrough(),
   timezone: z.string().default('America/New_York'),
   notifyOnRestart: z.string().optional(),
+  restartMessage: z.string().default('server restarted successfully. continue from where you left off.'),
 }).passthrough()
 
 export type Config = z.infer<typeof configSchema>

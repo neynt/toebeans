@@ -255,7 +255,7 @@ async function main() {
           const resumeAbortController = new AbortController()
           sessionAbortControllers.set(sessionId, resumeAbortController)
 
-          await runAgentTurn([{ type: 'text', text: 'server restarted successfully. continuing from where you left off.' }], {
+          await runAgentTurn([{ type: 'text', text: config.restartMessage }], {
             provider,
             system: buildSystemPrompt,
             tools: getTools,

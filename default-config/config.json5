@@ -20,5 +20,6 @@
     "maxToolResultChars": 50000
   },
   "plugins": {},
-  "notifyOnRestart": ""
+  "notifyOnRestart": "",
+  "restartMessage": "server restarted successfully. continue from where you left off."
 }
