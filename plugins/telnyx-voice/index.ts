@@ -37,6 +37,10 @@ interface TelnyxVoiceConfig {
   recordCalls?: boolean             // record call audio (default: true)
   recordingsPath?: string           // directory for recordings (default: ~/.toebeans/recordings/)
   retentionDays?: number            // auto-delete recordings older than this many days
+  // DSP-based DTMF detection
+  dtmfThreshold?: number            // Goertzel power threshold (default: 1000000)
+  dtmfMinDurationMs?: number        // minimum tone duration in ms (default: 40)
+  dtmfInterDigitMs?: number         // minimum gap between digits in ms (default: 40)
 }
 
 // telnyx websocket message types
@@ -138,6 +142,9 @@ interface ActiveCall {
     outboundChunks: Buffer[]
     startTime: number  // Date.now() when recording started
   } | null
+
+  // DSP-based DTMF detector
+  dtmfDetector: DtmfDetector | null
 }
 
 interface WsData {
@@ -158,6 +165,126 @@ const audioLog = {
   elapsed(): string { return (performance.now() - this._t0).toFixed(1) },
   // absolute timestamp for log lines
   ts(): string { return new Date().toISOString().slice(11, 23) },
+}
+
+// --- Goertzel-based DTMF detector ---
+// detects DTMF tones directly from 16-bit PCM audio using the Goertzel algorithm,
+// which is efficient for detecting power at specific known frequencies.
+
+const DTMF_ROW_FREQS = [697, 770, 852, 941] as const
+const DTMF_COL_FREQS = [1209, 1336, 1477, 1633] as const
+const DTMF_MAP: Record<string, string> = {
+  '697:1209': '1', '697:1336': '2', '697:1477': '3', '697:1633': 'A',
+  '770:1209': '4', '770:1336': '5', '770:1477': '6', '770:1633': 'B',
+  '852:1209': '7', '852:1336': '8', '852:1477': '9', '852:1633': 'C',
+  '941:1209': '*', '941:1336': '0', '941:1477': '#', '941:1633': 'D',
+}
+
+interface DtmfDetectorConfig {
+  sampleRate: number
+  threshold: number       // Goertzel power threshold
+  minDurationMs: number   // minimum tone duration
+  interDigitMs: number    // minimum gap between digits
+}
+
+class DtmfDetector {
+  private config: DtmfDetectorConfig
+  // precomputed Goertzel coefficients for each target frequency
+  private coeffs: { freq: number; coeff: number }[]
+  // state for tone tracking
+  private currentDigit: string | null = null
+  private digitStartMs: number = 0
+  private lastEmitMs: number = 0
+  private emitted: boolean = false  // whether we already emitted the current tone
+
+  constructor(config: DtmfDetectorConfig) {
+    this.config = config
+    // precompute 2*cos(2*pi*f/sampleRate) for each frequency
+    this.coeffs = [...DTMF_ROW_FREQS, ...DTMF_COL_FREQS].map(freq => ({
+      freq,
+      coeff: 2 * Math.cos((2 * Math.PI * freq) / config.sampleRate),
+    }))
+  }
+
+  // compute Goertzel power for a single frequency over a block of samples
+  private goertzelPower(samples: Int16Array, coeffIdx: number): number {
+    const coeff = this.coeffs[coeffIdx]!.coeff
+    let s0 = 0, s1 = 0, s2 = 0
+    for (let i = 0; i < samples.length; i++) {
+      s0 = coeff * s1 - s2 + samples[i]!
+      s2 = s1
+      s1 = s0
+    }
+    // power = s1^2 + s2^2 - coeff*s1*s2
+    return s1 * s1 + s2 * s2 - coeff * s1 * s2
+  }
+
+  // process a chunk of L16 PCM audio. returns detected digits (usually 0 or 1).
+  process(pcmBuffer: Buffer): string[] {
+    const digits: string[] = []
+    const now = performance.now()
+
+    // interpret buffer as 16-bit signed LE samples
+    const samples = new Int16Array(
+      pcmBuffer.buffer,
+      pcmBuffer.byteOffset,
+      pcmBuffer.length / 2,
+    )
+
+    if (samples.length === 0) return digits
+
+    // compute power at all 8 DTMF frequencies
+    const powers = this.coeffs.map((_, i) => this.goertzelPower(samples, i))
+
+    // find strongest row (indices 0-3) and column (indices 4-7)
+    let maxRowPower = 0, maxRowIdx = -1
+    for (let i = 0; i < 4; i++) {
+      if (powers[i]! > maxRowPower) {
+        maxRowPower = powers[i]!
+        maxRowIdx = i
+      }
+    }
+    let maxColPower = 0, maxColIdx = -1
+    for (let i = 4; i < 8; i++) {
+      if (powers[i]! > maxColPower) {
+        maxColPower = powers[i]!
+        maxColIdx = i
+      }
+    }
+
+    // both row and column must exceed threshold
+    let detectedDigit: string | null = null
+    if (maxRowPower >= this.config.threshold && maxColPower >= this.config.threshold) {
+      const rowFreq = DTMF_ROW_FREQS[maxRowIdx]
+      const colFreq = DTMF_COL_FREQS[maxColIdx - 4]
+      detectedDigit = DTMF_MAP[`${rowFreq}:${colFreq}`] ?? null
+    }
+
+    if (detectedDigit) {
+      if (detectedDigit === this.currentDigit) {
+        // same tone continuing — check if held long enough to emit
+        if (!this.emitted && now - this.digitStartMs >= this.config.minDurationMs) {
+          // also enforce inter-digit gap from last emitted digit
+          if (now - this.lastEmitMs >= this.config.interDigitMs) {
+            digits.push(detectedDigit)
+            this.emitted = true
+            this.lastEmitMs = now
+          }
+        }
+      } else {
+        // new tone started
+        this.currentDigit = detectedDigit
+        this.digitStartMs = now
+        this.emitted = false
+      }
+    } else {
+      // no valid tone detected — reset
+      this.currentDigit = null
+      this.emitted = false
+    }
+
+    return digits
+  }
 }
 
 export default function create(serverContext?: any) {
@@ -470,6 +597,7 @@ export default function create(serverContext?: any) {
       ttsSending: Promise.resolve(),
       initialMessage: initialMessage ?? null,
       recording: null,
+      dtmfDetector: null,
     })
 
     return callControlId
@@ -1064,6 +1192,7 @@ export default function create(serverContext?: any) {
             ttsSending: Promise.resolve(),
             initialMessage: null,
             recording: null,
+            dtmfDetector: null,
           })
           await answerCall(callControlId)
         } else if (payload.direction === 'outgoing') {
@@ -1089,6 +1218,7 @@ export default function create(serverContext?: any) {
               ttsSending: Promise.resolve(),
               initialMessage: null,
               recording: null,
+              dtmfDetector: null,
             })
           }
         }
@@ -1182,6 +1312,14 @@ export default function create(serverContext?: any) {
           streamToCall.set(streamId, call_control_id)
           initRecording(call)
 
+          // initialize DSP-based DTMF detector for this call
+          call.dtmfDetector = new DtmfDetector({
+            sampleRate: media_format.sample_rate,
+            threshold: config!.dtmfThreshold ?? 1000000,
+            minDurationMs: config!.dtmfMinDurationMs ?? 40,
+            interDigitMs: config!.dtmfInterDigitMs ?? 40,
+          })
+
           // if this is an outbound call with an initial message, speak it now
           if (call.initialMessage) {
             const msg = call.initialMessage
@@ -1209,6 +1347,18 @@ export default function create(serverContext?: any) {
 
         // record all inbound audio (before VAD, so we capture everything)
         recordInbound(call, audioData)
+
+        // DSP-based DTMF detection — run on every inbound audio frame,
+        // DTMF is always processed (works as interrupt even during AI speech)
+        if (call.dtmfDetector) {
+          // Goertzel needs L16 PCM; convert if necessary
+          const pcm16 = encodingToPcm16(audioData, call.mediaFormat?.encoding || 'L16')
+          const digits = call.dtmfDetector.process(pcm16)
+          for (const digit of digits) {
+            console.log(`telnyx-voice: DTMF detected (DSP) from ${call.from}: ${digit}`)
+            queueMessage(`[DTMF from ${call.from}]: ${digit}`, callControlId)
+          }
+        }
 
         // log first audio chunk for diagnostics
         if (!call.audioStartTime) {
