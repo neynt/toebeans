@@ -1122,6 +1122,16 @@ export default function create(serverContext?: any) {
         break
       }
 
+      case 'call.dtmf.received': {
+        const call = activeCalls.get(callControlId)
+        if (call) {
+          const digit = payload.digit as string
+          console.log(`telnyx-voice: DTMF received from ${call.from}: ${digit}`)
+          queueMessage(`[DTMF from ${call.from}]: ${digit}`, callControlId)
+        }
+        break
+      }
+
       case 'streaming.started': {
         console.log(`telnyx-voice: streaming started for ${callControlId}`)
         break
