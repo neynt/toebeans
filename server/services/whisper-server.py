@@ -5,7 +5,7 @@ listens on a unix socket, accepts audio data via POST, returns transcription.
 model stays loaded in VRAM/RAM between requests.
 
 usage:
-  python whisper-server.py --socket ~/.toebeans/whisper.sock [--model large-v3] [--device cuda]
+  python whisper-server.py --socket ~/.toebeans/whisper.sock [--model large-v3-turbo] [--device cuda]
 
 api:
   POST /transcribe  — multipart/form-data with 'audio' file field
@@ -172,7 +172,7 @@ def main():
     parser = argparse.ArgumentParser(description="persistent whisper transcription server")
     parser.add_argument("--socket", required=True, help="unix socket path")
     parser.add_argument("--pidfile", help="write PID to this file")
-    parser.add_argument("--model", default="large-v3", help="whisper model name (default: large-v3)")
+    parser.add_argument("--model", default="large-v3-turbo", help="whisper model name (default: large-v3-turbo)")
     parser.add_argument("--device", default="auto", help="device: auto, cuda, cpu (default: auto)")
     parser.add_argument("--compute-type", default=None, help="compute type (default: float16 for cuda, int8 for cpu)")
     args = parser.parse_args()
