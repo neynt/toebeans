@@ -14,7 +14,7 @@
 //   outgoing: { event: 'media', media: { payload: '<base64 audio>' } }
 
 import type { ServerWebSocket } from 'bun'
-import { transcribe, ensureWhisperServer, stopWhisperServer, ensureTtsServer, speak, stopTtsServer, type TtsOptions } from '../../server/services/index.ts'
+import { transcribe, ensureWhisperServer, stopWhisperServer, ensureTtsServer, speak, speakStreaming, stopTtsServer, type TtsOptions } from '../../server/services/index.ts'
 
 interface TelnyxVoiceConfig {
   apiKey: string                    // telnyx API key (v2)
@@ -35,12 +35,12 @@ interface TelnyxVoiceConfig {
   voiceTemperature?: number         // sampling temperature (lower = more consistent, default: 0.3)
   // recording settings
   recordCalls?: boolean             // record call audio (default: true)
-  recordingsPath?: string           // directory for recordings (default: ~/.toebeans/recordings/)
+  recordingsPath?: string           // directory for recordings (default: ~/.toebeans/telnyx-voice/call-recordings/)
   retentionDays?: number            // auto-delete recordings older than this many days
   // DSP-based DTMF detection
-  dtmfThreshold?: number            // Goertzel power threshold (default: 1000000)
-  dtmfMinDurationMs?: number        // minimum tone duration in ms (default: 40)
-  dtmfInterDigitMs?: number         // minimum gap between digits in ms (default: 40)
+  dtmfThreshold?: number            // Goertzel power threshold (default: 100000000)
+  dtmfMinDurationMs?: number        // minimum tone duration in ms (default: 150)
+  dtmfInterDigitMs?: number         // minimum gap between digits in ms (default: 100)
 }
 
 // telnyx websocket message types
@@ -255,9 +255,28 @@ class DtmfDetector {
     // both row and column must exceed threshold
     let detectedDigit: string | null = null
     if (maxRowPower >= this.config.threshold && maxColPower >= this.config.threshold) {
-      const rowFreq = DTMF_ROW_FREQS[maxRowIdx]
-      const colFreq = DTMF_COL_FREQS[maxColIdx - 4]
-      detectedDigit = DTMF_MAP[`${rowFreq}:${colFreq}`] ?? null
+      // twist ratio check: row/column power must be close to equal (~0.6 to 1.8 ratio)
+      // real DTMF has two roughly equal-power tones; speech doesn't
+      const twist = maxRowPower / maxColPower
+      if (twist < 0.6 || twist > 1.8) {
+        detectedDigit = null
+      } else {
+        // energy ratio check: DTMF frequencies should dominate the signal
+        // sum all 8 DTMF bin powers and compare against total signal energy
+        const dtmfEnergy = powers.reduce((sum, p) => sum + p, 0)
+        let totalEnergy = 0
+        for (let i = 0; i < samples.length; i++) {
+          totalEnergy += samples[i]! * samples[i]!
+        }
+        // DTMF tones should carry >75% of total energy; speech is broadband
+        if (totalEnergy > 0 && dtmfEnergy / totalEnergy < 0.75) {
+          detectedDigit = null
+        } else {
+          const rowFreq = DTMF_ROW_FREQS[maxRowIdx]
+          const colFreq = DTMF_COL_FREQS[maxColIdx - 4]
+          detectedDigit = DTMF_MAP[`${rowFreq}:${colFreq}`] ?? null
+        }
+      }
     }
 
     if (detectedDigit) {
@@ -299,7 +318,7 @@ export default function create(serverContext?: any) {
   // --- recording helpers ---
 
   function getRecordingsDir(): string {
-    return config?.recordingsPath || `${process.env.HOME}/.toebeans/recordings`
+    return config?.recordingsPath || `${process.env.HOME}/.toebeans/telnyx-voice/call-recordings`
   }
 
   function shouldRecord(): boolean {
@@ -830,65 +849,12 @@ export default function create(serverContext?: any) {
 
   // --- TTS output: generate speech and send back through telnyx websocket ---
 
-  // generate TTS audio (can run concurrently for pipelining)
-  async function generateTtsAudio(text: string, call: ActiveCall): Promise<Buffer | null> {
-    const genStart = performance.now()
-    const textPreview = text.length > 60 ? text.slice(0, 57) + '...' : text
-    console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS request "${textPreview}" (${text.length} chars)`)
-
-    try {
-      const ttsOpts: TtsOptions = {
-        language: 'english',
-        voiceInstruct: config?.voiceInstruct,
-        instruct: config?.voiceInstruct,
-        seed: config?.voiceSeed,
-        temperature: config?.voiceTemperature ?? 0.3,
-        subtalkerTemperature: config?.voiceTemperature ?? 0.3,
-      }
-
-      const ttsStart = performance.now()
-      const wavData = await speak(text, ttsOpts)
-      const ttsElapsed = performance.now() - ttsStart
-      console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS response: ${wavData.length} bytes WAV in ${ttsElapsed.toFixed(0)}ms`)
-
-      const pcmData = extractPcmFromWav(wavData)
-      if (!pcmData) {
-        console.error('telnyx-voice/audio-out: failed to extract PCM from TTS WAV')
-        return null
-      }
-
-      // resample from TTS sample rate (typically 24000) to call sample rate
-      const callSampleRate = call.mediaFormat?.sampleRate || 8000
-      const resampleStart = performance.now()
-      const resampled = resamplePcm(pcmData.samples, pcmData.sampleRate, callSampleRate)
-      const resampleElapsed = performance.now() - resampleStart
-
-      // encode to the call's codec
-      const callEncoding = call.mediaFormat?.encoding || 'L16'
-      const bytesPerSample = callEncoding === 'L16' ? 2 : 1
-      const audioDurationMs = (resampled.length / bytesPerSample / callSampleRate) * 1000
-      const totalElapsed = performance.now() - genStart
-      console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: resampled ${pcmData.sampleRate}→${callSampleRate}Hz in ${resampleElapsed.toFixed(0)}ms, ` +
-        `${resampled.length} bytes (${audioDurationMs.toFixed(0)}ms audio), total gen: ${totalElapsed.toFixed(0)}ms`)
-
-      if (callEncoding === 'PCMU') {
-        return encodeMuLaw(resampled)
-      } else if (callEncoding === 'PCMA') {
-        return encodeALaw(resampled)
-      }
-      // L16: Telnyx accepts little-endian; resampler already outputs LE
-      return resampled
-    } catch (err) {
-      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS generation error:`, err)
-      return null
-    }
-  }
-
-  // send pre-encoded audio frames over the websocket, paced to real-time
-  async function sendFramesToCall(encodedAudio: Buffer, call: ActiveCall) {
+  // send pre-encoded audio frames over the websocket, paced to real-time.
+  // returns the wall-clock time the first frame was sent (for latency tracking).
+  async function sendFramesToCall(encodedAudio: Buffer, call: ActiveCall): Promise<number> {
     if (!call.ws) {
       console.warn('telnyx-voice/audio-out: no websocket for call, cannot send frames')
-      return
+      return 0
     }
 
     // record all outbound audio
@@ -914,25 +880,12 @@ export default function create(serverContext?: any) {
     const expectedDurationMs = totalFrames * frameMs
 
     const sendStart = performance.now()
-    console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: sending ${totalFrames} frames (${frameBytes}B each, ${frameMs}ms, ` +
-      `expected ${expectedDurationMs}ms playback) wsState=${call.ws.readyState}`)
-
     let framesSent = 0
     let sendErrors = 0
-    let maxJitterMs = 0
-    let prevFrameTime = sendStart
 
     for (let offset = 0, frameIndex = 0; offset < encodedAudio.length; offset += frameBytes, frameIndex++) {
       const chunk = encodedAudio.subarray(offset, offset + frameBytes)
       const payload = chunk.toString('base64')
-
-      const beforeSend = performance.now()
-      const interFrameMs = beforeSend - prevFrameTime
-      if (framesSent > 0) {
-        const jitter = Math.abs(interFrameMs - frameMs)
-        if (jitter > maxJitterMs) maxJitterMs = jitter
-      }
-      prevFrameTime = beforeSend
 
       try {
         call.ws.send(JSON.stringify({
@@ -951,10 +904,7 @@ export default function create(serverContext?: any) {
         }
       }
 
-      // pace using absolute timestamps to prevent setTimeout drift accumulation.
-      // each frame targets an exact wall-clock time so jitter on one frame
-      // doesn't shift all subsequent ones — prevents buffer underruns that
-      // cause choppy playback.
+      // pace using absolute timestamps to prevent setTimeout drift accumulation
       const nextFrameTime = sendStart + (frameIndex + 1) * frameMs
       const sleepMs = nextFrameTime - performance.now()
       if (sleepMs > 0) {
@@ -964,44 +914,135 @@ export default function create(serverContext?: any) {
 
     const actualDurationMs = performance.now() - sendStart
     const drift = actualDurationMs - expectedDurationMs
-    console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: done sending ${framesSent}/${totalFrames} frames in ${actualDurationMs.toFixed(0)}ms ` +
-      `(expected ${expectedDurationMs}ms, drift ${drift > 0 ? '+' : ''}${drift.toFixed(0)}ms, maxJitter ${maxJitterMs.toFixed(1)}ms` +
-      `${sendErrors > 0 ? `, ${sendErrors} errors` : ''})`)
+    console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: sent ${framesSent}/${totalFrames} frames in ${actualDurationMs.toFixed(0)}ms ` +
+      `(drift ${drift > 0 ? '+' : ''}${drift.toFixed(0)}ms${sendErrors > 0 ? `, ${sendErrors} errors` : ''})`)
+
+    return sendStart
   }
 
-  // generate TTS and queue frame sending so sentences play back-to-back.
-  // generation starts immediately (overlapping with previous sentence's playback)
-  // but frame sending is serialized through call.ttsSending.
-  let ttsSentenceSeq = 0
+  function getTtsOpts(): TtsOptions {
+    return {
+      language: 'english',
+      voiceInstruct: config?.voiceInstruct,
+      instruct: config?.voiceInstruct,
+      seed: config?.voiceSeed,
+      temperature: config?.voiceTemperature ?? 0.3,
+      subtalkerTemperature: config?.voiceTemperature ?? 0.3,
+    }
+  }
+
+  // stream TTS: send text to /tts/stream, receive PCM chunks, resample+encode+send
+  // each chunk in real-time as it arrives. serialized through call.ttsSending so
+  // multiple calls play back-to-back without overlap.
+  async function streamTtsToCall(text: string, call: ActiveCall) {
+    if (!call.ws) {
+      console.warn(`telnyx-voice/audio-out [${audioLog.ts()}]: no websocket for call, cannot stream TTS`)
+      return
+    }
+
+    const textPreview = text.length > 60 ? text.slice(0, 57) + '...' : text
+
+    // chain through call.ttsSending so concurrent calls serialize
+    call.ttsSending = call.ttsSending.then(async () => {
+      const streamStart = performance.now()
+      console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: streaming TTS "${textPreview}" (${text.length} chars)`)
+
+      const callSampleRate = call.mediaFormat?.sampleRate || 8000
+      const callEncoding = call.mediaFormat?.encoding || 'L16'
+      const TTS_SOURCE_RATE = 24000 // speakStreaming yields int16 LE @ 24kHz
+
+      // accumulate resampled+encoded audio until we have enough for a batch of frames,
+      // then send them paced to real-time. this avoids per-chunk overhead while still
+      // streaming — we send frames as soon as we have them rather than waiting for
+      // the full response.
+      let pendingPcm = Buffer.alloc(0) // resampled PCM waiting to be framed
+      let totalBytesSent = 0
+      let firstFrameTime = 0
+      let chunkCount = 0
+
+      // how much resampled audio (in bytes) we accumulate before flushing to frames.
+      // ~200ms worth keeps the pipeline smooth without adding perceptible latency.
+      const bytesPerSample = callEncoding === 'L16' ? 2 : 1
+      const flushBytes = Math.ceil(callSampleRate * 0.2) * bytesPerSample
+
+      function encodeForWire(resampled: Buffer): Buffer {
+        if (callEncoding === 'PCMU') return encodeMuLaw(resampled)
+        if (callEncoding === 'PCMA') return encodeALaw(resampled)
+        return resampled // L16 already LE
+      }
+
+      async function flushPending() {
+        if (pendingPcm.length === 0) return
+        const encoded = encodeForWire(pendingPcm)
+        pendingPcm = Buffer.alloc(0)
+        const t = await sendFramesToCall(encoded, call)
+        if (!firstFrameTime && t) firstFrameTime = t
+        totalBytesSent += encoded.length
+      }
+
+      try {
+        for await (const chunk of speakStreaming(text, getTtsOpts())) {
+          chunkCount++
+          // chunk is raw int16 LE PCM @ 24kHz — resample to call rate
+          const resampled = resamplePcm(chunk, TTS_SOURCE_RATE, callSampleRate)
+          // append to pending buffer
+          pendingPcm = Buffer.concat([pendingPcm, resampled])
+
+          if (pendingPcm.length >= flushBytes) {
+            await flushPending()
+          }
+        }
+
+        // flush any remaining audio
+        await flushPending()
+
+        const elapsed = performance.now() - streamStart
+        const audioDurationMs = (totalBytesSent / bytesPerSample / callSampleRate) * 1000
+        const ttfaMs = firstFrameTime ? (firstFrameTime - streamStart).toFixed(0) : 'n/a'
+        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: stream done: ${chunkCount} chunks, ` +
+          `${audioDurationMs.toFixed(0)}ms audio, TTFA ${ttfaMs}ms, total ${elapsed.toFixed(0)}ms`)
+      } catch (err) {
+        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: streaming TTS error:`, err)
+      }
+    }).catch(err => {
+      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
+    })
+  }
+
+  // non-streaming TTS for short utterances (initial messages, etc.)
   async function sendTtsToCall(text: string, call: ActiveCall) {
     if (!call.ws) {
       console.warn(`telnyx-voice/audio-out [${audioLog.ts()}]: no websocket for call, cannot send TTS`)
       return
     }
 
-    const seq = ++ttsSentenceSeq
-    const queueTime = performance.now()
-    console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: queuing sentence #${seq} for TTS (${text.length} chars)`)
-
-    // start TTS generation immediately (concurrent with previous sentence's playback)
-    const audioPromise = generateTtsAudio(text, call).catch(err => {
-      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS generation error for sentence #${seq}:`, err)
-      return null
-    })
-
-    // chain frame sending so it waits for the previous sentence to finish playing
     call.ttsSending = call.ttsSending.then(async () => {
-      const waitMs = performance.now() - queueTime
-      console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: sentence #${seq} waited ${waitMs.toFixed(0)}ms in send queue`)
-      const encodedAudio = await audioPromise
-      if (encodedAudio) {
-        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: sentence #${seq} sending ${encodedAudio.length} bytes to ws`)
-        await sendFramesToCall(encodedAudio, call)
-      } else {
-        console.warn(`telnyx-voice/audio-out [${audioLog.ts()}]: sentence #${seq} had no audio to send`)
+      const genStart = performance.now()
+      const textPreview = text.length > 60 ? text.slice(0, 57) + '...' : text
+      console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS request "${textPreview}" (${text.length} chars)`)
+
+      try {
+        const wavData = await speak(text, getTtsOpts())
+        const pcmData = extractPcmFromWav(wavData)
+        if (!pcmData) {
+          console.error('telnyx-voice/audio-out: failed to extract PCM from TTS WAV')
+          return
+        }
+        const callSampleRate = call.mediaFormat?.sampleRate || 8000
+        const callEncoding = call.mediaFormat?.encoding || 'L16'
+        const resampled = resamplePcm(pcmData.samples, pcmData.sampleRate, callSampleRate)
+        let encoded = resampled
+        if (callEncoding === 'PCMU') encoded = encodeMuLaw(resampled)
+        else if (callEncoding === 'PCMA') encoded = encodeALaw(resampled)
+
+        const elapsed = performance.now() - genStart
+        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS generated in ${elapsed.toFixed(0)}ms, sending ${encoded.length} bytes`)
+        await sendFramesToCall(encoded, call)
+      } catch (err) {
+        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS error:`, err)
       }
     }).catch(err => {
-      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error for sentence #${seq}:`, err)
+      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
     })
   }
 
@@ -1315,9 +1356,9 @@ export default function create(serverContext?: any) {
           // initialize DSP-based DTMF detector for this call
           call.dtmfDetector = new DtmfDetector({
             sampleRate: media_format.sample_rate,
-            threshold: config!.dtmfThreshold ?? 1000000,
-            minDurationMs: config!.dtmfMinDurationMs ?? 40,
-            interDigitMs: config!.dtmfInterDigitMs ?? 40,
+            threshold: config!.dtmfThreshold ?? 100000000,
+            minDurationMs: config!.dtmfMinDurationMs ?? 150,
+            interDigitMs: config!.dtmfInterDigitMs ?? 100,
           })
 
           // if this is an outbound call with an initial message, speak it now
@@ -1487,19 +1528,19 @@ export default function create(serverContext?: any) {
     return segments
   }
 
-  // process mixed text+DTMF: speak text segments via TTS, send DTMF segments via API
+  // process mixed text+DTMF: stream text segments via TTS, send DTMF segments via API
   async function sendMixedResponse(text: string, call: ActiveCall) {
     const segments = parseResponseSegments(text)
 
-    // if no DTMF markers, just do normal TTS
+    // if no DTMF markers, just stream the whole thing
     if (segments.length === 1 && segments[0]!.type === 'text') {
-      await sendTtsToCall(segments[0]!.text, call)
+      await streamTtsToCall(segments[0]!.text, call)
       return
     }
 
     for (const seg of segments) {
       if (seg.type === 'text') {
-        await sendTtsToCall(seg.text, call)
+        await streamTtsToCall(seg.text, call)
         // wait for TTS to finish playing before sending DTMF
         await call.ttsSending
       } else {
@@ -1522,7 +1563,10 @@ export default function create(serverContext?: any) {
     }
   }
 
-  // output handler: receives agent response and converts to speech
+  // output handler: receives agent response and converts to speech.
+  // buffers all streaming text, then sends the full response to streaming TTS
+  // on text_block_end. no sentence splitting — the TTS server handles the full
+  // text and streams audio chunks back as they're generated.
   let outputSeq = 0
   async function handleOutput(sessionId: string, message: any) {
     // sessionId here is the callControlId
@@ -1530,40 +1574,15 @@ export default function create(serverContext?: any) {
     if (!call) return
 
     if (message.type === 'text') {
-      // buffer text until we get a text_block_end or enough for a sentence
       call.textBuffer += message.text
-
-      // check for sentence boundaries for streaming TTS
-      // also split on DTMF markers so they get sent immediately
-      const splitPoint = call.textBuffer.search(/[.!?]\s|[.!?]$|\n|\[DTMF:/i)
-      if (splitPoint !== -1) {
-        // if we hit a DTMF marker, include it in this chunk (find closing bracket)
-        let endIdx = splitPoint
-        if (call.textBuffer.slice(splitPoint).match(/^\[DTMF:/i)) {
-          const closeBracket = call.textBuffer.indexOf(']', splitPoint)
-          if (closeBracket === -1) return // wait for more text to close the marker
-          endIdx = closeBracket + 1
-        } else {
-          endIdx = splitPoint + 1
-        }
-        const sentence = call.textBuffer.slice(0, endIdx).trim()
-        call.textBuffer = call.textBuffer.slice(endIdx)
-        if (sentence) {
-          const seq = ++outputSeq
-          console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: output #${seq} sentence split: "${sentence}" (remaining buf: ${call.textBuffer.length} chars)`)
-          audioLog.reset()
-          await sendMixedResponse(sentence, call)
-        }
-      }
     } else if (message.type === 'text_block_end') {
-      // flush remaining text
-      const remaining = call.textBuffer
+      const text = call.textBuffer.trim()
       call.textBuffer = ''
-      if (remaining.trim()) {
+      if (text) {
         const seq = ++outputSeq
-        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: output #${seq} flush: "${remaining.trim()}"`)
+        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: output #${seq}: "${text.length > 80 ? text.slice(0, 77) + '...' : text}" (${text.length} chars)`)
         audioLog.reset()
-        await sendMixedResponse(remaining.trim(), call)
+        await sendMixedResponse(text, call)
       }
     }
     // ignore tool_use, tool_result, done, error for voice output
@@ -1583,6 +1602,9 @@ export default function create(serverContext?: any) {
       'Example: "Let me press 1 for billing. [DTMF: 1] Now waiting for the next menu."',
       'The text before and after DTMF markers will be spoken via TTS; the DTMF tones are sent in between.',
       'When navigating IVR menus, narrate what you are doing so the user can follow along.',
+      '\n\nIMPORTANT: [DTMF: X] markers in your response SEND actual tones to the caller.',
+      'When you detect DTMF digits from the user, acknowledge them in text but do NOT include [DTMF: X] markers in your response — those markers SEND tones back to the caller.',
+      'Only use [DTMF: X] when YOU intentionally want to send a tone (e.g. navigating an IVR menu on behalf of the user).',
     ].join(' '),
 
     tools: [

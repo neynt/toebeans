@@ -5,6 +5,10 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 
+function expandTilde(path: string): string {
+  return path.startsWith('~') ? homedir() + path.slice(1) : path
+}
+
 const LOG_DIR = join(getDataDir(), 'claude-code')
 const PENDING_PATH = join(LOG_DIR, 'pending.json')
 
@@ -360,13 +364,14 @@ export default function create(): Plugin {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'The task/prompt to send to Claude Code' },
-          workingDir: { type: 'string', description: 'Working directory for the claude code process (optional). Must be an absolute path — tilde (~) is NOT expanded. Example: "/home/neynt/code/toebeans", not "~/code/toebeans".' },
+          workingDir: { type: 'string', description: 'Working directory for the claude code process (optional). Tilde (~) is expanded to the home directory.' },
           worktree: { type: 'string', description: 'Branch/task name for git worktree isolation. When provided with workingDir, creates a git worktree and runs the task there. The branch is merged back on completion.' },
         },
         required: ['task'],
       },
       async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-        const { task, workingDir, worktree } = input as { task: string; workingDir?: string; worktree?: string }
+        const { task, workingDir: rawWorkingDir, worktree } = input as { task: string; workingDir?: string; worktree?: string }
+        const workingDir = rawWorkingDir ? expandTilde(rawWorkingDir) : undefined
 
         await ensureLogDir()
         const sessionId = generateSessionId()

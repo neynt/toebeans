@@ -265,7 +265,7 @@ async function transcribeAudio(audioPath: string): Promise<string> {
   }
 }
 
-const ATTACHMENT_DIR = join(getDataDir(), 'discord-attachments')
+const ATTACHMENT_DIR = join(getDataDir(), 'discord', 'attachments')
 const ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
 async function cleanupOldAttachments() {
@@ -984,7 +984,7 @@ export default function create(serverContext?: ServerContext): Plugin {
 
             if (isAudio && config!.transcribeVoice !== false) {
               try {
-                const audioDir = join(getDataDir(), 'discord')
+                const audioDir = join(getDataDir(), 'discord', 'voice-notes')
                 await mkdir(audioDir, { recursive: true })
                 const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
                 await downloadFile(attachment.url, audioFile)

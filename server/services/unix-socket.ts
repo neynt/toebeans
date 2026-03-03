@@ -5,6 +5,7 @@ import * as http from 'node:http'
 /**
  * make an HTTP request over a unix domain socket.
  * used by TTS and STT services to communicate with their python servers.
+ * pass an AbortSignal to cancel the request and free the connection.
  */
 export function unixRequest(
   socketPath: string,
@@ -12,6 +13,7 @@ export function unixRequest(
   path: string,
   body?: string | Buffer,
   contentType?: string,
+  signal?: AbortSignal,
 ): Promise<{ status: number; data: Buffer }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string | number> = {}
@@ -30,7 +32,14 @@ export function unixRequest(
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
       res.on('end', () => resolve({ status: res.statusCode ?? 0, data: Buffer.concat(chunks) }))
     })
-    req.on('error', reject)
+    req.on('error', (err) => {
+      if (signal?.aborted) reject(new Error('request aborted'))
+      else reject(err)
+    })
+    if (signal) {
+      if (signal.aborted) { req.destroy(); reject(new Error('request aborted')); return }
+      signal.addEventListener('abort', () => req.destroy(), { once: true })
+    }
     if (body) req.write(body)
     req.end()
   })
@@ -39,6 +48,7 @@ export function unixRequest(
 /**
  * make a streaming HTTP request over a unix domain socket.
  * returns the response stream for incremental consumption (chunked transfer encoding).
+ * pass an AbortSignal to cancel the request and destroy the stream.
  */
 export function unixRequestStream(
   socketPath: string,
@@ -46,6 +56,7 @@ export function unixRequestStream(
   path: string,
   body?: string | Buffer,
   contentType?: string,
+  signal?: AbortSignal,
 ): Promise<{ status: number; stream: http.IncomingMessage }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string | number> = {}
@@ -59,10 +70,19 @@ export function unixRequestStream(
       path,
       headers: body ? headers : undefined,
     }
+    let response: http.IncomingMessage | null = null
     const req = http.request(options, (res) => {
+      response = res
       resolve({ status: res.statusCode ?? 0, stream: res })
     })
-    req.on('error', reject)
+    req.on('error', (err) => {
+      if (signal?.aborted) reject(new Error('request aborted'))
+      else reject(err)
+    })
+    if (signal) {
+      if (signal.aborted) { req.destroy(); reject(new Error('request aborted')); return }
+      signal.addEventListener('abort', () => { req.destroy(); response?.destroy() }, { once: true })
+    }
     if (body) req.write(body)
     req.end()
   })
