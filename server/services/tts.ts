@@ -12,14 +12,10 @@ const TTS_SOCKET_PATH = join(TOEBEANS_DIR, 'tts.sock')
 const TTS_PIDFILE_PATH = join(TOEBEANS_DIR, 'tts.pid')
 const TTS_PLUGIN_DIR = join(TOEBEANS_DIR, 'plugins', 'tts')
 const TTS_REQUEST_TIMEOUT = 30_000  // 30s — slightly longer than server-side 25s timeout
-const HEALTH_CHECK_INTERVAL = 15_000  // 15s between health checks
-const HEALTH_CHECK_FAILURES_BEFORE_RESTART = 3  // consecutive failures before restarting
 
 let ttsProcess: ChildProcess | null = null
 let ttsReady = false
 let ttsStarting: Promise<void> | null = null
-let watchdogTimer: ReturnType<typeof setInterval> | null = null
-let consecutiveHealthFailures = 0
 
 async function isTtsReady(): Promise<boolean> {
   try {
@@ -80,7 +76,6 @@ async function doEnsureTtsServer(opts?: TtsOptions): Promise<void> {
     if (!Number.isNaN(pid) && isProcessAlive(pid)) {
       if (await isTtsReady()) {
         ttsReady = true
-        startWatchdog()
         return
       }
       // process alive but not healthy — kill it before spawning a new one
@@ -134,52 +129,12 @@ async function doEnsureTtsServer(opts?: TtsOptions): Promise<void> {
     if (await isTtsReady()) {
       ttsReady = true
       console.log('tts: TTS server is ready!')
-      startWatchdog()
       return
     }
     await new Promise(resolve => setTimeout(resolve, 2000))
   }
 
   throw new Error('tts: TTS server did not start within 120s')
-}
-
-function startWatchdog() {
-  stopWatchdog()
-  consecutiveHealthFailures = 0
-  watchdogTimer = setInterval(async () => {
-    if (!ttsReady) return  // not our problem yet
-
-    try {
-      const ac = new AbortController()
-      const t = setTimeout(() => ac.abort(), 5_000)
-      const { status } = await unixRequest(TTS_SOCKET_PATH, 'GET', '/health', undefined, undefined, ac.signal)
-      clearTimeout(t)
-      if (status === 200) {
-        consecutiveHealthFailures = 0
-        return
-      }
-    } catch {}
-
-    consecutiveHealthFailures++
-    console.log(`tts watchdog: health check failed (${consecutiveHealthFailures}/${HEALTH_CHECK_FAILURES_BEFORE_RESTART})`)
-
-    if (consecutiveHealthFailures >= HEALTH_CHECK_FAILURES_BEFORE_RESTART) {
-      console.log('tts watchdog: server unresponsive, restarting...')
-      ttsReady = false
-      consecutiveHealthFailures = 0
-      // kill and restart in background — don't await here to avoid blocking the interval
-      stopTtsServer().then(() => ensureTtsServer()).catch((err) => {
-        console.error(`tts watchdog: restart failed: ${err}`)
-      })
-    }
-  }, HEALTH_CHECK_INTERVAL)
-}
-
-function stopWatchdog() {
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer)
-    watchdogTimer = null
-  }
 }
 
 /**
@@ -276,7 +231,6 @@ export async function* speakStreaming(text: string, opts?: TtsOptions): AsyncGen
  */
 export async function stopTtsServer(): Promise<void> {
   ttsReady = false
-  stopWatchdog()
 
   if (ttsProcess) {
     ttsProcess.kill()

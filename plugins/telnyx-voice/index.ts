@@ -1535,6 +1535,7 @@ export default function create(serverContext?: any) {
     // if no DTMF markers, just stream the whole thing
     if (segments.length === 1 && segments[0]!.type === 'text') {
       await streamTtsToCall(segments[0]!.text, call)
+      await call.ttsSending
       return
     }
 
