@@ -27,8 +27,8 @@ as i develop toebeans, top of my mind are:
   `~/.toebeans/`. every active timer, recurring or one-shot, is just a markdown
   file. knowledge is just markdown files. every session is just a jsonl file.
   you should always be able to peel back the layers of abstraction and ask
-  qustions like "ok, but what exactly is in the context window at this point in
-  time", without going through an llm. i provide tools like `bun run debug
+  questions like "ok, but what exactly is in the context window at this point
+  in time", without going through an llm. i provide tools like `bun run debug
   print-system`, `bun run debug print-tools`, and `bun run debug
   tail-all-sessions` so you always know what's going on. this also provides
   extremely useful material for the agent to debug itself.
