@@ -105,6 +105,14 @@ interface TelnyxWebhookEvent {
   }
 }
 
+// thrown when we detect a call has been hung up mid-operation
+class CallHungUpError extends Error {
+  constructor(detail: string) {
+    super(`call hung up: ${detail}`)
+    this.name = 'CallHungUpError'
+  }
+}
+
 // active call state
 interface ActiveCall {
   callControlId: string
@@ -853,8 +861,7 @@ export default function create(serverContext?: any) {
   // returns the wall-clock time the first frame was sent (for latency tracking).
   async function sendFramesToCall(encodedAudio: Buffer, call: ActiveCall): Promise<number> {
     if (!call.ws) {
-      console.warn('telnyx-voice/audio-out: no websocket for call, cannot send frames')
-      return 0
+      throw new CallHungUpError('no websocket for call')
     }
 
     // record all outbound audio
@@ -884,6 +891,8 @@ export default function create(serverContext?: any) {
     let sendErrors = 0
 
     for (let offset = 0, frameIndex = 0; offset < encodedAudio.length; offset += frameBytes, frameIndex++) {
+      if (!call.ws) throw new CallHungUpError('websocket gone mid-send')
+
       const chunk = encodedAudio.subarray(offset, offset + frameBytes)
       const payload = chunk.toString('base64')
 
@@ -936,8 +945,7 @@ export default function create(serverContext?: any) {
   // multiple calls play back-to-back without overlap.
   async function streamTtsToCall(text: string, call: ActiveCall) {
     if (!call.ws) {
-      console.warn(`telnyx-voice/audio-out [${audioLog.ts()}]: no websocket for call, cannot stream TTS`)
-      return
+      return // call already hung up
     }
 
     const textPreview = text.length > 60 ? text.slice(0, 57) + '...' : text
@@ -1002,18 +1010,25 @@ export default function create(serverContext?: any) {
         console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: stream done: ${chunkCount} chunks, ` +
           `${audioDurationMs.toFixed(0)}ms audio, TTFA ${ttfaMs}ms, total ${elapsed.toFixed(0)}ms`)
       } catch (err) {
-        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: streaming TTS error:`, err)
+        if (err instanceof CallHungUpError) {
+          console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: call hung up during TTS stream, stopping`)
+        } else {
+          console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: streaming TTS error:`, err)
+        }
       }
     }).catch(err => {
-      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
+      if (err instanceof CallHungUpError) {
+        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: call hung up during TTS send chain, stopping`)
+      } else {
+        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
+      }
     })
   }
 
   // non-streaming TTS for short utterances (initial messages, etc.)
   async function sendTtsToCall(text: string, call: ActiveCall) {
     if (!call.ws) {
-      console.warn(`telnyx-voice/audio-out [${audioLog.ts()}]: no websocket for call, cannot send TTS`)
-      return
+      return // call already hung up
     }
 
     call.ttsSending = call.ttsSending.then(async () => {
@@ -1039,10 +1054,18 @@ export default function create(serverContext?: any) {
         console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS generated in ${elapsed.toFixed(0)}ms, sending ${encoded.length} bytes`)
         await sendFramesToCall(encoded, call)
       } catch (err) {
-        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS error:`, err)
+        if (err instanceof CallHungUpError) {
+          console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: call hung up during TTS send, stopping`)
+        } else {
+          console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS error:`, err)
+        }
       }
     }).catch(err => {
-      console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
+      if (err instanceof CallHungUpError) {
+        console.log(`telnyx-voice/audio-out [${audioLog.ts()}]: call hung up during TTS send chain, stopping`)
+      } else {
+        console.error(`telnyx-voice/audio-out [${audioLog.ts()}]: TTS send chain error:`, err)
+      }
     })
   }
 
@@ -1528,23 +1551,43 @@ export default function create(serverContext?: any) {
     return segments
   }
 
-  // process mixed text+DTMF: stream text segments via TTS, send DTMF segments via API
+  // split text into sentences for individual TTS requests.
+  // the TTS model can emit EOS prematurely on long multi-paragraph text,
+  // so we split at paragraph and sentence boundaries to ensure full playback.
+  function splitIntoSentences(text: string): string[] {
+    // first split on paragraph breaks (double newline)
+    const paragraphs = text.split(/\n\n+/)
+    const sentences: string[] = []
+    for (const para of paragraphs) {
+      const trimmed = para.trim()
+      if (!trimmed) continue
+      // split paragraph at sentence boundaries: .!? followed by whitespace
+      // keep the punctuation with the sentence
+      const parts = trimmed.split(/(?<=[.!?])\s+/)
+      for (const part of parts) {
+        const s = part.trim()
+        if (s) sentences.push(s)
+      }
+    }
+    return sentences
+  }
+
+  // process mixed text+DTMF: stream text segments via TTS, send DTMF segments via API.
+  // text segments are split into sentences so the TTS model generates complete audio
+  // for each chunk (avoids premature EOS on long multi-paragraph text).
   async function sendMixedResponse(text: string, call: ActiveCall) {
     const segments = parseResponseSegments(text)
 
-    // if no DTMF markers, just stream the whole thing
-    if (segments.length === 1 && segments[0]!.type === 'text') {
-      await streamTtsToCall(segments[0]!.text, call)
-      await call.ttsSending
-      return
-    }
-
     for (const seg of segments) {
       if (seg.type === 'text') {
-        await streamTtsToCall(seg.text, call)
-        // wait for TTS to finish playing before sending DTMF
+        const sentences = splitIntoSentences(seg.text)
+        for (const sentence of sentences) {
+          await streamTtsToCall(sentence, call)
+        }
         await call.ttsSending
       } else {
+        // wait for any pending TTS before sending DTMF
+        await call.ttsSending
         console.log(`telnyx-voice: sending DTMF segment: ${seg.digits}`)
         await sendDtmf(call.callControlId, seg.digits)
       }
@@ -1565,9 +1608,9 @@ export default function create(serverContext?: any) {
   }
 
   // output handler: receives agent response and converts to speech.
-  // buffers all streaming text, then sends the full response to streaming TTS
-  // on text_block_end. no sentence splitting — the TTS server handles the full
-  // text and streams audio chunks back as they're generated.
+  // buffers all streaming text, then on text_block_end splits into sentences
+  // and streams each via TTS. sentence splitting is necessary because the TTS
+  // model can emit premature EOS on long multi-paragraph text.
   let outputSeq = 0
   async function handleOutput(sessionId: string, message: any) {
     // sessionId here is the callControlId
@@ -1778,12 +1821,14 @@ export default function create(serverContext?: any) {
             handleMediaWsMessage(ws, message.toString())
           },
           close(ws, code, reason) {
-            console.log(`telnyx-voice: media ws connection closed (code=${code}, reason=${reason || 'none'}, call=${ws.data.callControlId || 'unknown'})`)
+            const callId = ws.data.callControlId || 'unknown'
+            console.log(`telnyx-voice: media ws closed (code=${code}, reason=${reason || 'none'}, call=${callId})`)
             if (ws.data.callControlId) {
               const call = activeCalls.get(ws.data.callControlId)
               if (call) {
                 call.ws = null
-                console.log(`telnyx-voice/audio-out: ws closed for call ${ws.data.callControlId} — any pending TTS will fail`)
+                call.abortController?.abort()
+                console.log(`telnyx-voice: ws closed for call ${callId}, cleaning up`)
               }
             }
           },
