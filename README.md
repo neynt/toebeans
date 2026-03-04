@@ -88,6 +88,15 @@ plugins extend the assistant's functionality.
 | `google-sheets` | read and edit your sheets |
 | `nano-banana` | generate images |
 
+### WIP plugins
+
+these aren't good yet
+
+| plugin | function |
+|-|-|
+| `govee` | control your govee-branded home lights |
+| `telnyx-voice` | make and receive phone calls |
+
 ### the way plugins work
 
 plugins can:
