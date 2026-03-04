@@ -35,22 +35,4 @@ extend the agent, felt like a mess of compositional difficulties waiting to
 happen.
 
 so here's my commitment to creating an assistant that's at the same time deeply
-extensible and comprehensible. toebeans will be an assistant with:
-
-- **a solid, minimal core**. the main agent loop seldom needs to change and
-  provides little functionality on its own.
-- **deep extensibility**. plugins can hook into a thoughtful selection of
-  extension points in the agent loop and extend functionality. concepts that
-  other assistants treat as rigid parts of the core, such as memory and timers,
-  are interchangeable plugins you can swap in and out or create your own
-  versions of.
-- **high quality built-in plugins**. i have exacting standards for my software
-  and will polish the hell out of whatever i actually use.
-- **deep inspectability**. every action and message is logged in
-  `~/.toebeans/`. every active timer, recurring or one-shot, is just a markdown
-  file. knowledge is just markdown files. every session is just a jsonl file.
-  you should always be able to peel back the layers of abstraction and ask
-  qustions like "ok, but what exactly is in the context window at this point in
-  time", without going through an llm.
-- **careful context window management**. maintain a thoughtfully curated
-  context window. this is good for performance and for the user's wallet.
+extensible and comprehensible.
