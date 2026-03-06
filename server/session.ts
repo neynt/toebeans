@@ -10,7 +10,7 @@ const RESUME_PATH = join(TOEBEANS_DIR, 'resume.json')
 
 export async function ensureDataDirs(): Promise<void> {
   await mkdir(SESSIONS_DIR, { recursive: true })
-  await mkdir(join(TOEBEANS_DIR, 'knowledge'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'memory'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'plugins'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'skills'), { recursive: true })
   await mkdir(join(TOEBEANS_DIR, 'workspace'), { recursive: true })
@@ -181,8 +181,8 @@ export function getDataDir(): string {
   return TOEBEANS_DIR
 }
 
-export function getKnowledgeDir(): string {
-  return join(TOEBEANS_DIR, 'knowledge')
+export function getMemoryDir(): string {
+  return join(TOEBEANS_DIR, 'memory')
 }
 
 export function getPluginsDir(): string {

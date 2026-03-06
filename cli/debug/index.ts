@@ -10,7 +10,6 @@ commands:
   print-system                   show the system prompt
   print-tools                    show all available tools by plugin
   list-sessions                  list available sessions
-  analyze-system-prompt          token breakdown of the system prompt
   tail-session <session-id>      pretty-print session and tail for updates
   tail-all-sessions              tail all sessions simultaneously
 `)
@@ -40,11 +39,6 @@ switch (command) {
     for (const s of sessions) {
       console.log(`${s.id}  (last active: ${formatLocalTime(s.lastActiveAt)})`)
     }
-    break
-  }
-  case 'analyze-system-prompt': {
-    const mod = await import('./analyze-system-prompt.ts')
-    await mod.default()
     break
   }
   case 'tail-session': {
