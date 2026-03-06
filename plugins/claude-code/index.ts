@@ -70,6 +70,7 @@ interface MetaFile {
   endedAt?: string
   worktree?: string
   originalWorkingDir?: string
+  ccSessionId?: string
 }
 
 async function ensureLogDir(): Promise<void> {
@@ -205,15 +206,14 @@ export default function create(): Plugin {
         pid: 0,
       }
 
-      const proc = Bun.spawn(
-        ['sh', '-c', `exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model ${model} -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1`],
-        {
-          cwd,
-          env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: lp },
-          stdout: 'ignore',
-          stderr: 'ignore',
-        }
-      )
+      const claudeArgs = ['claude', '-p', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose', '--model', model, '--', task]
+
+      const proc = Bun.spawn(claudeArgs, {
+        cwd,
+        env: { ...process.env },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
 
       meta.pid = proc.pid
       await writeMeta(meta)
@@ -221,6 +221,57 @@ export default function create(): Plugin {
       runningProcesses.set(sid, { proc, pid: proc.pid, task })
 
       console.log(`[claude-code] spawned conflict resolver session ${sid} (pid ${proc.pid})`)
+
+      // pipe stdout to log file, capturing CC session ID from header
+      ;(async () => {
+        const logFile = Bun.file(lp)
+        const writer = logFile.writer()
+        const reader = proc.stdout.getReader()
+        const decoder = new TextDecoder()
+        let headerParsed = false
+        let leftover = ''
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            writer.write(value)
+
+            if (!headerParsed) {
+              leftover += decoder.decode(value, { stream: true })
+              const newlineIdx = leftover.indexOf('\n')
+              if (newlineIdx !== -1) {
+                headerParsed = true
+                const firstLine = leftover.slice(0, newlineIdx)
+                try {
+                  const header = JSON.parse(firstLine)
+                  if (header.type === 'header' && header.session_id) {
+                    meta.ccSessionId = header.session_id
+                    await writeMeta(meta)
+                    console.log(`[claude-code] captured CC session ID for conflict resolver: ${header.session_id}`)
+                  }
+                } catch { /* not valid JSON header */ }
+                leftover = ''
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[claude-code] stdout pipe error for conflict resolver ${sid}:`, err)
+        } finally {
+          writer.end()
+        }
+      })()
+
+      // drain stderr
+      ;(async () => {
+        const reader = proc.stderr.getReader()
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch { /* ignore */ }
+      })()
 
       proc.exited.then(async (code) => {
         runningProcesses.delete(sid)
@@ -359,18 +410,19 @@ export default function create(): Plugin {
   const tools: Tool[] = [
     {
       name: 'spawn_claude_code',
-      description: 'Spawn a new Claude Code session with a one-shot task. Returns session ID and log file path. You will be notified when the task completes.',
+      description: 'Spawn a new Claude Code session with a one-shot task. Returns session ID and log file path. You will be notified when the task completes. Can also resume a previous session using resumeSessionId.',
       inputSchema: {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'The task/prompt to send to Claude Code' },
           workingDir: { type: 'string', description: 'Working directory for the claude code process (optional). Tilde (~) is expanded to the home directory.' },
           worktree: { type: 'string', description: 'Branch/task name for git worktree isolation. When provided with workingDir, creates a git worktree and runs the task there. The branch is merged back on completion.' },
+          resumeSessionId: { type: 'string', description: 'Toebeans session ID of a previous session to resume (forks the CC session). The previous session must have a ccSessionId in its meta.' },
         },
         required: ['task'],
       },
       async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-        const { task, workingDir: rawWorkingDir, worktree } = input as { task: string; workingDir?: string; worktree?: string }
+        const { task, workingDir: rawWorkingDir, worktree, resumeSessionId } = input as { task: string; workingDir?: string; worktree?: string; resumeSessionId?: string }
         const workingDir = rawWorkingDir ? expandTilde(rawWorkingDir) : undefined
 
         await ensureLogDir()
@@ -434,6 +486,19 @@ export default function create(): Plugin {
             console.log(`[claude-code] created worktree at ${worktreePath} for branch ${worktree}`)
           }
 
+          // resolve CC session ID for resumption
+          let ccResumeId: string | undefined
+          if (resumeSessionId) {
+            const prevMeta = await readMeta(resumeSessionId)
+            if (!prevMeta) {
+              return { content: `session not found: ${resumeSessionId}`, is_error: true }
+            }
+            if (!prevMeta.ccSessionId) {
+              return { content: `session ${resumeSessionId} has no ccSessionId (old session without capture)`, is_error: true }
+            }
+            ccResumeId = prevMeta.ccSessionId
+          }
+
           // write metadata
           const meta: MetaFile = {
             sessionId,
@@ -445,22 +510,81 @@ export default function create(): Plugin {
             originalWorkingDir: worktree ? originalCwd : undefined,
           }
 
-          // spawn claude with stdout/stderr redirected to log file via shell
-          // this way claude writes directly to the file — survives toebeans dying
+          // build claude command
           const claudeModel = config?.model ?? 'opus'
-          const proc = Bun.spawn(
-            ['sh', '-c', `exec claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model ${claudeModel} -- "$CLAUDE_TASK" > "$CLAUDE_LOG" 2>&1`],
-            {
-              cwd,
-              env: { ...process.env, CLAUDE_TASK: task, CLAUDE_LOG: logPath },
-              stdout: 'ignore',
-              stderr: 'ignore',
-            }
-          )
+          const claudeArgs = ['claude']
+          if (ccResumeId) {
+            claudeArgs.push('-r', ccResumeId, '--fork-session')
+          }
+          claudeArgs.push('-p', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose', '--model', claudeModel, '--', task)
+
+          // spawn claude with stdout piped so we can capture the CC session ID from the header
+          const proc = Bun.spawn(claudeArgs, {
+            cwd,
+            env: { ...process.env },
+            stdout: 'pipe',
+            stderr: 'pipe',
+          })
 
           meta.pid = proc.pid
           await writeMeta(meta)
           await addPending(sessionId)
+
+          // pipe stdout to log file, capturing the CC session ID from the first line
+          ;(async () => {
+            const logFile = Bun.file(logPath)
+            const writer = logFile.writer()
+            const reader = proc.stdout.getReader()
+            const decoder = new TextDecoder()
+            let headerParsed = false
+            let leftover = ''
+
+            try {
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+
+                // write raw bytes to log
+                writer.write(value)
+
+                // parse header from first line if not yet done
+                if (!headerParsed) {
+                  leftover += decoder.decode(value, { stream: true })
+                  const newlineIdx = leftover.indexOf('\n')
+                  if (newlineIdx !== -1) {
+                    headerParsed = true
+                    const firstLine = leftover.slice(0, newlineIdx)
+                    try {
+                      const header = JSON.parse(firstLine)
+                      if (header.type === 'header' && header.session_id) {
+                        meta.ccSessionId = header.session_id
+                        await writeMeta(meta)
+                        console.log(`[claude-code] captured CC session ID: ${header.session_id}`)
+                      }
+                    } catch {
+                      // not valid JSON header — continue anyway
+                    }
+                    leftover = ''
+                  }
+                }
+              }
+            } catch (err) {
+              console.error(`[claude-code] stdout pipe error for ${sessionId}:`, err)
+            } finally {
+              writer.end()
+            }
+          })()
+
+          // drain stderr to log file too
+          ;(async () => {
+            const reader = proc.stderr.getReader()
+            try {
+              while (true) {
+                const { done } = await reader.read()
+                if (done) break
+              }
+            } catch { /* ignore */ }
+          })()
 
           runningProcesses.set(sessionId, { proc, pid: proc.pid, task, worktree, originalWorkingDir: worktree ? originalCwd : undefined })
 
