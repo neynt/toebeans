@@ -555,11 +555,11 @@ export default function create(): Plugin {
                     headerParsed = true
                     const firstLine = leftover.slice(0, newlineIdx)
                     try {
-                      const header = JSON.parse(firstLine)
-                      if (header.type === 'header' && header.session_id) {
-                        meta.ccSessionId = header.session_id
+                      const parsed = JSON.parse(firstLine)
+                      if (parsed.type === 'system' && parsed.subtype === 'init' && parsed.session_id) {
+                        meta.ccSessionId = parsed.session_id
                         await writeMeta(meta)
-                        console.log(`[claude-code] captured CC session ID: ${header.session_id}`)
+                        console.log(`[claude-code] captured CC session ID: ${parsed.session_id}`)
                       }
                     } catch {
                       // not valid JSON header — continue anyway
