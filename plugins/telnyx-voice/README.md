@@ -1,6 +1,6 @@
-# telnyx-voice-2
+# telnyx-voice
 
-real-time phone conversations via Telnyx voice API. ground-up rewrite of telnyx-voice with aggressive pipelining — LLM tokens stream directly into TTS as sentences complete.
+real-time phone conversations via Telnyx voice API with aggressive pipelining — LLM tokens stream directly into TTS as sentences complete.
 
 ## how it works
 
@@ -11,7 +11,7 @@ every stage streams into the next. no waiting for completion.
 - incoming audio is buffered until voice activity ends (silence detection), then transcribed via whisper
 - LLM text tokens are accumulated and split into sentences/paragraphs as they arrive — each chunk is immediately streamed through TTS without waiting for the full response
 - barge-in (caller speaks during agent response) cancels the entire pipeline instantly via AbortController + silence flush
-- each phone call gets its own toebeans session (routed via `telnyx-voice-2:{callControlId}`)
+- each phone call gets its own toebeans session (routed via `telnyx-voice:{callControlId}`)
 
 ### text normalization (v2.2)
 
@@ -21,10 +21,10 @@ before sending text to TTS, paragraph breaks (`\n\n`) are converted to `. ` and 
 
 | tool | description |
 |------|-------------|
-| `phone_call_v2` | make an outbound call. takes `to` (E.164), optional `purpose` and `initialMessage` |
-| `phone_hangup_v2` | hang up an active call. omit `call_id` for most recent |
-| `send_dtmf_v2` | send DTMF tones on active call. digits: 0-9, *, #, A-D, w/W for pauses |
-| `phone_status_v2` | list active calls with phase and session info |
+| `phone_call` | make an outbound call. takes `to` (E.164), optional `purpose` and `initialMessage` |
+| `phone_hangup` | hang up an active call. omit `call_id` for most recent |
+| `send_dtmf` | send DTMF tones on active call. digits: 0-9, *, #, A-D, w/W for pauses |
+| `phone_status` | list active calls with phase and session info |
 
 ### DTMF in responses
 
@@ -44,7 +44,7 @@ embed `[DTMF: digits]` in text responses to send tones mid-speech. commas become
 
 ```json5
 {
-  "telnyx-voice-2": {
+  "telnyx-voice": {
     "apiKey": "KEY...",           // telnyx API key (required)
     "connectionId": "...",        // for outbound calls
     "fromNumber": "+1...",        // caller ID for outbound

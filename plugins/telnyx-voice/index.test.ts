@@ -1,4 +1,4 @@
-// tests for telnyx-voice-2 helper functions
+// tests for telnyx-voice helper functions
 // we test the pure functions that don't need network/server context
 
 import { describe, test, expect } from 'bun:test'
