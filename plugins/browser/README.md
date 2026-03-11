@@ -49,7 +49,7 @@ spawning a persistent session that already exists resumes it with all prior stat
 
 - uses [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (not vanilla playwright) with `AutomationControlled` disabled and WebGL spoofing for bot detection evasion
 - headless by default. set `headless: false` to see the actual chrome window
-- `browser_view` clones the DOM, strips scripts/styles/svg/canvas, annotates inputs/buttons/selects/links with CSS selector hints, then converts to markdown via turndown. truncates at 80KB
+- `browser_view` clones the DOM, strips scripts/styles/svg/canvas, annotates inputs/buttons/selects/links with CSS selector hints, then converts to markdown via turndown. truncates at 80KB. **sensitive input values are redacted** — password fields, inputs with credential-related names (password, secret, token, api_key, ssn, credit_card, cvv, pin), and autocomplete hints (current-password, new-password, cc-number, cc-csc) show `••••••` instead of actual values
 - 60s hard timeout on all operations as a hang safety net. if chromium hangs on close, it gets SIGKILL'd
 - navigation timeouts fail silently (log a warning, session continues). selector timeouts fail fast (2s default)
 
