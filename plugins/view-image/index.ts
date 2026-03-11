@@ -1,7 +1,6 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { resolve } from 'path'
-import { homedir } from 'os'
 
 export default function create(): Plugin {
   return {
@@ -15,18 +14,14 @@ export default function create(): Plugin {
         inputSchema: {
           type: 'object',
           properties: {
-            image_path: { type: 'string', description: 'Path to the image file' },
+            image_path: { type: 'string', description: 'Path to the image file. Tilde (~) is expanded.' },
           },
           required: ['image_path'],
         },
+        pathFields: ['image_path'],
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
           const { image_path } = input as { image_path: string }
-          const expanded = image_path.startsWith('~/')
-            ? resolve(homedir(), image_path.slice(2))
-            : image_path === '~'
-              ? homedir()
-              : image_path
-          const absPath = resolve(context.workingDir, expanded)
+          const absPath = resolve(context.workingDir, image_path)
 
           const file = Bun.file(absPath)
           if (!(await file.exists())) {

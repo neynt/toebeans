@@ -107,11 +107,12 @@ export default function create(): Plugin {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'The task/prompt to send to Codex' },
-          workingDir: { type: 'string', description: 'Working directory for the codex process (optional)' },
+          workingDir: { type: 'string', description: 'Working directory for the codex process (optional). Tilde (~) is expanded.' },
           model: { type: 'string', description: 'Model to use (optional, e.g. "o3", "o4-mini")' },
         },
         required: ['task'],
       },
+      pathFields: ['workingDir'],
       async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
         const { task, workingDir, model } = input as { task: string; workingDir?: string; model?: string }
 

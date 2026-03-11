@@ -5,10 +5,6 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
 
-function expandTilde(path: string): string {
-  return path.startsWith('~') ? homedir() + path.slice(1) : path
-}
-
 const LOG_DIR = join(getDataDir(), 'claude-code')
 const PENDING_PATH = join(LOG_DIR, 'pending.json')
 
@@ -421,9 +417,9 @@ export default function create(): Plugin {
         },
         required: ['task'],
       },
+      pathFields: ['workingDir'],
       async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
-        const { task, workingDir: rawWorkingDir, worktree, resumeSessionId } = input as { task: string; workingDir?: string; worktree?: string; resumeSessionId?: string }
-        const workingDir = rawWorkingDir ? expandTilde(rawWorkingDir) : undefined
+        const { task, workingDir, worktree, resumeSessionId } = input as { task: string; workingDir?: string; worktree?: string; resumeSessionId?: string }
 
         await ensureLogDir()
         const sessionId = generateSessionId()

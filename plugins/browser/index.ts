@@ -6,6 +6,7 @@ import type { Browser, BrowserContext, Page } from 'patchright'
 
 import TurndownService from 'turndown'
 import { join, dirname } from 'path'
+import { expandTilde } from '../../server/paths.ts'
 import { mkdir, readdir, rm } from 'node:fs/promises'
 import { $ } from 'bun'
 
@@ -914,6 +915,7 @@ export default function create(): Plugin {
                   case 'download': {
                     if (!action.download_path) throw new Error('download requires download_path')
                     if (!action.selector && !action.url) throw new Error('download requires selector or url')
+                    const downloadPath = expandTilde(action.download_path)
 
                     const dlPromise = page.waitForEvent('download', { timeout: NAV_TIMEOUT() })
                     try {
@@ -929,12 +931,12 @@ export default function create(): Plugin {
                       const failure = await dl.failure()
                       if (failure) throw new Error(`download failed: ${failure}`)
 
-                      await mkdir(dirname(action.download_path), { recursive: true })
-                      await dl.saveAs(action.download_path)
+                      await mkdir(dirname(downloadPath), { recursive: true })
+                      await dl.saveAs(downloadPath)
                       downloads.push({
                         filename: dl.suggestedFilename(),
-                        saved_to: action.download_path,
-                        size_bytes: Bun.file(action.download_path).size,
+                        saved_to: downloadPath,
+                        size_bytes: Bun.file(downloadPath).size,
                       })
                     } catch (err: unknown) {
                       // cancel the dangling waitForEvent promise if the trigger or download failed

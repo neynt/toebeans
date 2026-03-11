@@ -56,6 +56,8 @@ export interface Tool {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  /** Top-level input field names that represent filesystem paths — `~` is auto-expanded. */
+  pathFields?: readonly string[]
   execute: (input: unknown, context: ToolContext) => Promise<ToolResult>
 }
 

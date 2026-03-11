@@ -96,7 +96,7 @@ export default function create(): Plugin {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'The bash command to execute' },
-            workingDir: { type: 'string', description: 'Optional working directory' },
+            workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
             timeout: {
               type: 'number',
               description: 'Timeout in seconds (default: 60, max: 600, configurable)',
@@ -104,6 +104,7 @@ export default function create(): Plugin {
           },
           required: ['command'],
         },
+        pathFields: ['workingDir'],
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
           const defaultTimeout = pluginConfig.defaultTimeout ?? 60
           const maxTimeout = pluginConfig.maxTimeout ?? 600
@@ -170,7 +171,7 @@ export default function create(): Plugin {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'The bash command to execute' },
-            workingDir: { type: 'string', description: 'Optional working directory' },
+            workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
             timeout: {
               type: 'number',
               description: 'Timeout in seconds (default: 600, max: 3600, configurable)',
@@ -178,6 +179,7 @@ export default function create(): Plugin {
           },
           required: ['command'],
         },
+        pathFields: ['workingDir'],
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
           const spawnDefaultTimeout = pluginConfig.spawnDefaultTimeout ?? 600
           const spawnMaxTimeout = pluginConfig.spawnMaxTimeout ?? 3600

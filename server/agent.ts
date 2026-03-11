@@ -3,6 +3,7 @@ import type { Message, MessageCost, ContentBlock, Tool, ToolContext, ToolResultC
 import { loadSession, appendMessage, appendEntry, loadCostEntries, loadSystemPrompt } from './session.ts'
 import { countTokens, estimateImageTokens } from './tokens.ts'
 import { computeInputOutputCost } from './cost.ts'
+import { expandTildeInFields } from './paths.ts'
 
 // defaults — can be overridden via AgentOptions
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000
@@ -408,7 +409,10 @@ export async function runAgentTurn(
         result = { content: `Unknown tool: ${block.name}`, is_error: true }
       } else {
         try {
-          result = await tool.execute(block.input, toolContext)
+          const expandedInput = tool.pathFields
+            ? expandTildeInFields(block.input, tool.pathFields)
+            : block.input
+          result = await tool.execute(expandedInput, toolContext)
           result.content = truncateToolResult(result.content, maxToolResultChars)
           result.content = truncateToolResultByTokens(result.content, maxToolResultTokens)
         } catch (err) {
