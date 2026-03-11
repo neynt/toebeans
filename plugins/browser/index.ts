@@ -28,6 +28,23 @@ interface BrowserConfig {
 
 let config: BrowserConfig = {}
 
+/**
+ * Strip empty-string, zero, and empty-array values from action objects.
+ * LLMs often fill every schema field with defaults (e.g. `"url": ""`, `"ms": 0`,
+ * `"file_paths": []`) instead of omitting unused keys. Treat those as absent so the
+ * execute logic's `!action.foo` checks work correctly.
+ */
+export function stripEmptyActionFields(action: Record<string, unknown>): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(action)) {
+    if (v === '') continue
+    if (v === 0) continue
+    if (Array.isArray(v) && v.length === 0 && k !== 'file_paths') continue // file_paths: [] means "clear input"
+    cleaned[k] = v
+  }
+  return cleaned
+}
+
 const HARD_TIMEOUT_MS = 60_000
 const NAV_TIMEOUT = () => config.navigationTimeout ?? 15_000
 const SELECTOR_TIMEOUT = () => config.selectorTimeout ?? 2_000
@@ -735,61 +752,163 @@ export default function create(): Plugin {
             session_id: { type: 'string', description: 'Session ID from browser_spawn' },
             actions: {
               type: 'array',
-              description: 'Sequential actions to perform',
+              description: 'Sequential actions to perform. Each action only needs its relevant fields — omit unused ones.',
               items: {
                 type: 'object',
-                properties: {
-                  type: {
-                    type: 'string',
-                    enum: ['goto', 'click', 'click_text', 'type', 'press', 'wait', 'wait_for', 'evaluate', 'screenshot', 'scroll', 'select', 'download', 'upload_file', 'bitwarden_fill'],
-                    description: 'Action type',
+                anyOf: [
+                  {
+                    properties: {
+                      type: { const: 'goto', description: 'Navigate to a URL' },
+                      url: { type: 'string', description: 'URL to navigate to' },
+                    },
+                    required: ['type', 'url'],
+                    additionalProperties: false,
                   },
-                  url: { type: 'string', description: 'URL for goto action' },
-                  selector: { type: 'string', description: 'CSS selector for click/type/wait_for/select actions' },
-                  text: { type: 'string', description: 'Text for type action or click_text action' },
-                  key: { type: 'string', description: 'Key for press action (e.g. "Enter", "Tab")' },
-                  ms: { type: 'number', description: 'Milliseconds for wait action, or custom timeout for wait_for (default 2s)' },
-                  js: { type: 'string', description: 'JavaScript code for evaluate action' },
-                  value: { type: 'string', description: 'Value for select action' },
-                  direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
-                  amount: { type: 'number', description: 'Scroll amount in pixels (default: 500)' },
-                  download_path: { type: 'string', description: 'File path to save download' },
-                  file_paths: { type: 'array', items: { type: 'string' }, description: 'Local file paths to upload (~ expanded). Pass empty array to clear the input.' },
-                  session_token: { type: 'string', description: 'Bitwarden session token from `bw unlock --raw`' },
-                  search: { type: 'string', description: 'Search query for bitwarden vault (e.g. domain name)' },
-                  username_selector: { type: 'string', description: 'CSS selector for username/email input' },
-                  password_selector: { type: 'string', description: 'CSS selector for password input' },
-                  submit_selector: { type: 'string', description: 'Optional CSS selector for submit button' },
-                },
-                required: ['type'],
+                  {
+                    properties: {
+                      type: { const: 'click', description: 'Click an element' },
+                      selector: { type: 'string', description: 'CSS selector' },
+                    },
+                    required: ['type', 'selector'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'click_text', description: 'Click element containing text' },
+                      text: { type: 'string', description: 'Text to find and click' },
+                    },
+                    required: ['type', 'text'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'type', description: 'Type text into an input' },
+                      selector: { type: 'string', description: 'CSS selector for input' },
+                      text: { type: 'string', description: 'Text to type' },
+                    },
+                    required: ['type', 'selector', 'text'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'press', description: 'Press a key' },
+                      key: { type: 'string', description: 'Key name (e.g. "Enter", "Tab")' },
+                    },
+                    required: ['type', 'key'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'wait', description: 'Wait for a duration' },
+                      ms: { type: 'number', description: 'Milliseconds to wait (default: 1000)' },
+                    },
+                    required: ['type'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'wait_for', description: 'Wait for a selector to appear' },
+                      selector: { type: 'string', description: 'CSS selector to wait for' },
+                      ms: { type: 'number', description: 'Custom timeout in ms (default: 2s)' },
+                    },
+                    required: ['type', 'selector'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'evaluate', description: 'Run JavaScript in the page' },
+                      js: { type: 'string', description: 'JavaScript code to evaluate' },
+                    },
+                    required: ['type', 'js'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'screenshot', description: 'Take a screenshot' },
+                    },
+                    required: ['type'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'scroll', description: 'Scroll the page' },
+                      direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
+                      amount: { type: 'number', description: 'Scroll amount in pixels (default: 500)' },
+                    },
+                    required: ['type'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'select', description: 'Select an option from a dropdown' },
+                      selector: { type: 'string', description: 'CSS selector for select element' },
+                      value: { type: 'string', description: 'Option value to select' },
+                    },
+                    required: ['type', 'selector', 'value'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'upload_file', description: 'Upload files to a file input' },
+                      selector: { type: 'string', description: 'CSS selector for file input' },
+                      file_paths: { type: 'array', items: { type: 'string' }, description: 'Local file paths (~ expanded). Empty array clears the input.' },
+                    },
+                    required: ['type', 'selector', 'file_paths'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'download', description: 'Download a file' },
+                      download_path: { type: 'string', description: 'Local file path to save the download' },
+                      selector: { type: 'string', description: 'CSS selector to click to trigger download' },
+                      url: { type: 'string', description: 'URL to navigate to trigger download (alternative to selector)' },
+                    },
+                    required: ['type', 'download_path'],
+                    additionalProperties: false,
+                  },
+                  {
+                    properties: {
+                      type: { const: 'bitwarden_fill', description: 'Fill credentials from Bitwarden vault' },
+                      session_token: { type: 'string', description: 'Bitwarden session token from `bw unlock --raw`' },
+                      search: { type: 'string', description: 'Search query for vault (e.g. domain name)' },
+                      username_selector: { type: 'string', description: 'CSS selector for username/email input' },
+                      password_selector: { type: 'string', description: 'CSS selector for password input' },
+                      submit_selector: { type: 'string', description: 'Optional CSS selector for submit button' },
+                    },
+                    required: ['type', 'session_token', 'search', 'username_selector', 'password_selector'],
+                    additionalProperties: false,
+                  },
+                ],
               },
             },
           },
           required: ['session_id', 'actions'],
         },
         async execute(input: unknown, _ctx: ToolContext): Promise<ToolResult> {
-          const { session_id, actions } = input as {
+          const { session_id, actions: rawActions } = input as {
             session_id: string
-            actions: Array<{
-              type: string
-              url?: string
-              selector?: string
-              text?: string
-              key?: string
-              ms?: number
-              js?: string
-              value?: string
-              direction?: string
-              amount?: number
-              download_path?: string
-              file_paths?: string[]
-              session_token?: string
-              search?: string
-              username_selector?: string
-              password_selector?: string
-              submit_selector?: string
-            }>
+            actions: Array<Record<string, unknown>>
           }
+          type BrowserAction = {
+            type: string
+            url?: string
+            selector?: string
+            text?: string
+            key?: string
+            ms?: number
+            js?: string
+            value?: string
+            direction?: string
+            amount?: number
+            download_path?: string
+            file_paths?: string[]
+            session_token?: string
+            search?: string
+            username_selector?: string
+            password_selector?: string
+            submit_selector?: string
+          }
+          const actions = rawActions.map(a => stripEmptyActionFields(a) as BrowserAction)
 
           try {
             const session = requireSession(session_id)

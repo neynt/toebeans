@@ -19,18 +19,20 @@ const ctx = {
 } as any
 
 describe('upload_file schema', () => {
-  test('action enum includes upload_file', () => {
+  test('action anyOf includes upload_file variant', () => {
     const schema = interact.inputSchema as any
-    const actionType = schema.properties.actions.items.properties.type
-    expect(actionType.enum).toContain('upload_file')
+    const variants = schema.properties.actions.items.anyOf
+    const uploadVariant = variants.find((v: any) => v.properties.type.const === 'upload_file')
+    expect(uploadVariant).toBeDefined()
   })
 
-  test('file_paths property exists in schema', () => {
+  test('upload_file variant has file_paths property', () => {
     const schema = interact.inputSchema as any
-    const props = schema.properties.actions.items.properties
-    expect(props.file_paths).toBeDefined()
-    expect(props.file_paths.type).toBe('array')
-    expect(props.file_paths.items.type).toBe('string')
+    const variants = schema.properties.actions.items.anyOf
+    const uploadVariant = variants.find((v: any) => v.properties.type.const === 'upload_file')
+    expect(uploadVariant.properties.file_paths).toBeDefined()
+    expect(uploadVariant.properties.file_paths.type).toBe('array')
+    expect(uploadVariant.properties.file_paths.items.type).toBe('string')
   })
 })
 
