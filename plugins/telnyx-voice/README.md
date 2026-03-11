@@ -32,11 +32,14 @@ embed `[DTMF: digits]` in text responses to send tones mid-speech. commas become
 
 ## audio pipeline details
 
-- **flush buffer**: 120ms (v2.2, up from 60ms in v2.1). first TTS chunk flushes immediately for minimum time-to-first-audio.
-- **frame pacing**: 20ms frames sent to Telnyx with real-time pacing and drift tracking
+- **decoupled producer/consumer** (v3.0): TTS ingestion and frame pacing are fully decoupled via an AudioQueue. the producer (TTS loop) pushes pre-sliced frames as fast as TTS generates them. the consumer (20ms timer) sends one frame per tick at real-time pace. this eliminates stutter caused by the old design where the TTS consumer loop blocked on real-time frame pacing.
+- **underrun behavior**: on queue underrun (TTS can't keep up), the consumer waits — no silence injection. a brief natural pause is less disruptive than silence frames which cause pops/clicks in phone audio.
+- **generation tracking**: each barge-in/cancellation bumps the queue generation counter, silently invalidating in-flight pushes from aborted TTS so old audio never leaks into the next turn.
+- **flush buffer**: 120ms batching threshold for resampled PCM before encoding+pushing. first TTS chunk pushes immediately for minimum time-to-first-push.
+- **frame pacing**: 20ms frames sent to Telnyx via consumer timer with drift tracking
 - **codecs**: L16 (PCM16 LE), PCMU (mu-law), PCMA (a-law) at 8kHz or 16kHz
 - **resampling**: 24kHz TTS output → call sample rate with windowed-sinc anti-aliasing filter
-- **barge-in**: abort pipeline + 100ms silence flush to clear Telnyx jitter buffer
+- **barge-in**: abort pipeline + queue clear + 100ms silence flush to clear Telnyx jitter buffer
 - **DTMF detection**: Goertzel DSP on every inbound audio frame (works even during agent speech)
 - **recording**: stereo WAV (inbound left, outbound right) saved to `~/.toebeans/recordings/{date}/`
 
