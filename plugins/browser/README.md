@@ -17,6 +17,8 @@ stateful browser automation for toebeans. powered by patchright (patched playwri
 
 each action type has its own sub-schema (discriminated union via `anyOf`) so the LLM only sees the relevant fields. this prevents models from filling every property with empty defaults.
 
+LLMs (especially via OpenAI-compatible APIs) sometimes hallucinate action names. common aliases are auto-normalized before dispatch — e.g. `fill_credentials` → `bitwarden_fill`, `click_by_text` → `click_text`, `navigate` → `goto`. see `ACTION_ALIASES` in `index.ts`.
+
 | action | required fields | optional fields |
 |-|-|-|
 | `goto` | `url` | |

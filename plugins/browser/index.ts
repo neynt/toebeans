@@ -1195,7 +1195,7 @@ export default function create(): Plugin {
                   }
 
                   default:
-                    throw new Error(`unknown action type: ${action.type}`)
+                    throw new Error(`unknown action type: ${action.type}. valid types: goto, click, click_text, type, press, wait, wait_for, evaluate, screenshot, scroll, select, upload_file, download, bitwarden_fill`)
                 }
               }
 
