@@ -6,6 +6,7 @@ import type { PluginManager } from './plugin.ts'
 import { repairMessages } from './agent.ts'
 import {
   getCurrentSessionId,
+  setCurrentSessionId,
   loadSession,
   loadCostEntries,
   estimateSessionTokens,
@@ -22,7 +23,8 @@ Be brief but don't lose anything you'd regret forgetting. Include key topics, de
 
 export interface SessionManager {
   getSessionForMessage(route?: string): Promise<string>
-  checkCompaction(sessionId: string, route?: string): Promise<void>
+  /** Check if session needs compaction; returns new session ID if compacted, else the same ID. */
+  checkCompaction(sessionId: string, route?: string): Promise<string>
   forceCompact(sessionId: string, route?: string): Promise<string>
   resetSession(sessionId: string, route?: string): Promise<string>
   getSessionInfo(sessionId: string): Promise<{
@@ -167,6 +169,9 @@ export function createSessionManager(
     ]
     await writeSession(newId, entries)
 
+    // atomically switch the route to the new session
+    setCurrentSessionId(route, newId)
+
     const afterTokens = await estimateSessionTokens(newId)
     console.log(`session-manager: compacted ${beforeTokens} -> ${afterTokens} tokens (new session ${newId})`)
 
@@ -212,13 +217,12 @@ export function createSessionManager(
       return sessionId
     },
 
-    async checkCompaction(sessionId: string, route?: string): Promise<void> {
+    async checkCompaction(sessionId: string, route?: string): Promise<string> {
       // check token count (messages + system prompt = real context usage)
       const tokens = await estimateSessionTokens(sessionId) + await getSystemPromptTokens()
       if (tokens >= compactAtTokens) {
         console.log(`session-manager: session ${sessionId} has ${tokens} tokens, compacting`)
-        await compactSession(sessionId, route)
-        return
+        return await compactSession(sessionId, route)
       }
 
       // check lifespan (only compact if tokens meet minimum threshold)
@@ -230,11 +234,12 @@ export function createSessionManager(
             console.log(`session-manager: session ${sessionId} is stale but only ${tokens} tokens (< ${compactMinTokens}), skipping compaction`)
           } else {
             console.log(`session-manager: session ${sessionId} is ${Math.floor(ageSeconds / 60)} minutes old (${tokens} tokens), compacting`)
-            await compactSession(sessionId, route)
+            return await compactSession(sessionId, route)
           }
-          return
         }
       }
+
+      return sessionId
     },
 
     async forceCompact(sessionId: string, route?: string): Promise<string> {
@@ -259,6 +264,7 @@ export function createSessionManager(
 
       // create a brand new empty session (no summary, no carryover)
       const newId = await generateSessionId(route)
+      setCurrentSessionId(route, newId)
 
       console.log(`session-manager: reset session ${sessionId} → ${newId}`)
 
