@@ -91,11 +91,11 @@ export default function create(): Plugin {
     tools: [
       {
         name: 'bash',
-        description: 'Execute a bash command.',
+        description: 'Execute a bash command via `bash -c`. The command string is passed verbatim to the shell — pipes, redirects, command substitution ($(...)), variable expansion, globbing, and all other bash features work as expected.',
         inputSchema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'The bash command to execute' },
+            command: { type: 'string', description: 'The bash command to execute. Passed directly to `bash -c` with no escaping — use full shell syntax freely.' },
             workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
             timeout: {
               type: 'number',
@@ -112,6 +112,9 @@ export default function create(): Plugin {
             command: string
             workingDir?: string
             timeout?: number
+          }
+          if (!command || typeof command !== 'string') {
+            return { content: 'Missing or invalid "command" field', is_error: true }
           }
           const cwd = workingDir ? resolve(context.workingDir, workingDir) : context.workingDir
           const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeout) * 1000
@@ -166,11 +169,11 @@ export default function create(): Plugin {
 
       {
         name: 'bash_spawn',
-        description: 'Start a long-running bash command in the background. You will be notified when it completes.',
+        description: 'Start a long-running bash command in the background via `bash -c`. You will be notified when it completes. Full shell syntax (pipes, redirects, $(...), etc.) is supported.',
         inputSchema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'The bash command to execute' },
+            command: { type: 'string', description: 'The bash command to execute. Passed directly to `bash -c` with no escaping.' },
             workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
             timeout: {
               type: 'number',
@@ -187,6 +190,9 @@ export default function create(): Plugin {
             command: string
             workingDir?: string
             timeout?: number
+          }
+          if (!command || typeof command !== 'string') {
+            return { content: 'Missing or invalid "command" field', is_error: true }
           }
 
           await ensureBashLogsDir()
