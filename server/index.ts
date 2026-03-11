@@ -244,6 +244,7 @@ async function main() {
 
         // mark session as busy
         sessionBusy.set(sessionId, true)
+        let resumeCompacted = false
 
         try {
           sessionAbort.set(sessionId, false)
@@ -287,15 +288,7 @@ async function main() {
           // drain remaining queued messages as new turns
           while (!resumeCheckAbort()) {
             const remaining = resumeCheckQueued()
-            if (remaining.length === 0) {
-              sessionBusy.set(sessionId, false)
-              // re-check after releasing lock to avoid TOCTOU race
-              if (messageQueues.get(sessionId)?.length) {
-                sessionBusy.set(sessionId, true)
-                continue
-              }
-              break
-            }
+            if (remaining.length === 0) break
             console.log(`[server] draining ${remaining.length} queued message(s) as new turn`)
             const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
@@ -317,18 +310,35 @@ async function main() {
             })
           }
 
+          // session stays busy during compaction (same pattern as processSession)
           const newId = await sessionManager.checkCompaction(sessionId, resumeRoute)
           if (newId !== sessionId) {
-            sessionBusy.delete(sessionId)
+            console.log(`[server] auto-resume session compacted: ${sessionId} → ${newId}`)
+            const queued = messageQueues.get(sessionId) || []
+            messageQueues.delete(sessionId)
+            sessionAbort.delete(sessionId)
             sessionAbortControllers.delete(sessionId)
+            sessionBusy.delete(sessionId)
+
+            if (queued.length > 0 && lastOutputTarget) {
+              console.log(`[server] migrating ${queued.length} queued message(s) to new session ${newId}`)
+              sessionBusy.set(newId, true)
+              sessionAbort.set(newId, false)
+              const queuedContent: ContentBlock[] = queued.flatMap(r => r.content)
+              // fire-and-forget: processSession handles its own cleanup
+              processSession(newId, queuedContent, lastOutputTarget, resumeRoute, 'auto-resume')
+            }
+            resumeCompacted = true
           }
         } catch (err) {
           console.error(`[server] auto-continue error:`, err)
           broadcast(sessionId, { type: 'error', message: String(err) })
           await outputFn({ type: 'error', message: String(err) })
         } finally {
-          sessionBusy.set(sessionId, false)
-          sessionAbortControllers.delete(sessionId)
+          if (!resumeCompacted) {
+            sessionBusy.set(sessionId, false)
+            sessionAbortControllers.delete(sessionId)
+          }
         }
       } else {
         console.log(`[server] no restart_server tool call found in last assistant message, not auto-continuing`)
@@ -359,6 +369,7 @@ async function main() {
       await setLastOutputTarget(effectiveOutputTarget)
     }
 
+    let compacted = false
     try {
       const agentOnChunk = async (chunk: ServerMessage) => {
         broadcast(conversationSessionId, chunk)
@@ -451,8 +462,7 @@ async function main() {
           const processing = processSession(newSessionId, queuedContent, effectiveOutputTarget, route, pluginName)
           sessionProcessing.set(newSessionId, processing)
         }
-        // skip the finally block cleanup for the old session (already done above)
-        return
+        compacted = true
       }
     } catch (err) {
       console.error(`agent error for ${conversationSessionId}:`, err)
@@ -463,11 +473,13 @@ async function main() {
         await outputFn({ type: 'error', message: String(err) })
       }
     } finally {
-      // mark session as not busy and clear abort flag
-      sessionBusy.set(conversationSessionId, false)
-      sessionAbort.set(conversationSessionId, false)
-      sessionAbortControllers.delete(conversationSessionId)
-      sessionProcessing.delete(conversationSessionId)
+      if (!compacted) {
+        // mark session as not busy and clear abort flag
+        sessionBusy.set(conversationSessionId, false)
+        sessionAbort.set(conversationSessionId, false)
+        sessionAbortControllers.delete(conversationSessionId)
+        sessionProcessing.delete(conversationSessionId)
+      }
     }
   }
 
@@ -622,6 +634,7 @@ async function main() {
 
         // clear output target for websocket messages (no auto-resume needed)
         await setLastOutputTarget(null)
+        let wsCompacted = false
 
         try {
           const wsOnChunk = (chunk: ServerMessage) => broadcast(wsSessionId, chunk)
@@ -653,15 +666,7 @@ async function main() {
           // drain remaining queued messages as new turns
           while (!wsCheckAbort()) {
             const remaining = wsCheckQueued()
-            if (remaining.length === 0) {
-              sessionBusy.set(wsSessionId, false)
-              // re-check after releasing lock to avoid TOCTOU race
-              if (messageQueues.get(wsSessionId)?.length) {
-                sessionBusy.set(wsSessionId, true)
-                continue
-              }
-              break
-            }
+            if (remaining.length === 0) break
             console.log(`[websocket] draining ${remaining.length} queued message(s) as new turn`)
             const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
@@ -682,19 +687,34 @@ async function main() {
             })
           }
 
+          // session stays busy during compaction (same pattern as processSession)
           const newWsSessionId = await sessionManager.checkCompaction(wsSessionId, wsRoute)
           if (newWsSessionId !== wsSessionId) {
-            sessionBusy.delete(wsSessionId)
+            console.log(`[websocket] session compacted: ${wsSessionId} → ${newWsSessionId}`)
+            const queued = messageQueues.get(wsSessionId) || []
+            messageQueues.delete(wsSessionId)
             sessionAbort.delete(wsSessionId)
             sessionAbortControllers.delete(wsSessionId)
+            sessionBusy.delete(wsSessionId)
+
+            if (queued.length > 0) {
+              console.log(`[websocket] migrating ${queued.length} queued message(s) to new session ${newWsSessionId}`)
+              sessionBusy.set(newWsSessionId, true)
+              sessionAbort.set(newWsSessionId, false)
+              const queuedContent: ContentBlock[] = queued.flatMap(r => r.content)
+              processSession(newWsSessionId, queuedContent, null, wsRoute, 'websocket')
+            }
+            wsCompacted = true
           }
         } catch (err) {
           console.error('agent error:', err)
           broadcast(wsSessionId, { type: 'error', message: String(err) })
         } finally {
-          sessionBusy.set(wsSessionId, false)
-          sessionAbort.set(wsSessionId, false)
-          sessionAbortControllers.delete(wsSessionId)
+          if (!wsCompacted) {
+            sessionBusy.set(wsSessionId, false)
+            sessionAbort.set(wsSessionId, false)
+            sessionAbortControllers.delete(wsSessionId)
+          }
         }
         break
       }

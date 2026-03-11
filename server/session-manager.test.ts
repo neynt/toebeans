@@ -453,4 +453,78 @@ describe('session-manager compaction', () => {
     const afterSession = await sm.getSessionForMessage(testRoute)
     expect(afterSession).not.toBe(sessionId)
   })
+
+  test('concurrent checkCompaction calls do not double-compact', async () => {
+    // two callers resolve the same stale session ID before either compacts.
+    // both call checkCompaction concurrently. only one should actually compact;
+    // the second should coalesce onto the first's in-flight promise.
+    let compactionCount = 0
+    const slowProvider: LlmProvider = {
+      name: 'slow-fake',
+      stream: async function* (_opts: any) {
+        compactionCount++
+        await new Promise(r => setTimeout(r, 50)) // simulate slow LLM
+        yield { type: 'text' as const, text: `summary #${compactionCount}` }
+        yield { type: 'usage' as const, input: 100, output: 50, cacheRead: 0, cacheWrite: 0 }
+      },
+    }
+
+    const sm = createSessionManager(
+      slowProvider,
+      fakeConfig({ compactAtTokens: 100 }),
+    )
+    const sessionId = await sm.getSessionForMessage(testRoute)
+    await writeSessionFile(sessionId, bulkEntries(5))
+
+    // fire two compactions concurrently on the same session
+    const [result1, result2] = await Promise.all([
+      sm.checkCompaction(sessionId, testRoute),
+      sm.checkCompaction(sessionId, testRoute),
+    ])
+
+    // both should return the same new session (coalesced)
+    expect(result1).not.toBe(sessionId)
+    expect(result2).toBe(result1)
+    // only one LLM call should have been made
+    expect(compactionCount).toBe(1)
+    // the route map should point to that single new session
+    expect(await getCurrentSessionId(testRoute)).toBe(result1)
+  })
+
+  test('compaction with slow provider still atomically updates route map', async () => {
+    // verifies that even with a slow LLM summary, the route map is updated
+    // atomically after compaction completes, so no window exists where the
+    // old session could be re-resolved.
+    const slowProvider: LlmProvider = {
+      name: 'slow-fake',
+      stream: async function* (_opts: any) {
+        await new Promise(r => setTimeout(r, 100))
+        yield { type: 'text' as const, text: 'slow summary' }
+        yield { type: 'usage' as const, input: 100, output: 50, cacheRead: 0, cacheWrite: 0 }
+      },
+    }
+
+    const sm = createSessionManager(
+      slowProvider,
+      fakeConfig({ compactAtTokens: 100 }),
+    )
+    const sessionId = await sm.getSessionForMessage(testRoute)
+    await writeSessionFile(sessionId, bulkEntries(5))
+
+    // start compaction (slow)
+    const compactionPromise = sm.checkCompaction(sessionId, testRoute)
+
+    // while compaction is in-flight, the route map still points to old session
+    // (compaction hasn't finished yet)
+    const midCompaction = await getCurrentSessionId(testRoute)
+    expect(midCompaction).toBe(sessionId)
+
+    // wait for compaction to finish
+    const newId = await compactionPromise
+    expect(newId).not.toBe(sessionId)
+
+    // now route map must point to new session
+    const afterCompaction = await getCurrentSessionId(testRoute)
+    expect(afterCompaction).toBe(newId)
+  })
 })

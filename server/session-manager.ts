@@ -114,7 +114,23 @@ export function createSessionManager(
     return { text: result.trim(), usage }
   }
 
+  // prevent concurrent compaction of the same session (second caller awaits the first)
+  const inFlightCompactions = new Map<string, Promise<string>>()
+
   async function compactSession(sessionId: string, route?: string): Promise<string> {
+    const existing = inFlightCompactions.get(sessionId)
+    if (existing) return existing
+
+    const promise = doCompactSession(sessionId, route)
+    inFlightCompactions.set(sessionId, promise)
+    try {
+      return await promise
+    } finally {
+      inFlightCompactions.delete(sessionId)
+    }
+  }
+
+  async function doCompactSession(sessionId: string, route?: string): Promise<string> {
     const beforeTokens = await estimateSessionTokens(sessionId)
     console.log(`session-manager: compacting session ${sessionId} (${beforeTokens} tokens, route: ${route || '_default'})`)
 
