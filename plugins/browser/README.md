@@ -1,53 +1,65 @@
 # browser plugin
 
-Stateful, CDP-based browser automation for toebeans. Browsers persist between tool calls via session IDs.
+stateful browser automation for toebeans. powered by patchright (patched playwright/chromium) with anti-bot stealth measures.
 
-## Tools
+## tools
 
-| Tool | Description |
-|------|-------------|
-| `browser_spawn` | Create a new browser session. Optionally navigate to a URL. Returns `session_id`. |
-| `browser_screenshot` | Take a viewport screenshot, save to file, return path. |
-| `browser_view` | Get markdown text of the current page (read-only). |
-| `browser_interact` | Perform actions: goto, click, type, press, wait, evaluate, scroll, select, upload_file, download. |
-| `browser_close` | Close session and free resources. |
+| tool | what it does |
+|-|-|
+| `browser_spawn` | create a session (ephemeral or persistent). optionally navigate to a URL |
+| `browser_sessions` | list all sessions (in-memory and persisted on disk) |
+| `browser_screenshot` | viewport screenshot, saved as PNG to `~/.toebeans/workspace/images/` |
+| `browser_view` | extract current page as markdown. annotates interactive elements with CSS selectors so the LLM can target them in subsequent actions |
+| `browser_interact` | run a sequence of actions on the page (see below) |
+| `browser_close` | close session, free resources. persistent sessions preserve state unless `delete: true` |
 
-## User visibility
+## interact actions
 
-### Screenshots
-Every `browser_screenshot` call saves a PNG to `~/.toebeans/workspace/images/`. The LLM or user can view these files directly.
+`goto`, `click`, `click_text`, `type`, `press`, `wait`, `wait_for`, `evaluate`, `screenshot`, `scroll`, `select`, `upload_file`, `download`, `bitwarden_fill`
+
+## sessions
+
+two kinds:
+
+- **ephemeral** — share a single chromium instance and a common cookie jar (`~/.toebeans/secrets/browser-cookies.json`). auto-close after 5 min inactivity (configurable).
+- **persistent** — each gets its own chromium instance with a full user data dir under `~/.toebeans/browser-sessions/{name}/`. survives server restarts. cookies, localStorage, service workers all preserved natively by chromium. auto-close after 24h inactivity; stale sessions cleaned after 7 days.
+
+spawning a persistent session that already exists resumes it with all prior state intact.
+
+## design notes
+
+- uses [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (not vanilla playwright) with `AutomationControlled` disabled and WebGL spoofing for bot detection evasion
+- headless by default. set `headless: false` to see the actual chrome window
+- `browser_view` clones the DOM, strips scripts/styles/svg/canvas, annotates inputs/buttons/selects/links with CSS selector hints, then converts to markdown via turndown. truncates at 80KB
+- 60s hard timeout on all operations as a hang safety net. if chromium hangs on close, it gets SIGKILL'd
+- navigation timeouts fail silently (log a warning, session continues). selector timeouts fail fast (2s default)
+
+## user visibility
 
 ### CDP remote debugging
-When `remoteDebuggingPort` is configured (e.g. `9222`), you can connect to the live browser:
-1. Open Chrome/Chromium on your machine
-2. Navigate to `chrome://inspect`
-3. Click "Configure..." and add `localhost:9222`
-4. Your browser sessions will appear under "Remote Target" — click "inspect" to get a live DevTools view
 
-### Non-headless mode
-Set `headless: false` in config to see the actual Chrome window on your desktop.
+when `remoteDebuggingPort` is set, connect via `chrome://inspect` to get live DevTools on any session.
 
-## Config
+### screenshots
 
-Add to `~/.toebeans/config.json5` under `plugins`:
+every `browser_screenshot` saves a PNG to `~/.toebeans/workspace/images/browser-{timestamp}.png`.
+
+## config
+
+in `~/.toebeans/config.json5` under `plugins`:
 
 ```json5
 browser: {
   locale: "en-US",
   timezone: "America/New_York",
-  sessionTimeoutMs: 300000,    // auto-close after 5 min inactivity
-  navigationTimeout: 15000,    // page.goto() timeout (default 15s)
-  selectorTimeout: 2000,       // click/wait_for/select timeout (default 2s)
-  downloadTimeout: 30000,      // download event timeout (default 30s)
+  sessionTimeoutMs: 300000,       // ephemeral inactivity timeout (5 min)
+  persistentTimeoutMs: 86400000,  // persistent inactivity timeout (24h)
+  persistentMaxAgeDays: 7,        // auto-clean stale persistent sessions
+  navigationTimeout: 15000,
+  selectorTimeout: 2000,
+  downloadTimeout: 30000,
   maxContentLength: 80000,
-  remoteDebuggingPort: 9223,   // CDP port for chrome://inspect
-  headless: false,             // set true to hide the window
+  remoteDebuggingPort: 9223,
+  headless: false,
 }
 ```
-
-## Notes
-
-- Sessions auto-expire after `sessionTimeoutMs` of inactivity (default 5 min)
-- Cookies persist across sessions via `~/.toebeans/secrets/browser-cookies.json`
-- Uses patchright (patched Chromium) with stealth measures for anti-bot bypass
-- Shares the same cookie jar as the web-browse plugin
