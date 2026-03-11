@@ -310,6 +310,8 @@ export default function create(serverContext?: ServerContext): Plugin {
   const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
   // batch pending tool calls per session for condensed summaries
   const pendingToolBatches = new Map<string, Array<{ name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }>>()
+  // track the live progress message per session (condensed mode): sessionId -> discord message ID
+  const liveProgressMessages = new Map<string, string>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
   // track last message ID per channel (for "last" shorthand in discord_react)
@@ -673,37 +675,79 @@ export default function create(serverContext?: ServerContext): Plugin {
     }
   }
 
-  // flush pending tool batch as a condensed summary to the main channel
-  async function flushToolBatch(sessionId: string, textChannel: TextChannel | DMChannel) {
+  // render a condensed batch summary as a string (for live progress message)
+  function renderToolBatch(batch: Array<{ name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }>, finished: boolean): string {
+    const completed = batch.filter(t => t.resultTokens !== undefined).length
+    const errors = batch.filter(t => t.isError).length
+
+    // per-tool lines with status indicators
+    const lines: string[] = []
+    for (const t of batch) {
+      let status: string
+      if (t.resultTokens !== undefined) {
+        status = t.isError ? '❌' : '✅'
+      } else {
+        status = '⏳'
+      }
+      let line = `${status} ${t.name}`
+      if (t.summary) line += `: ${t.summary}`
+      const tokens = t.resultTokens !== undefined
+        ? `${t.inputTokens}+${t.resultTokens}`
+        : `${t.inputTokens}`
+      line += ` (${tokens} tok)`
+      lines.push(line)
+    }
+
+    const errorNote = errors > 0 ? ` | ${errors} failed` : ''
+    const statusLabel = finished
+      ? `done — ${completed} tool${completed !== 1 ? 's' : ''}${errorNote}`
+      : `${completed}/${batch.length} done${errorNote}`
+
+    const header = `🔧 [${statusLabel}]`
+    const body = lines.join('\n')
+    return `${header}\n\`\`\`\n${body}\n\`\`\``.slice(0, 2000)
+  }
+
+  // send or edit the live progress message for condensed mode
+  async function updateLiveProgress(sessionId: string, textChannel: TextChannel | DMChannel, finished: boolean) {
     const batch = pendingToolBatches.get(sessionId)
     if (!batch || batch.length === 0) return
-    pendingToolBatches.delete(sessionId)
 
-    // count tools by name
-    const counts = new Map<string, number>()
-    for (const t of batch) {
-      counts.set(t.name, (counts.get(t.name) || 0) + 1)
+    const content = renderToolBatch(batch, finished)
+    const existingMsgId = liveProgressMessages.get(sessionId)
+
+    try {
+      if (existingMsgId) {
+        const msg = await textChannel.messages.fetch(existingMsgId)
+        await msg.edit(content)
+      } else {
+        const msg = await textChannel.send(content)
+        liveProgressMessages.set(sessionId, msg.id)
+      }
+    } catch (err) {
+      console.error('discord: failed to update live progress:', err)
+      // fallback: try sending a new message
+      if (existingMsgId) {
+        try {
+          const msg = await textChannel.send(content)
+          liveProgressMessages.set(sessionId, msg.id)
+        } catch {}
+      }
     }
-    const toolList = [...counts.entries()].map(([name, count]) =>
-      count > 1 ? `${name} ×${count}` : name
-    ).join(', ')
+  }
 
-    // collect brief summaries (dedupe similar ones)
-    const summaries = batch.map(t => t.summary).filter(Boolean)
-    const uniqueSummaries = [...new Set(summaries)]
-    const briefDesc = uniqueSummaries.length > 0
-      ? ' — ' + uniqueSummaries.slice(0, 4).join(', ') + (uniqueSummaries.length > 4 ? '…' : '')
-      : ''
+  // flush pending tool batch: final update + cleanup
+  async function flushToolBatch(sessionId: string, textChannel: TextChannel | DMChannel) {
+    const batch = pendingToolBatches.get(sessionId)
+    if (!batch || batch.length === 0) {
+      liveProgressMessages.delete(sessionId)
+      pendingToolBatches.delete(sessionId)
+      return
+    }
 
-    const errors = batch.filter(t => t.isError).length
-    const errorNote = errors > 0 ? ` (${errors} failed)` : ''
-
-    const totalIn = batch.reduce((s, t) => s + t.inputTokens, 0)
-    const totalOut = batch.reduce((s, t) => s + (t.resultTokens || 0), 0)
-
-    // escape backticks in content, then wrap with inline code
-    const inner = `🔧 ${batch.length} tool${batch.length > 1 ? 's' : ''}: ${toolList}${briefDesc}${errorNote} (${totalIn}+${totalOut} tokens)`.replaceAll('`', "'")
-    await textChannel.send(`\`${inner}\``.slice(0, 2000))
+    await updateLiveProgress(sessionId, textChannel, true)
+    pendingToolBatches.delete(sessionId)
+    liveProgressMessages.delete(sessionId)
   }
 
   // generate a brief summary for a tool call (used in condensed batches)
@@ -865,7 +909,7 @@ export default function create(serverContext?: ServerContext): Plugin {
             }
 
             if (config?.condenseToolCalls) {
-              // condensed mode: accumulate in batch, don't post to main channel yet
+              // condensed mode: accumulate in batch and update live progress message
               const batch = pendingToolBatches.get(sessionId) || []
               batch.push({
                 name: message.name,
@@ -875,6 +919,8 @@ export default function create(serverContext?: ServerContext): Plugin {
               pendingToolBatches.set(sessionId, batch)
               // store tool_use_id -> batch index so tool_result can update it
               toolMessages.set(message.id, { channelId, messageId: '', toolName: message.name, originalContent: '', inputTokens })
+              // send or edit the live progress message immediately
+              await updateLiveProgress(sessionId, textChannel, false)
             } else {
               // non-condensed: original per-tool message behavior
               const trunc = (s: string, n = 100) => s.length > n ? s.slice(0, n - 3) + '...' : s
@@ -970,6 +1016,8 @@ export default function create(serverContext?: ServerContext): Plugin {
                 }
               }
               toolMessages.delete(message.tool_use_id)
+              // update the live progress message with completion status
+              await updateLiveProgress(sessionId, textChannel, false)
             } else if (toolInfo && toolInfo.messageId) {
               // non-condensed: edit the original tool message
               try {
