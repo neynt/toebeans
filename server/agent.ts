@@ -405,8 +405,17 @@ export async function runAgentTurn(
       const tool = toolMap.get(block.name)
       let result: { content: ToolResultContent; is_error?: boolean }
 
+      // detect malformed tool input from LLM (JSON parse failure in provider)
+      const parseError = (block.input as { _parseError?: string })?._parseError
+      const rawJson = (block.input as { _rawJson?: string })?._rawJson
+
       if (!tool) {
         result = { content: `Unknown tool: ${block.name}`, is_error: true }
+      } else if (parseError) {
+        result = {
+          content: `Tool input was malformed JSON — your output could not be parsed.\nError: ${parseError}\nRaw JSON: ${rawJson?.slice(0, 500)}`,
+          is_error: true,
+        }
       } else {
         try {
           const expandedInput = tool.pathFields

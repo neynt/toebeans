@@ -180,8 +180,9 @@ export class AnthropicProvider implements LlmProvider {
               if (currentToolUse.inputJson) {
                 input = JSON.parse(currentToolUse.inputJson)
               }
-            } catch {
-              // empty or invalid JSON, use empty object
+            } catch (err) {
+              console.warn(`[anthropic] failed to parse tool input JSON for ${currentToolUse.name}: ${err}`)
+              input = { _parseError: String(err), _rawJson: currentToolUse.inputJson }
             }
             yield {
               type: 'tool_use',

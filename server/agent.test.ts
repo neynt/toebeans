@@ -256,6 +256,65 @@ describe('runAgentTurn queued message handling', () => {
     expect(toolResultMsg!.content.every(b => b.type === 'tool_result')).toBe(true)
   })
 
+  test('malformed tool input JSON yields parse error instead of calling tool', async () => {
+    const savedMessages: Message[] = []
+    const toolCalls: unknown[] = []
+    setupSessionMock({
+      appendMessage: async (_sid: string, msg: Message) => { savedMessages.push(msg) },
+    })
+
+    // the LLM emits a tool_use whose input has _parseError (simulating what the
+    // provider sets when JSON.parse fails on streamed tool input)
+    const provider = makeMockProvider([
+      [
+        {
+          type: 'tool_use',
+          id: 'tu_1',
+          name: 'test_tool',
+          input: { _parseError: 'SyntaxError: Unexpected token', _rawJson: '{"command": "echo \\$(cat' },
+        },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+      [
+        { type: 'text', text: 'sorry about that' },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+    ])
+
+    await runAgentTurn(
+      [{ type: 'text', text: 'run a command' }],
+      makeOptions({
+        provider,
+        tools: () => [{
+          name: 'test_tool',
+          description: 'a test tool',
+          inputSchema: { type: 'object', properties: {} },
+          execute: async (input) => {
+            toolCalls.push(input)
+            return { content: 'should not be called' }
+          },
+        }],
+      }),
+    )
+
+    // tool.execute should NOT have been called
+    expect(toolCalls).toHaveLength(0)
+
+    // the tool result message should contain a helpful parse error
+    const toolResultMsg = savedMessages.find(m =>
+      m.role === 'user' && m.content.some(b => b.type === 'tool_result')
+    )
+    expect(toolResultMsg).toBeDefined()
+    const resultBlock = toolResultMsg!.content.find(b => b.type === 'tool_result')
+    expect(resultBlock!.type).toBe('tool_result')
+    if (resultBlock!.type === 'tool_result') {
+      expect(resultBlock!.is_error).toBe(true)
+      expect(resultBlock!.content).toContain('malformed JSON')
+      expect(resultBlock!.content).toContain('SyntaxError')
+      expect(resultBlock!.content).toContain('echo \\$(cat')
+    }
+  })
+
   test('queued messages during multi-tool do not interrupt — all tools complete', async () => {
     const savedMessages: Message[] = []
     setupSessionMock({

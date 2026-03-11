@@ -237,8 +237,9 @@ export class MoonshotProvider implements LlmProvider {
             let input: unknown = {}
             try {
               if (acc.args) input = JSON.parse(acc.args)
-            } catch {
-              // invalid JSON
+            } catch (err) {
+              console.warn(`[moonshot] failed to parse tool input JSON for ${acc.name}: ${err}`)
+              input = { _parseError: String(err), _rawJson: acc.args }
             }
             yield { type: 'tool_use', id: acc.id, name: acc.name, input }
           }
