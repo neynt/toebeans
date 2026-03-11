@@ -493,6 +493,12 @@ export default function create(): Plugin {
               return { content: `session ${resumeSessionId} has no ccSessionId (old session without capture)`, is_error: true }
             }
             ccResumeId = prevMeta.ccSessionId
+            // Claude Code scopes sessions by working directory — the resume must
+            // run from the same cwd where the original session was created, or CC
+            // won't find the conversation.
+            if (!worktree) {
+              cwd = prevMeta.workingDir
+            }
           }
 
           // write metadata
