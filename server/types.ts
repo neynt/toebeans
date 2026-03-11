@@ -10,7 +10,7 @@ export type ToolResultContent =
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; source: ImageSource }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; provider_id?: string }
   | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }
 
 export interface Message {
@@ -21,7 +21,7 @@ export interface Message {
 // Streaming chunks from LLM
 export type StreamChunk =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; provider_id?: string }
   | { type: 'usage'; input: number; output: number; cacheRead?: number; cacheWrite?: number }
 
 // Cache hints for context optimization
@@ -67,7 +67,7 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: 'text'; text: string }
   | { type: 'text_block_end' }  // signals end of a text content block (flush buffer)
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; provider_id?: string }
   | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }
   | { type: 'done'; usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }; cost?: { session: number; turn: number } }
   | { type: 'error'; message: string }

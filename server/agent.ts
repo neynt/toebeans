@@ -301,10 +301,11 @@ export async function runAgentTurn(
               hasText = false
             }
             hasToolUse = true
-            onChunk?.({ type: 'tool_use', id: chunk.id, name: chunk.name, input: chunk.input })
+            onChunk?.({ type: 'tool_use', id: chunk.id, provider_id: chunk.provider_id, name: chunk.name, input: chunk.input })
             assistantContent.push({
               type: 'tool_use',
               id: chunk.id,
+              provider_id: chunk.provider_id,
               name: chunk.name,
               input: chunk.input,
             })
@@ -369,7 +370,7 @@ export async function runAgentTurn(
 
     // execute tools and collect results
     const toolUseBlocks = assistantContent.filter(b => b.type === 'tool_use') as
-      { type: 'tool_use'; id: string; name: string; input: unknown }[]
+      { type: 'tool_use'; id: string; provider_id?: string; name: string; input: unknown }[]
     const toolResults: ContentBlock[] = []
 
     for (let i = 0; i < toolUseBlocks.length; i++) {

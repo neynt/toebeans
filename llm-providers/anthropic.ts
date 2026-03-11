@@ -32,42 +32,54 @@ export class AnthropicProvider implements LlmProvider {
     cacheControl?: CacheHint[]
     abortSignal?: AbortSignal
   }): AsyncIterable<StreamChunk> {
+    const replayableToolUseIds = new Set<string>()
     const messages = params.messages.map((msg, idx) => {
-      const content = msg.content.map((block): AnthropicContentBlock => {
+      const content: AnthropicContentBlock[] = []
+      for (const block of msg.content) {
         switch (block.type) {
           case 'text':
-            return { type: 'text', text: block.text }
+            content.push({ type: 'text', text: block.text })
+            break
           case 'image': {
             // skip images over 5MB (Anthropic limit)
             if (block.source?.type === 'base64' && block.source.data.length > 5_000_000) {
-              return { type: 'text', text: '(image too large, removed)' }
+              content.push({ type: 'text', text: '(image too large, removed)' })
+              break
             }
-            return { type: 'image', source: block.source }
+            content.push({ type: 'image', source: block.source })
+            break
           }
           case 'tool_use':
-            return { type: 'tool_use', id: sanitizeToolId(block.id), name: block.name, input: block.input }
+            replayableToolUseIds.add(block.id)
+            content.push({ type: 'tool_use', id: sanitizeToolId(block.id), name: block.name, input: block.input })
+            break
           case 'tool_result': {
-            let content = block.content
+            if (!replayableToolUseIds.has(block.tool_use_id)) {
+              break
+            }
+            let resultContent = block.content
             // filter oversized images in rich content
-            if (Array.isArray(content)) {
-              content = content.map(b => {
+            if (Array.isArray(resultContent)) {
+              resultContent = resultContent.map(b => {
                 if (b.type === 'image' && b.source?.type === 'base64' && b.source.data.length > 5_000_000) {
                   return { type: 'text' as const, text: '(image too large, removed)' }
                 }
                 return b
               })
             }
-            return {
+            content.push({
               type: 'tool_result',
               tool_use_id: sanitizeToolId(block.tool_use_id),
-              content,
+              content: resultContent,
               is_error: block.is_error,
-            }
+            })
+            break
           }
           default:
-            return { type: 'text', text: `(unsupported block type: ${(block as { type: string }).type})` }
+            content.push({ type: 'text', text: `(unsupported block type: ${(block as { type: string }).type})` })
+            break
         }
-      })
+      }
 
       // add cache control to last block of messages that have cache hints
       const cacheHint = params.cacheControl?.find(h => h.index === idx)
