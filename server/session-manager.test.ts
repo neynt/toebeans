@@ -108,11 +108,10 @@ async function getCurrentSessionId(route?: string): Promise<string> {
   const cached = testSessionMap.get(key)
   if (cached) return cached
 
-  // cold start: scan files by mtime
+  // cold start: pick session with lexicographically highest filename suffix
   const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
   const glob = new Bun.Glob('*.jsonl')
   let latestId: string | null = null
-  let latestMtime = 0
 
   for await (const path of glob.scan(SESSIONS_DIR)) {
     const sessionId = path.replace('.jsonl', '')
@@ -121,9 +120,11 @@ async function getCurrentSessionId(route?: string): Promise<string> {
     } else {
       if (!/^\d/.test(sessionId)) continue
     }
-    const stat = await Bun.file(join(SESSIONS_DIR, path)).stat()
-    if (stat && stat.mtimeMs > latestMtime) {
-      latestMtime = stat.mtimeMs
+    const suffix = routePrefix ? sessionId.slice(routePrefix.length) : sessionId
+    const latestSuffix = latestId
+      ? (routePrefix ? latestId.slice(routePrefix.length) : latestId)
+      : ''
+    if (!latestId || suffix > latestSuffix) {
       latestId = sessionId
     }
   }
@@ -301,17 +302,45 @@ describe('session route map', () => {
     expect(await getCurrentSessionId(route2)).toBe(id2)
   })
 
-  test('cold start picks up most recent file by mtime', async () => {
+  test('cold start picks session with highest filename (date + sequence)', async () => {
     const prefix = sanitizeRoute(testRoute)
 
     const oldId = `${prefix}-2025-01-01-0000`
     const newId = `${prefix}-2025-01-02-0000`
     await writeSessionFile(oldId, [sysEntry('old session')])
-    await new Promise(r => setTimeout(r, 50))
     await writeSessionFile(newId, [sysEntry('new session')])
 
     testSessionMap.clear()
     const resolved = await getCurrentSessionId(testRoute)
+    expect(resolved).toBe(newId)
+  })
+
+  test('cold start picks higher sequence number on same date', async () => {
+    const prefix = sanitizeRoute(testRoute)
+
+    const first = `${prefix}-2025-03-15-0000`
+    const second = `${prefix}-2025-03-15-0001`
+    await writeSessionFile(first, [sysEntry('first')])
+    await writeSessionFile(second, [sysEntry('second')])
+
+    testSessionMap.clear()
+    const resolved = await getCurrentSessionId(testRoute)
+    expect(resolved).toBe(second)
+  })
+
+  test('cold start ignores mtime — older filename with newer mtime loses', async () => {
+    const prefix = sanitizeRoute(testRoute)
+
+    const oldId = `${prefix}-2025-01-01-0000`
+    const newId = `${prefix}-2025-06-15-0000`
+    // write the newer session first, then the older one (so old has higher mtime)
+    await writeSessionFile(newId, [sysEntry('newer session')])
+    await new Promise(r => setTimeout(r, 50))
+    await writeSessionFile(oldId, [sysEntry('older session with newer mtime')])
+
+    testSessionMap.clear()
+    const resolved = await getCurrentSessionId(testRoute)
+    // must pick newId by filename, not oldId by mtime
     expect(resolved).toBe(newId)
   })
 })

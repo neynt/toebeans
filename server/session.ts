@@ -211,18 +211,20 @@ export function setCurrentSessionId(route: string | undefined, sessionId: string
 }
 
 // get the current session for a route.
-// uses in-memory map if available; falls back to mtime scan on cold start.
+// uses in-memory map if available; falls back to filename ordering on cold start.
 export async function getCurrentSessionId(route?: string): Promise<string> {
   const key = routeKey(route)
   const cached = currentSessionMap.get(key)
   if (cached) return cached
 
-  // cold start: scan files by mtime (one-time bootstrap)
+  // cold start: pick the session with the lexicographically highest filename.
+  // filenames are {route-prefix}{YYYY-MM-DD}-{NNNN}.jsonl, so lexicographic
+  // order = chronological order. this avoids mtime heuristics which can be
+  // invalidated by stale async writes, backup tools, or filesystem quirks.
   const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
 
   const glob = new Bun.Glob('*.jsonl')
   let latestId: string | null = null
-  let latestMtime = 0
 
   for await (const path of glob.scan(SESSIONS_DIR)) {
     const sessionId = path.replace('.jsonl', '')
@@ -235,9 +237,13 @@ export async function getCurrentSessionId(route?: string): Promise<string> {
       if (!/^\d/.test(sessionId)) continue
     }
 
-    const stat = await Bun.file(join(SESSIONS_DIR, path)).stat()
-    if (stat && stat.mtimeMs > latestMtime) {
-      latestMtime = stat.mtimeMs
+    // extract the date-sequence suffix for comparison
+    const suffix = routePrefix ? sessionId.slice(routePrefix.length) : sessionId
+    const latestSuffix = latestId
+      ? (routePrefix ? latestId.slice(routePrefix.length) : latestId)
+      : ''
+
+    if (!latestId || suffix > latestSuffix) {
       latestId = sessionId
     }
   }
