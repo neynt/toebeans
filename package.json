@@ -6,7 +6,7 @@
   "scripts": {
     "server": "bun run server/index.ts",
     "cli": "bun run cli/cli.ts",
-    "debug": "bun run cli/debug/index.ts",
+    "debug": "bun run cli/debug.ts",
     "auth:chatgpt-codex": "bun run scripts/auth-chatgpt-codex.ts"
   },
   "dependencies": {

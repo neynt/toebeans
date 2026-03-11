@@ -1,4 +1,4 @@
-import { loadConfig } from '../../server/config.ts'
+import { loadConfig } from '../server/config.ts'
 
 // ── ANSI helpers ──
 

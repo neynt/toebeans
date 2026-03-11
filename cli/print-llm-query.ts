@@ -1,5 +1,5 @@
-import { loadConfig } from '../../server/config.ts'
-import { listSessions } from '../../server/session.ts'
+import { loadConfig } from '../server/config.ts'
+import { listSessions } from '../server/session.ts'
 
 export default async function printLlmQuery() {
   const sessionId = process.argv[3]

@@ -1,8 +1,9 @@
-import { watch, type FSWatcher } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { watch } from 'node:fs'
+import { listSessions } from '../server/session.ts'
 import { homedir } from 'os'
-import { join, basename } from 'path'
-import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../../server/types.ts'
+import { join } from 'path'
+import type { Message, ContentBlock, ToolResultContent, SessionEntry } from '../server/types.ts'
+import { formatLocalTime } from '../server/time.ts'
 
 const SESSIONS_DIR = join(homedir(), '.toebeans', 'sessions')
 
@@ -27,19 +28,7 @@ const FG_GRAY = '\x1b[90m'
 const BG_RED = '\x1b[41m'
 const BG_BLUE = '\x1b[44m'
 
-// rotating colors for session headers
-const SESSION_COLORS = [
-  '\x1b[36m', // cyan
-  '\x1b[33m', // yellow
-  '\x1b[32m', // green
-  '\x1b[35m', // magenta
-  '\x1b[34m', // blue
-  '\x1b[91m', // bright red
-  '\x1b[96m', // bright cyan
-  '\x1b[93m', // bright yellow
-]
-
-// ── markdown rendering (same as tail-session) ──
+// ── markdown rendering ──
 
 function renderMarkdown(text: string): string {
   const lines = text.split('\n')
@@ -48,6 +37,7 @@ function renderMarkdown(text: string): string {
   let codeLang = ''
 
   for (const line of lines) {
+    // fenced code blocks
     if (line.trimStart().startsWith('```')) {
       if (!inCodeBlock) {
         inCodeBlock = true
@@ -67,6 +57,7 @@ function renderMarkdown(text: string): string {
       continue
     }
 
+    // headings
     const h1 = line.match(/^# (.+)/)
     if (h1) { result.push(`${BOLD}${FG_MAGENTA}# ${h1[1]}${RESET}`); continue }
     const h2 = line.match(/^## (.+)/)
@@ -76,22 +67,26 @@ function renderMarkdown(text: string): string {
     const h4 = line.match(/^#### (.+)/)
     if (h4) { result.push(`${BOLD}#### ${h4[1]}${RESET}`); continue }
 
+    // horizontal rule
     if (/^[-*_]{3,}\s*$/.test(line)) {
       result.push(`${DIM}${'─'.repeat(64)}${RESET}`)
       continue
     }
 
+    // blockquote
     if (line.startsWith('> ')) {
       result.push(`${DIM}│${RESET} ${FG_GRAY}${ITALIC}${renderInline(line.slice(2))}${RESET}`)
       continue
     }
 
+    // unordered list
     const ul = line.match(/^(\s*)[*\-+] (.+)/)
     if (ul) {
       result.push(`${ul[1]}${FG_YELLOW}•${RESET} ${renderInline(ul[2]!)}`)
       continue
     }
 
+    // ordered list
     const ol = line.match(/^(\s*)(\d+)\. (.+)/)
     if (ol) {
       result.push(`${ol[1]}${FG_YELLOW}${ol[2]}.${RESET} ${renderInline(ol[3]!)}`)
@@ -105,11 +100,17 @@ function renderMarkdown(text: string): string {
 }
 
 function renderInline(text: string): string {
+  // inline code (do first so inner patterns aren't matched)
   text = text.replace(/`([^`]+)`/g, `${FG_CYAN}$1${RESET}`)
+  // bold+italic
   text = text.replace(/\*\*\*(.+?)\*\*\*/g, `${BOLD}${ITALIC}$1${RESET}`)
+  // bold
   text = text.replace(/\*\*(.+?)\*\*/g, `${BOLD}$1${RESET}`)
+  // italic
   text = text.replace(/\*(.+?)\*/g, `${ITALIC}$1${RESET}`)
+  // strikethrough
   text = text.replace(/~~(.+?)~~/g, `${STRIKETHROUGH}$1${RESET}`)
+  // links
   text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, `${UNDERLINE}${FG_BLUE}$1${RESET}${DIM} ($2)${RESET}`)
   return text
 }
@@ -138,6 +139,7 @@ function renderValue(value: unknown, indent: string): string[] {
   if (typeof value === 'number') return [`${FG_CYAN}${value}${RESET}`]
 
   if (typeof value === 'string') {
+    // show unescaped string — multiline gets its own indented block
     if (value.includes('\n')) {
       const lines = value.split('\n')
       return lines.map(line => `${indent}${line}`)
@@ -146,6 +148,7 @@ function renderValue(value: unknown, indent: string): string[] {
   }
 
   if (Array.isArray(value)) {
+    // short arrays inline
     const simple = value.every(v => typeof v !== 'object' || v === null)
     if (simple) {
       const inline = value.map(v =>
@@ -175,11 +178,14 @@ function renderParams(obj: Record<string, unknown>, indent: string): string[] {
     const rendered = renderValue(value, indent + '  ')
 
     if (typeof value === 'string' && value.includes('\n')) {
+      // multiline string: key on its own line, then indented content
       lines.push(`${indent}${FG_MAGENTA}${key}${RESET}${DIM}:${RESET}`)
       lines.push(...rendered)
     } else if (rendered.length === 1 && rendered[0]!.length < INLINE_THRESHOLD) {
+      // short value: same line
       lines.push(`${indent}${FG_MAGENTA}${key}${RESET}${DIM}:${RESET} ${rendered[0]}`)
     } else {
+      // long or complex value: key then indented
       lines.push(`${indent}${FG_MAGENTA}${key}${RESET}${DIM}:${RESET}`)
       lines.push(...rendered)
     }
@@ -218,6 +224,7 @@ function renderContentBlock(block: ContentBlock): string {
       const lines = [
         `${FG_GREEN}${BOLD}← result${RESET} ${errorTag}${DIM}(${block.tool_use_id})${RESET}`,
       ]
+      // show content, truncated if huge
       const contentLines = content.split('\n')
       const MAX_LINES = 50
       const shown = contentLines.slice(0, MAX_LINES)
@@ -235,34 +242,43 @@ function renderContentBlock(block: ContentBlock): string {
   }
 }
 
-// ── per-session tailer ──
+function renderMessage(msg: Message, index: number): string {
+  const roleColor = msg.role === 'user' ? BG_BLUE : BG_RED
+  const roleLabel = msg.role === 'user'
+    ? `${roleColor}${FG_WHITE}${BOLD} USER ${RESET}`
+    : `${roleColor}${FG_WHITE}${BOLD} ASSISTANT ${RESET}`
 
-interface SessionTailer {
-  sessionId: string
-  color: string
-  linesPrinted: number
-  watcher: FSWatcher
+  const header = `${roleLabel} ${DIM}#${index}${RESET}`
+  const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
+
+  return `${header}\n${blocks}`
 }
 
-const tailers = new Map<string, SessionTailer>()
-let colorIndex = 0
-let lastPrintedSessionId = ''
+// ── main ──
 
-function printSessionHeader(sessionId: string, color: string) {
-  if (lastPrintedSessionId !== sessionId) {
-    console.log(`\n${color}${BOLD}── ${sessionId} ──${RESET}`)
-    lastPrintedSessionId = sessionId
+export default async function tailSession() {
+  const sessionId = process.argv[3]
+
+  if (!sessionId) {
+    console.error('usage: bun run debug tail-session <session-id>')
+    console.error('\nrecent sessions:')
+    const sessions = await listSessions()
+    sessions.sort((a, b) => b.lastActiveAt.getTime() - a.lastActiveAt.getTime())
+    for (const s of sessions.slice(0, 10)) {
+      console.error(`  ${s.id}  ${DIM}(${formatLocalTime(s.lastActiveAt)})${RESET}`)
+    }
+    process.exit(1)
   }
-}
 
-async function startTailing(sessionId: string, filePath: string, seed = true) {
-  if (tailers.has(sessionId)) return
+  const sessionPath = join(SESSIONS_DIR, `${sessionId}.jsonl`)
+  const file = Bun.file(sessionPath)
 
-  const color = SESSION_COLORS[colorIndex % SESSION_COLORS.length]!
-  colorIndex++
+  if (!(await file.exists())) {
+    console.error(`session not found: ${sessionPath}`)
+    process.exit(1)
+  }
 
-  console.log(`${DIM}── now tailing ${color}${sessionId}${RESET}${DIM} ──${RESET}`)
-
+  // print existing messages
   let linesPrinted = 0
 
   function parseEntry(line: string): SessionEntry | null {
@@ -276,101 +292,52 @@ async function startTailing(sessionId: string, filePath: string, seed = true) {
     return { type: 'message', timestamp: '', message: parsed as Message }
   }
 
-  async function printNewMessages() {
-    try {
-      const text = await Bun.file(filePath).text()
-      const lines = text.trim().split('\n').filter(Boolean)
-      const newLines = lines.slice(linesPrinted)
-      for (const line of newLines) {
-        try {
-          const entry = parseEntry(line)
-          if (!entry) { linesPrinted++; continue }
-
-          if (entry.type === 'message') {
-            const msg = entry.message
-            const roleColor = msg.role === 'user' ? BG_BLUE : BG_RED
-            const roleLabel = msg.role === 'user'
-              ? `${roleColor}${FG_WHITE}${BOLD} USER ${RESET}`
-              : `${roleColor}${FG_WHITE}${BOLD} ASSISTANT ${RESET}`
-
-            const costStr = entry.cost
-              ? ` ${DIM}($${(entry.cost.inputCost + entry.cost.outputCost).toFixed(4)})${RESET}`
-              : ''
-            printSessionHeader(sessionId, color)
-            const header = `${roleLabel} ${DIM}#${linesPrinted}${RESET}${costStr}`
-            const blocks = msg.content.map(b => renderContentBlock(b)).join('\n\n')
-
-            if (linesPrinted > 0) console.log()
-            console.log(header)
-            console.log(blocks)
-          } else if (entry.type === 'system_prompt') {
-            printSessionHeader(sessionId, color)
-            console.log(`${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`)
-          }
-        } catch {
-          printSessionHeader(sessionId, color)
-          console.error(`${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
-        }
-        linesPrinted++
+  function renderEntry(entry: SessionEntry): string {
+    switch (entry.type) {
+      case 'message': {
+        const costStr = entry.cost
+          ? `\n${DIM}── cost: $${(entry.cost.inputCost + entry.cost.outputCost).toFixed(4)} (in: ${entry.cost.usage.input} out: ${entry.cost.usage.output} cache_r: ${entry.cost.usage.cacheRead} cache_w: ${entry.cost.usage.cacheWrite}) ──${RESET}`
+          : ''
+        return renderMessage(entry.message, linesPrinted) + costStr
       }
-    } catch {
-      // file might be mid-write
+      case 'system_prompt':
+        return `${DIM}── system prompt (${entry.content.length} chars) ──${RESET}`
     }
   }
 
-  // print existing content (only if seeding), otherwise skip to end
-  if (seed) {
-    await printNewMessages()
+  function printNewMessages(text: string) {
+    const lines = text.trim().split('\n').filter(Boolean)
+    const newLines = lines.slice(linesPrinted)
+    for (const line of newLines) {
+      try {
+        const entry = parseEntry(line)
+        if (!entry) { linesPrinted++; continue }
+        if (linesPrinted > 0) console.log() // blank line between entries
+        console.log(renderEntry(entry))
+      } catch {
+        console.error(`${FG_RED}failed to parse line ${linesPrinted}${RESET}`)
+      }
+      linesPrinted++
+    }
+  }
+
+  // initial read
+  const initialText = await file.text()
+  if (initialText.trim()) {
+    printNewMessages(initialText)
   } else {
+    console.log(`${DIM}(empty session, waiting for messages...)${RESET}`)
+  }
+
+  console.log(`\n${DIM}── tailing ${sessionId} ──${RESET}\n`)
+
+  // watch for changes
+  watch(sessionPath, async () => {
     try {
-      const text = await Bun.file(filePath).text()
-      linesPrinted = text.trim().split('\n').filter(Boolean).length
-    } catch {}
-  }
-
-  // watch for new content
-  const watcher = watch(filePath, () => { printNewMessages() })
-  tailers.set(sessionId, { sessionId, color, linesPrinted, watcher })
-}
-
-function sessionIdFromFilename(filename: string): string {
-  return basename(filename, '.jsonl')
-}
-
-// ── main ──
-
-export default async function tailAllSessions() {
-  console.log(`${BOLD}tailing all sessions in ${SESSIONS_DIR}${RESET}\n`)
-
-  // start tailing all existing .jsonl files, sorted by mtime (most recent first)
-  const files = await readdir(SESSIONS_DIR)
-  const jsonlFiles = files.filter(f => f.endsWith('.jsonl'))
-
-  const withMtime = await Promise.all(
-    jsonlFiles.map(async f => {
-      const s = await stat(join(SESSIONS_DIR, f))
-      return { file: f, mtime: s.mtimeMs }
-    })
-  )
-  withMtime.sort((a, b) => b.mtime - a.mtime)
-
-  for (let i = 0; i < withMtime.length; i++) {
-    const { file } = withMtime[i]!
-    const sessionId = sessionIdFromFilename(file)
-    await startTailing(sessionId, join(SESSIONS_DIR, file), i === 0)
-  }
-
-  if (jsonlFiles.length === 0) {
-    console.log(`${DIM}(no sessions yet, waiting for new ones...)${RESET}`)
-  }
-
-  // watch directory for new session files
-  watch(SESSIONS_DIR, (_event, filename) => {
-    if (!filename || !filename.endsWith('.jsonl')) return
-    const sessionId = sessionIdFromFilename(filename)
-    if (!tailers.has(sessionId)) {
-      console.log(`\n${FG_GREEN}${BOLD}+ new session:${RESET} ${sessionId}`)
-      startTailing(sessionId, join(SESSIONS_DIR, filename))
+      const text = await Bun.file(sessionPath).text()
+      printNewMessages(text)
+    } catch {
+      // file might be mid-write
     }
   })
 

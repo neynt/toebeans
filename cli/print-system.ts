@@ -1,4 +1,4 @@
-import { loadConfig } from '../../server/config.ts'
+import { loadConfig } from '../server/config.ts'
 
 export default async function printSystem() {
   const config = await loadConfig()
