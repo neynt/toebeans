@@ -300,7 +300,6 @@ class DtmfDetector {
 class AudioQueue {
   private frames: Buffer[] = []
   private generation = 0
-  private _onFrameAvailable: (() => void) | null = null
 
   // stats (reset per clear)
   totalPushed = 0
@@ -320,7 +319,6 @@ class AudioQueue {
     this.frames.push(frame)
     this.totalPushed++
     if (this.frames.length > this.peakDepth) this.peakDepth = this.frames.length
-    this._onFrameAvailable?.()
   }
 
   /** pull the next frame, or null if empty (underrun). */
@@ -342,11 +340,6 @@ class AudioQueue {
     this.totalPulled = 0
     this.peakDepth = 0
     this.underruns = 0
-  }
-
-  /** set a callback for when a frame becomes available (for waking the consumer). */
-  onFrameAvailable(cb: (() => void) | null) {
-    this._onFrameAvailable = cb
   }
 }
 
@@ -633,11 +626,9 @@ export default function create(_serverContext?: any) {
   // even for frames we've already sent over the WebSocket.
   async function clearCallAudio(callControlId: string) {
     try {
-      // Telnyx doesn't have a dedicated "clear audio buffer" API for WebSocket streams.
-      // The most reliable approach is to stop and restart the stream, but that's heavy.
-      // Instead, we simply stop sending frames (via AbortController) and send a brief
-      // burst of silence to "flush" any Telnyx-side jitter buffer, pushing out the
-      // remaining agent audio quickly.
+      // Telnyx doesn't have a "clear audio buffer" API. send a brief burst of
+      // silence to flush the Telnyx-side jitter buffer, pushing out any
+      // remaining agent audio frames that were already sent over the wire.
       const call = activeCalls.get(callControlId)
       if (!call?.ws) return
 
@@ -1597,6 +1588,8 @@ export default function create(_serverContext?: any) {
           close(ws) {
             const callControlId = ws.data.callControlId
             if (callControlId) {
+              const call = activeCalls.get(callControlId)
+              if (call) stopConsumer(call)
               log.info('ws', `closed for ${callControlId}`)
             }
           },

@@ -456,7 +456,6 @@ describe('frame pacing', () => {
 class AudioQueue {
   private frames: Buffer[] = []
   private generation = 0
-  private _onFrameAvailable: (() => void) | null = null
   totalPushed = 0
   totalPulled = 0
   peakDepth = 0
@@ -470,7 +469,6 @@ class AudioQueue {
     this.frames.push(frame)
     this.totalPushed++
     if (this.frames.length > this.peakDepth) this.peakDepth = this.frames.length
-    this._onFrameAvailable?.()
   }
 
   pull(): Buffer | null {
@@ -486,10 +484,6 @@ class AudioQueue {
     this.totalPulled = 0
     this.peakDepth = 0
     this.underruns = 0
-  }
-
-  onFrameAvailable(cb: (() => void) | null) {
-    this._onFrameAvailable = cb
   }
 }
 
@@ -576,26 +570,6 @@ describe('AudioQueue', () => {
     q.push(Buffer.alloc(1), gen1)
     expect(q.depth).toBe(1)
     expect(q.totalPushed).toBe(1)
-  })
-
-  test('onFrameAvailable callback fires on push', () => {
-    const q = new AudioQueue()
-    let called = 0
-    q.onFrameAvailable(() => { called++ })
-    q.push(Buffer.alloc(1), q.gen)
-    expect(called).toBe(1)
-    q.push(Buffer.alloc(1), q.gen)
-    expect(called).toBe(2)
-  })
-
-  test('onFrameAvailable not called for stale push', () => {
-    const q = new AudioQueue()
-    let called = 0
-    q.onFrameAvailable(() => { called++ })
-    const staleGen = q.gen
-    q.clear()
-    q.push(Buffer.alloc(1), staleGen)
-    expect(called).toBe(0)
   })
 
   test('simulates producer/consumer scenario', () => {
