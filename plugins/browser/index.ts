@@ -80,6 +80,17 @@ export function normalizeActionType(type: string): string {
   return ACTION_ALIASES[type] ?? type
 }
 
+/**
+ * Regex for detecting sensitive field names/IDs/autocomplete values.
+ * Used inside page.evaluate() — keep this in sync with the inline copy.
+ */
+export const SENSITIVE_NAME_RE = /(?:^|[\s_\-.])(password|passwd|secret|token|api.?key|ssn|credit.?card|cvv|cvc|pin)(?:$|[\s_\-.])/
+
+/** Autocomplete attribute values that indicate sensitive fields. */
+export const SENSITIVE_AUTOCOMPLETE = new Set([
+  'cc-number', 'cc-csc', 'new-password', 'current-password',
+])
+
 const HARD_TIMEOUT_MS = 60_000
 const NAV_TIMEOUT = () => config.navigationTimeout ?? 15_000
 const SELECTOR_TIMEOUT = () => config.selectorTimeout ?? 2_000
@@ -365,7 +376,7 @@ async function extractMarkdown(page: Page, selector?: string): Promise<string> {
           const nameOrId = ((inp.name || '') + ' ' + (inp.id || '') + ' ' + (inp.autocomplete || '')).toLowerCase()
           const isSensitive =
             inputType === 'password' ||
-            /\b(password|passwd|secret|token|api.?key|ssn|credit.?card|cvv|cvc|pin)\b/.test(nameOrId) ||
+            /(?:^|[\s_\-.])(password|passwd|secret|token|api.?key|ssn|credit.?card|cvv|cvc|pin)(?:$|[\s_\-.])/.test(nameOrId) ||
             inp.autocomplete === 'cc-number' ||
             inp.autocomplete === 'cc-csc' ||
             inp.autocomplete === 'new-password' ||
