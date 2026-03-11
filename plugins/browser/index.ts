@@ -45,6 +45,41 @@ export function stripEmptyActionFields(action: Record<string, unknown>): Record<
   return cleaned
 }
 
+/**
+ * Normalize hallucinated action type names to canonical ones.
+ * LLMs (especially via OpenAI-compatible APIs that may not fully support anyOf
+ * discriminated unions) sometimes invent close-but-wrong action names like
+ * "fill_credentials" instead of "bitwarden_fill" or "click_by_text" instead of "click_text".
+ */
+const ACTION_ALIASES: Record<string, string> = {
+  // bitwarden_fill aliases — LLMs frequently guess credential-centric names
+  fill_credentials: 'bitwarden_fill',
+  credential_fill: 'bitwarden_fill',
+  credentials: 'bitwarden_fill',
+  bitwarden: 'bitwarden_fill',
+  fill_password: 'bitwarden_fill',
+  autofill: 'bitwarden_fill',
+  // click_text aliases
+  click_by_text: 'click_text',
+  text_click: 'click_text',
+  // type aliases
+  fill: 'type',
+  input: 'type',
+  // evaluate aliases
+  eval: 'evaluate',
+  run_js: 'evaluate',
+  javascript: 'evaluate',
+  // navigate aliases
+  navigate: 'goto',
+  open: 'goto',
+  // wait_for aliases
+  wait_for_selector: 'wait_for',
+}
+
+export function normalizeActionType(type: string): string {
+  return ACTION_ALIASES[type] ?? type
+}
+
 const HARD_TIMEOUT_MS = 60_000
 const NAV_TIMEOUT = () => config.navigationTimeout ?? 15_000
 const SELECTOR_TIMEOUT = () => config.selectorTimeout ?? 2_000
@@ -920,6 +955,7 @@ export default function create(): Plugin {
               const downloads: { filename: string; saved_to: string; size_bytes: number }[] = []
 
               for (const action of actions) {
+                action.type = normalizeActionType(action.type)
                 switch (action.type) {
                   case 'goto':
                     if (!action.url) throw new Error('goto requires url')

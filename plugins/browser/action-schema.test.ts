@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 import createBrowserPlugin from './index.ts'
-import { stripEmptyActionFields } from './index.ts'
+import { stripEmptyActionFields, normalizeActionType } from './index.ts'
 
 const plugin = createBrowserPlugin()
 const interact = plugin.tools!.find(t => t.name === 'browser_interact')!
@@ -171,5 +171,56 @@ describe('stripEmptyActionFields', () => {
       selector: '#f',
       file_paths: ['/tmp/test.txt'],
     })
+  })
+})
+
+describe('normalizeActionType', () => {
+  test('passes through canonical action types unchanged', () => {
+    const canonical = [
+      'goto', 'click', 'click_text', 'type', 'press', 'wait', 'wait_for',
+      'evaluate', 'screenshot', 'scroll', 'select', 'upload_file', 'download',
+      'bitwarden_fill',
+    ]
+    for (const type of canonical) {
+      expect(normalizeActionType(type)).toBe(type)
+    }
+  })
+
+  test('maps bitwarden_fill aliases', () => {
+    expect(normalizeActionType('fill_credentials')).toBe('bitwarden_fill')
+    expect(normalizeActionType('credential_fill')).toBe('bitwarden_fill')
+    expect(normalizeActionType('credentials')).toBe('bitwarden_fill')
+    expect(normalizeActionType('bitwarden')).toBe('bitwarden_fill')
+    expect(normalizeActionType('fill_password')).toBe('bitwarden_fill')
+    expect(normalizeActionType('autofill')).toBe('bitwarden_fill')
+  })
+
+  test('maps click_text aliases', () => {
+    expect(normalizeActionType('click_by_text')).toBe('click_text')
+    expect(normalizeActionType('text_click')).toBe('click_text')
+  })
+
+  test('maps type aliases', () => {
+    expect(normalizeActionType('fill')).toBe('type')
+    expect(normalizeActionType('input')).toBe('type')
+  })
+
+  test('maps evaluate aliases', () => {
+    expect(normalizeActionType('eval')).toBe('evaluate')
+    expect(normalizeActionType('run_js')).toBe('evaluate')
+    expect(normalizeActionType('javascript')).toBe('evaluate')
+  })
+
+  test('maps navigation aliases', () => {
+    expect(normalizeActionType('navigate')).toBe('goto')
+    expect(normalizeActionType('open')).toBe('goto')
+  })
+
+  test('maps wait_for aliases', () => {
+    expect(normalizeActionType('wait_for_selector')).toBe('wait_for')
+  })
+
+  test('returns unknown types unchanged (for the switch default to catch)', () => {
+    expect(normalizeActionType('totally_bogus')).toBe('totally_bogus')
   })
 })
