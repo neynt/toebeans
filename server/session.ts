@@ -197,8 +197,27 @@ export function getSoulPath(): string {
   return join(TOEBEANS_DIR, 'SOUL.md')
 }
 
-// get the current session for a route by finding the most recently modified session file
+// in-memory route → current session mapping (authoritative once populated)
+const currentSessionMap = new Map<string, string>()
+
+// resolve route key for the map (empty string for default route)
+function routeKey(route?: string): string {
+  return route ?? ''
+}
+
+// set the current session for a route (called after compaction / reset to atomically switch)
+export function setCurrentSessionId(route: string | undefined, sessionId: string): void {
+  currentSessionMap.set(routeKey(route), sessionId)
+}
+
+// get the current session for a route.
+// uses in-memory map if available; falls back to mtime scan on cold start.
 export async function getCurrentSessionId(route?: string): Promise<string> {
+  const key = routeKey(route)
+  const cached = currentSessionMap.get(key)
+  if (cached) return cached
+
+  // cold start: scan files by mtime (one-time bootstrap)
   const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
 
   const glob = new Bun.Glob('*.jsonl')
@@ -223,10 +242,20 @@ export async function getCurrentSessionId(route?: string): Promise<string> {
     }
   }
 
-  if (latestId) return latestId
+  if (latestId) {
+    currentSessionMap.set(key, latestId)
+    return latestId
+  }
 
   // no session found, create a new ID
-  return await generateSessionId(route)
+  const newId = await generateSessionId(route)
+  currentSessionMap.set(key, newId)
+  return newId
+}
+
+// exported for testing: clear the in-memory route map
+export function _clearSessionMap(): void {
+  currentSessionMap.clear()
 }
 
 // estimate token count for a session

@@ -317,7 +317,11 @@ async function main() {
             })
           }
 
-          await sessionManager.checkCompaction(sessionId, resumeRoute)
+          const newId = await sessionManager.checkCompaction(sessionId, resumeRoute)
+          if (newId !== sessionId) {
+            sessionBusy.delete(sessionId)
+            sessionAbortControllers.delete(sessionId)
+          }
         } catch (err) {
           console.error(`[server] auto-continue error:`, err)
           broadcast(sessionId, { type: 'error', message: String(err) })
@@ -400,15 +404,7 @@ async function main() {
       // (checkQueuedMessages only runs after tool calls, so these would be stranded)
       while (!agentCheckAbort()) {
         const remaining = agentCheckQueued()
-        if (remaining.length === 0) {
-          sessionBusy.set(conversationSessionId, false)
-          // re-check after releasing lock to avoid TOCTOU race
-          if (messageQueues.get(conversationSessionId)?.length) {
-            sessionBusy.set(conversationSessionId, true)
-            continue
-          }
-          break
-        }
+        if (remaining.length === 0) break
         console.log(`[${pluginName}] draining ${remaining.length} queued message(s) as new turn`)
         const queuedContent: ContentBlock[] = remaining.flatMap(r => r.content)
 
@@ -431,8 +427,33 @@ async function main() {
         })
       }
 
-      // check if session needs compaction
-      await sessionManager.checkCompaction(conversationSessionId, route)
+      // session stays busy during compaction to prevent new processSession calls
+      // on the old session ID while the LLM summary is being generated
+      const newSessionId = await sessionManager.checkCompaction(conversationSessionId, route)
+
+      if (newSessionId !== conversationSessionId) {
+        // compaction created a new session — migrate queued messages that arrived during compaction
+        console.log(`[${pluginName}] session compacted: ${conversationSessionId} → ${newSessionId}`)
+        const queued = messageQueues.get(conversationSessionId) || []
+        messageQueues.delete(conversationSessionId)
+        sessionAbort.delete(conversationSessionId)
+        sessionAbortControllers.delete(conversationSessionId)
+        sessionProcessing.delete(conversationSessionId)
+        // clear old session busy *before* potentially starting new processing
+        sessionBusy.delete(conversationSessionId)
+
+        if (queued.length > 0) {
+          // messages arrived during compaction — process them on the new session
+          console.log(`[${pluginName}] migrating ${queued.length} queued message(s) to new session ${newSessionId}`)
+          sessionBusy.set(newSessionId, true)
+          sessionAbort.set(newSessionId, false)
+          const queuedContent: ContentBlock[] = queued.flatMap(r => r.content)
+          const processing = processSession(newSessionId, queuedContent, effectiveOutputTarget, route, pluginName)
+          sessionProcessing.set(newSessionId, processing)
+        }
+        // skip the finally block cleanup for the old session (already done above)
+        return
+      }
     } catch (err) {
       console.error(`agent error for ${conversationSessionId}:`, err)
       broadcast(conversationSessionId, { type: 'error', message: String(err) })
@@ -661,7 +682,12 @@ async function main() {
             })
           }
 
-          await sessionManager.checkCompaction(wsSessionId, wsRoute)
+          const newWsSessionId = await sessionManager.checkCompaction(wsSessionId, wsRoute)
+          if (newWsSessionId !== wsSessionId) {
+            sessionBusy.delete(wsSessionId)
+            sessionAbort.delete(wsSessionId)
+            sessionAbortControllers.delete(wsSessionId)
+          }
         } catch (err) {
           console.error('agent error:', err)
           broadcast(wsSessionId, { type: 'error', message: String(err) })
