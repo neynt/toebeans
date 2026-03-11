@@ -80,7 +80,13 @@ export default function create(): Plugin {
 
   return {
     name: 'bash',
-    description: 'Execute bash commands.',
+    description: [
+      'Execute bash commands via `bash -c`.',
+      'The command string is passed verbatim — all shell features work:',
+      'pipes (`|`), redirects (`>`, `>>`), command substitution (`$(cmd)`),',
+      'variable expansion (`$VAR`), process substitution (`<(cmd)`), globs, heredocs, etc.',
+      'Prefer single compound commands over multiple tool calls when possible.',
+    ].join(' '),
 
     async init(cfg: unknown) {
       pluginConfig = (cfg as BashConfig) ?? {}
