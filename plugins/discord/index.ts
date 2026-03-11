@@ -752,7 +752,7 @@ export default function create(serverContext?: ServerContext): Plugin {
 
   // generate a brief summary for a tool call (used in condensed batches)
   function toolBriefSummary(name: string, input: unknown): string {
-    const trunc = (s: string, n = 50) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    const trunc = (s: string, n = 150) => s.length > n ? s.slice(0, n - 3) + '...' : s
     if (name === 'bash') {
       const cmd = (input as any)?.command
       return cmd ? trunc(cmd) : ''
@@ -923,22 +923,22 @@ export default function create(serverContext?: ServerContext): Plugin {
               await updateLiveProgress(sessionId, textChannel, false)
             } else {
               // non-condensed: original per-tool message behavior
-              const trunc = (s: string, n = 100) => s.length > n ? s.slice(0, n - 3) + '...' : s
+              const trunc = (s: string, n = 300) => s.length > n ? s.slice(0, n - 3) + '...' : s
               let toolMessage = `🔧 ${message.name}`
 
               if (message.name === 'bash') {
                 const cmd = (message.input as any)?.command
                 const desc = (message.input as any)?.description
                 if (cmd) toolMessage += `: ${trunc(cmd)}`
-                if (desc) toolMessage += ` — ${trunc(desc, 80)}`
+                if (desc) toolMessage += ` — ${trunc(desc, 240)}`
               } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
                 const path = (message.input as any)?.path || (message.input as any)?.file_path
                 if (path) toolMessage += `: ${path}`
                 if (message.name === 'edit_file') {
                   const oldStr = (message.input as any)?.old_string
                   const newStr = (message.input as any)?.new_string
-                  if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 60)}`
-                  if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 60)}`
+                  if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 180)}`
+                  if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 180)}`
                 } else if (message.name === 'write_file') {
                   const content = (message.input as any)?.content
                   if (content) toolMessage += ` (${content.length} chars)`
@@ -948,7 +948,7 @@ export default function create(serverContext?: ServerContext): Plugin {
                 if (task) toolMessage += `: ${trunc(task)}`
               } else if (message.name === 'discord_send') {
                 const text = (message.input as any)?.text || (message.input as any)?.content || (message.input as any)?.message
-                if (text) toolMessage += `: ${trunc(text, 80)}`
+                if (text) toolMessage += `: ${trunc(text, 240)}`
               } else if (message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
                 const inp = message.input as any
                 const channel = inp?.channel_id || inp?.channel
@@ -960,8 +960,8 @@ export default function create(serverContext?: ServerContext): Plugin {
               } else if (message.name === 'remember') {
                 const topic = (message.input as any)?.topic
                 const content = (message.input as any)?.content
-                if (topic) toolMessage += `: ${trunc(topic, 60)}`
-                if (content) toolMessage += ` — ${trunc(content, 60)}`
+                if (topic) toolMessage += `: ${trunc(topic, 180)}`
+                if (content) toolMessage += ` — ${trunc(content, 180)}`
               } else if (message.name === 'recall') {
                 const query = (message.input as any)?.query
                 if (query) toolMessage += `: ${trunc(query)}`
@@ -977,7 +977,7 @@ export default function create(serverContext?: ServerContext): Plugin {
                 const url = (message.input as any)?.url
                 const instruction = (message.input as any)?.instruction || (message.input as any)?.prompt
                 if (url) toolMessage += `: ${trunc(url)}`
-                if (instruction) toolMessage += ` — ${trunc(instruction, 60)}`
+                if (instruction) toolMessage += ` — ${trunc(instruction, 180)}`
               } else if (message.name === 'generate_image') {
                 const prompt = (message.input as any)?.prompt
                 const size = (message.input as any)?.size
