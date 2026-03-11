@@ -6,7 +6,8 @@ import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
 import { AnthropicProvider } from '../llm-providers/anthropic.ts'
-import { OpenAICompatibleProvider } from '../llm-providers/openai-compatible.ts'
+import { MoonshotProvider } from '../llm-providers/moonshot.ts'
+import { ChatGPTCodexProvider } from '../llm-providers/chatgpt-codex.ts'
 import type { LlmProvider } from './llm-provider.ts'
 import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -84,15 +85,24 @@ async function main() {
         maxOutputTokens: config.llm.maxOutputTokens,
       })
       break
-    case 'openai-compatible':
-      provider = new OpenAICompatibleProvider({
+    case 'moonshot':
+    case 'openai-compatible': {
+      // "moonshot" config block; fall back to legacy "openai" block
+      const ms = config.llm.moonshot ?? config.llm.openai
+      provider = new MoonshotProvider({
         apiKey: config.llm.apiKey,
-        baseUrl: config.llm.openai?.baseUrl,
+        baseUrl: ms?.baseUrl,
         model: config.llm.model,
         maxOutputTokens: config.llm.maxOutputTokens,
-        thinking: config.llm.openai?.thinking,
-        temperature: config.llm.openai?.temperature,
-        topP: config.llm.openai?.topP,
+        thinking: ms?.thinking,
+        temperature: ms?.temperature,
+        topP: ms?.topP,
+      })
+      break
+    }
+    case 'chatgpt-codex':
+      provider = new ChatGPTCodexProvider({
+        model: config.llm.model,
       })
       break
     default:

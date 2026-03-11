@@ -11,6 +11,7 @@
     "autoSummarize": true
   },
   "llm": {
+    // provider: "anthropic" | "moonshot" | "chatgpt-codex"
     "provider": "anthropic",
     "model": "claude-sonnet-4-5-20250929",
     "apiKey": "",
@@ -18,6 +19,14 @@
     "maxOutputTokens": 16384,
     "maxToolResultTokens": 10000,
     "maxToolResultChars": 50000
+
+    // Moonshot/Kimi provider config (only used when provider is "moonshot"):
+    // "moonshot": {
+    //   "baseUrl": "https://api.moonshot.ai/v1",
+    //   "thinking": true,
+    //   "temperature": 1.0,
+    //   "topP": 0.95
+    // }
   },
   "plugins": {},
   "notifyOnRestart": "",

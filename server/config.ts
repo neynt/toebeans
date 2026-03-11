@@ -25,9 +25,16 @@ const configSchema = z.object({
     maxToolResultChars: z.number().optional(),
     // provider-specific config
     anthropic: z.object({}).passthrough().optional(),
-    openai: z.object({
+    moonshot: z.object({
       baseUrl: z.string().optional(),
       thinking: z.boolean().optional(), // enable reasoning/thinking mode
+      temperature: z.number().optional(),
+      topP: z.number().optional(),
+    }).passthrough().optional(),
+    // backward compat: "openai" is accepted as alias for "moonshot"
+    openai: z.object({
+      baseUrl: z.string().optional(),
+      thinking: z.boolean().optional(),
       temperature: z.number().optional(),
       topP: z.number().optional(),
     }).passthrough().optional(),
