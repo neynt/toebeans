@@ -724,7 +724,16 @@ export default function create(): Plugin {
           }
 
           // parse and summarize — adapted for Gemini's stream-json format
+          // Gemini emits assistant text as multiple delta events; coalesce them.
           const summaries: string[] = []
+          let assistantBuffer = ''
+
+          function flushAssistant() {
+            if (assistantBuffer) {
+              summaries.push(`assistant: ${assistantBuffer}`)
+              assistantBuffer = ''
+            }
+          }
 
           for (const line of tailLines) {
             if (!line.trim()) continue
@@ -733,22 +742,25 @@ export default function create(): Plugin {
               const parsed = JSON.parse(line)
 
               if (parsed.type === 'message' && parsed.role === 'assistant') {
-                // assistant message (potentially delta)
+                // assistant message (potentially delta) — accumulate
                 if (parsed.content) {
-                  summaries.push(`assistant: ${parsed.content}`)
+                  assistantBuffer += parsed.content
                 }
               } else if (parsed.type === 'message' && parsed.role === 'user') {
+                flushAssistant()
                 summaries.push('user: [message]')
               } else if (parsed.type === 'tool_use') {
+                flushAssistant()
                 summaries.push(`[tool: ${parsed.tool_name}]`)
               } else if (parsed.type === 'tool_result') {
+                flushAssistant()
                 const statusLabel = parsed.status === 'success' ? 'ok' : parsed.status
                 const preview = typeof parsed.output === 'string'
                   ? parsed.output.slice(0, 200) + (parsed.output.length > 200 ? '...' : '')
                   : ''
                 summaries.push(`[tool result: ${statusLabel}] ${preview}`.trim())
               } else if (parsed.type === 'result') {
-                // final result event
+                flushAssistant()
                 const parts: string[] = ['result:']
                 if (parsed.status) parts.push(parsed.status)
                 if (parsed.stats?.duration_ms != null) parts.push(`${parsed.stats.duration_ms}ms`)
@@ -762,6 +774,8 @@ export default function create(): Plugin {
               continue
             }
           }
+
+          flushAssistant()
 
           if (summaries.length === 0) {
             return { content: 'no parseable output found in log' }

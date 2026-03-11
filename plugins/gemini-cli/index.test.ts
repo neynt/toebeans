@@ -134,6 +134,91 @@ describe('read_gemini_cli_output parsing', () => {
   })
 })
 
+describe('assistant delta coalescing', () => {
+  // Simulates the actual coalescing logic from read_gemini_cli_output
+  function parseStreamJsonLines(lines: string[]): string[] {
+    const summaries: string[] = []
+    let assistantBuffer = ''
+
+    function flushAssistant() {
+      if (assistantBuffer) {
+        summaries.push(`assistant: ${assistantBuffer}`)
+        assistantBuffer = ''
+      }
+    }
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const parsed = JSON.parse(line)
+        if (parsed.type === 'message' && parsed.role === 'assistant') {
+          if (parsed.content) assistantBuffer += parsed.content
+        } else if (parsed.type === 'message' && parsed.role === 'user') {
+          flushAssistant()
+          summaries.push('user: [message]')
+        } else if (parsed.type === 'tool_use') {
+          flushAssistant()
+          summaries.push(`[tool: ${parsed.tool_name}]`)
+        } else if (parsed.type === 'tool_result') {
+          flushAssistant()
+          summaries.push(`[tool result: ${parsed.status === 'success' ? 'ok' : parsed.status}]`)
+        } else if (parsed.type === 'result') {
+          flushAssistant()
+          summaries.push(`result: ${parsed.status}`)
+        } else if (parsed.type === 'init') {
+          summaries.push(`[session: ${parsed.session_id}]`)
+        }
+      } catch { continue }
+    }
+    flushAssistant()
+    return summaries
+  }
+
+  test('coalesces consecutive assistant deltas', () => {
+    const lines = [
+      '{"type":"message","role":"assistant","content":"Hello ","delta":true}',
+      '{"type":"message","role":"assistant","content":"world!","delta":true}',
+    ]
+    const result = parseStreamJsonLines(lines)
+    expect(result).toEqual(['assistant: Hello world!'])
+  })
+
+  test('flushes assistant buffer before tool_use', () => {
+    const lines = [
+      '{"type":"message","role":"assistant","content":"Let me read that.","delta":true}',
+      '{"type":"tool_use","tool_name":"read_file","tool_id":"rf_1","parameters":{}}',
+      '{"type":"tool_result","tool_id":"rf_1","status":"success","output":"contents"}',
+      '{"type":"message","role":"assistant","content":"Got it.","delta":true}',
+      '{"type":"result","status":"success","stats":{}}',
+    ]
+    const result = parseStreamJsonLines(lines)
+    expect(result).toEqual([
+      'assistant: Let me read that.',
+      '[tool: read_file]',
+      '[tool result: ok]',
+      'assistant: Got it.',
+      'result: success',
+    ])
+  })
+
+  test('handles empty assistant content in deltas', () => {
+    const lines = [
+      '{"type":"message","role":"assistant","content":"","delta":true}',
+      '{"type":"message","role":"assistant","content":"text","delta":true}',
+    ]
+    const result = parseStreamJsonLines(lines)
+    expect(result).toEqual(['assistant: text'])
+  })
+
+  test('flushes remaining assistant buffer at end', () => {
+    const lines = [
+      '{"type":"message","role":"assistant","content":"trailing text","delta":true}',
+    ]
+    const result = parseStreamJsonLines(lines)
+    expect(result).toEqual(['assistant: trailing text'])
+  })
+})
+
 describe('meta file format', () => {
   test('MetaFile shape matches expected structure', () => {
     const meta = {
