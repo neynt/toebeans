@@ -16,6 +16,14 @@
 //   - barge-in sends clear command to Telnyx to stop buffered audio playback
 //   - accumulated text from LLM streaming is batched into fewer TTS calls to
 //     avoid per-sentence cold starts
+//
+// v2.2 fixes (residual stutter + multi-paragraph truncation):
+//   - bumped flush buffer from 60ms to 120ms (user accepted slight latency for
+//     smoother audio; 120ms is still under conversational perception threshold)
+//   - streaming sentence detector now also splits on paragraph breaks (\n\n)
+//   - text is normalized before TTS: \n\n → ". ", \n → " " — prevents TTS model
+//     from stopping generation at paragraph boundaries
+//   - fixed indexOf(' ') returning -1 on \n\n-separated text (garbled splits)
 
 import type { ServerWebSocket } from 'bun'
 import { join, dirname, resolve } from 'path'
@@ -421,6 +429,21 @@ interface TextSegment { type: 'text'; text: string }
 interface DtmfSegment { type: 'dtmf'; digits: string }
 type ResponseSegment = TextSegment | DtmfSegment
 
+// normalize text for TTS: collapse paragraph breaks and newlines into
+// speech-friendly punctuation so the TTS model doesn't choke on \n\n.
+// exported-shape helper (tested separately).
+function normalizeTextForTts(text: string): string {
+  return text
+    // paragraph breaks → period + space (adds sentence boundary if missing)
+    .replace(/([.!?;])\s*\n\n+\s*/g, '$1 ')   // "sentence.\n\n" → "sentence. "
+    .replace(/\n\n+\s*/g, '. ')                  // "word\n\n" → "word. "
+    // remaining single newlines → space
+    .replace(/\n/g, ' ')
+    // collapse multiple spaces
+    .replace(/ {2,}/g, ' ')
+    .trim()
+}
+
 function parseResponseSegments(text: string): ResponseSegment[] {
   const segments: ResponseSegment[] = []
   let lastIndex = 0
@@ -775,6 +798,11 @@ export default function create(_serverContext?: any) {
   // immediately (0ms threshold) to minimize TTFA. subsequent chunks use the
   // 60ms threshold to batch efficiently without creating audible gaps.
   function streamTtsToCall(text: string, call: ActiveCall, signal?: AbortSignal) {
+    // normalize text for TTS: collapse newlines/paragraph breaks into
+    // speech-friendly form so the TTS model generates audio for all content
+    text = normalizeTextForTts(text)
+    if (!text) return  // nothing to speak after normalization
+
     const enqueueTime = performance.now()
 
     call.ttsSending = call.ttsSending.then(async () => {
@@ -791,10 +819,11 @@ export default function create(_serverContext?: any) {
       const TTS_RATE = 24000
 
       const bps = callEnc === 'L16' ? 2 : 1
-      // FIX: reduced from 200ms to 60ms. 200ms created perceptible stutters between
-      // flush boundaries. 60ms is enough to batch a few TTS chunks efficiently while
-      // keeping audio smooth. at 8kHz L16 this is 960 bytes (vs 3200 before).
-      const flushBytes = Math.ceil(callRate * 0.06) * bps
+      // v2.1: 60ms flush buffer. v2.2: bumped to 120ms. user reported residual
+      // stuttering at 60ms — 120ms gives more audio per flush boundary, reducing
+      // the number of small sends and associated jitter. still well under the
+      // ~200ms perceptual threshold for conversational latency.
+      const flushBytes = Math.ceil(callRate * 0.12) * bps
       let pending = Buffer.alloc(0)
       let firstFrameTime = 0
       let totalSent = 0
@@ -948,15 +977,15 @@ export default function create(_serverContext?: any) {
 
   // ── output handler: receives LLM streaming events ──
   // this is the key pipelining point. we accumulate text tokens, split into
-  // sentences, and immediately stream each sentence to TTS as it completes.
+  // sentences/paragraphs, and immediately stream each chunk to TTS as it completes.
   //
-  // FIX: on text_block_end, instead of splitting remaining text into individual
-  // sentences and making a separate TTS call for each one, we now send the
-  // entire remaining text as a single TTS call. this avoids per-sentence cold
-  // starts (~400ms each). the TTS server handles multi-sentence text well
-  // enough, and premature EOS is handled by the TTS server's chunking logic.
-  // sentence splitting is still used for the *streaming* path (while tokens
-  // arrive) where we want to start playing audio before the LLM finishes.
+  // v2.1: on text_block_end, send remaining text as a single TTS call to avoid
+  // per-sentence cold starts (~400ms each).
+  //
+  // v2.2: also split on paragraph breaks (\n\n) during streaming — this ensures
+  // each paragraph gets its own TTS call, preventing the TTS model from truncating
+  // at paragraph boundaries. text is normalized (newlines → spaces/periods) before
+  // being sent to TTS.
 
   async function handleOutput(callControlId: string, message: ServerMessage) {
     // server's routeOutput strips the plugin name prefix, so we get just the callControlId
@@ -966,16 +995,33 @@ export default function create(_serverContext?: any) {
     if (message.type === 'text') {
       call.textBuffer += message.text
 
-      // check if we have a complete sentence to stream to TTS immediately.
-      // look for sentence-ending punctuation followed by space and a new word
-      // (meaning the LLM is continuing, so we can safely split here).
+      // check if we have a complete sentence or paragraph to stream to TTS.
+      // split points:
+      //   1. sentence-ending punctuation followed by whitespace and a new word
+      //   2. paragraph breaks (\n\n) — always a valid split point
       const buf = call.textBuffer
+
+      // prefer paragraph break as split point (handles multi-paragraph responses)
+      const paraBreak = buf.search(/\n\n+/)
+      // also check for sentence boundary (punctuation + whitespace + new word)
       const sentenceEnd = buf.search(/[.!?;]\s+\S/)
-      if (sentenceEnd >= 0) {
-        // split at the space after punctuation
-        const splitAt = buf.indexOf(' ', sentenceEnd + 1)
-        const sentence = buf.slice(0, splitAt).trim()
-        call.textBuffer = buf.slice(splitAt)
+
+      // pick the earliest valid split point
+      let splitIdx = -1
+      if (paraBreak >= 0 && (sentenceEnd < 0 || paraBreak <= sentenceEnd)) {
+        // split at the paragraph break — take everything before \n\n
+        splitIdx = paraBreak
+      } else if (sentenceEnd >= 0) {
+        // split after the sentence-ending punctuation
+        splitIdx = sentenceEnd + 1
+      }
+
+      if (splitIdx >= 0) {
+        // find the actual split: skip whitespace after the split point
+        const afterWhitespace = buf.slice(splitIdx).search(/\S/)
+        const splitAt = afterWhitespace >= 0 ? splitIdx + afterWhitespace : -1
+        const sentence = (splitAt >= 0 ? buf.slice(0, splitAt) : buf).trim()
+        call.textBuffer = splitAt >= 0 ? buf.slice(splitAt) : ''
 
         if (sentence) {
           call.phase = 'responding'

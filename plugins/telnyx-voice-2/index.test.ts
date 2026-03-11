@@ -109,7 +109,169 @@ function parseResponseSegments(text: string): ResponseSegment[] {
   return segments
 }
 
+// normalizeTextForTts (copied from plugin for testing)
+function normalizeTextForTts(text: string): string {
+  return text
+    .replace(/([.!?;])\s*\n\n+\s*/g, '$1 ')
+    .replace(/\n\n+\s*/g, '. ')
+    .replace(/\n/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+}
+
+// streaming sentence/paragraph split logic (mirrors handleOutput)
+function findStreamingSplit(buf: string): { sentence: string; remaining: string } | null {
+  const paraBreak = buf.search(/\n\n+/)
+  const sentenceEnd = buf.search(/[.!?;]\s+\S/)
+
+  let splitIdx = -1
+  if (paraBreak >= 0 && (sentenceEnd < 0 || paraBreak <= sentenceEnd)) {
+    splitIdx = paraBreak
+  } else if (sentenceEnd >= 0) {
+    splitIdx = sentenceEnd + 1
+  }
+
+  if (splitIdx < 0) return null
+
+  const afterWhitespace = buf.slice(splitIdx).search(/\S/)
+  const splitAt = afterWhitespace >= 0 ? splitIdx + afterWhitespace : -1
+  const sentence = (splitAt >= 0 ? buf.slice(0, splitAt) : buf).trim()
+  const remaining = splitAt >= 0 ? buf.slice(splitAt) : ''
+  return sentence ? { sentence, remaining } : null
+}
+
 // ── tests ──
+
+describe('normalizeTextForTts', () => {
+  test('single paragraph unchanged', () => {
+    expect(normalizeTextForTts('Hello, world.')).toBe('Hello, world.')
+  })
+
+  test('collapses paragraph break after sentence-ending punctuation', () => {
+    expect(normalizeTextForTts('First sentence.\n\nSecond paragraph.'))
+      .toBe('First sentence. Second paragraph.')
+  })
+
+  test('adds period for paragraph break without trailing punctuation', () => {
+    expect(normalizeTextForTts('First part\n\nSecond part'))
+      .toBe('First part. Second part')
+  })
+
+  test('handles multiple paragraph breaks', () => {
+    expect(normalizeTextForTts('A.\n\nB.\n\nC.'))
+      .toBe('A. B. C.')
+  })
+
+  test('converts single newlines to spaces', () => {
+    expect(normalizeTextForTts('line one\nline two'))
+      .toBe('line one line two')
+  })
+
+  test('collapses multiple spaces', () => {
+    expect(normalizeTextForTts('too   many   spaces'))
+      .toBe('too many spaces')
+  })
+
+  test('trims leading and trailing whitespace', () => {
+    expect(normalizeTextForTts('  hello  ')).toBe('hello')
+  })
+
+  test('handles mixed newlines and paragraph breaks', () => {
+    expect(normalizeTextForTts('Line one.\nLine two.\n\nNew paragraph.'))
+      .toBe('Line one. Line two. New paragraph.')
+  })
+
+  test('empty string returns empty', () => {
+    expect(normalizeTextForTts('')).toBe('')
+  })
+
+  test('whitespace-only returns empty', () => {
+    expect(normalizeTextForTts('\n\n  \n')).toBe('.')
+  })
+
+  test('preserves exclamation and question marks at paragraph boundaries', () => {
+    expect(normalizeTextForTts('Really?\n\nYes!'))
+      .toBe('Really? Yes!')
+  })
+
+  test('triple+ newlines treated same as double', () => {
+    expect(normalizeTextForTts('A.\n\n\n\nB.'))
+      .toBe('A. B.')
+  })
+})
+
+describe('streaming sentence/paragraph split', () => {
+  test('no split when buffer has no sentence boundary', () => {
+    expect(findStreamingSplit('Hello world')).toBeNull()
+  })
+
+  test('splits on sentence boundary (period + space + word)', () => {
+    const result = findStreamingSplit('Hello world. Next sentence starts')
+    expect(result).toEqual({
+      sentence: 'Hello world.',
+      remaining: 'Next sentence starts',
+    })
+  })
+
+  test('splits on paragraph break', () => {
+    const result = findStreamingSplit('First paragraph.\n\nSecond paragraph')
+    expect(result).toEqual({
+      sentence: 'First paragraph.',
+      remaining: 'Second paragraph',
+    })
+  })
+
+  test('paragraph break without punctuation', () => {
+    const result = findStreamingSplit('Some text\n\nMore text')
+    expect(result).toEqual({
+      sentence: 'Some text',
+      remaining: 'More text',
+    })
+  })
+
+  test('prefers paragraph break over later sentence boundary', () => {
+    // paragraph break comes first
+    const result = findStreamingSplit('First\n\nSecond. Third starts')
+    expect(result).toEqual({
+      sentence: 'First',
+      remaining: 'Second. Third starts',
+    })
+  })
+
+  test('prefers earlier sentence boundary over later paragraph break', () => {
+    const result = findStreamingSplit('First sentence. More text\n\nThird')
+    expect(result).toEqual({
+      sentence: 'First sentence.',
+      remaining: 'More text\n\nThird',
+    })
+  })
+
+  test('handles question mark as sentence boundary', () => {
+    const result = findStreamingSplit('Really? Yes indeed')
+    expect(result).toEqual({
+      sentence: 'Really?',
+      remaining: 'Yes indeed',
+    })
+  })
+
+  test('handles exclamation mark as sentence boundary', () => {
+    const result = findStreamingSplit('Wow! That is great')
+    expect(result).toEqual({
+      sentence: 'Wow!',
+      remaining: 'That is great',
+    })
+  })
+
+  test('no split when period has no following word yet', () => {
+    // LLM hasn't sent the next token yet
+    expect(findStreamingSplit('Hello world.')).toBeNull()
+  })
+
+  test('no split on period mid-word (abbreviation)', () => {
+    // "Dr.Smith" — no whitespace after period
+    expect(findStreamingSplit('Dr.Smith said')).toBeNull()
+  })
+})
 
 describe('mu-law codec round-trip', () => {
   test('encodes and decodes within mu-law dynamic range', () => {
@@ -232,29 +394,29 @@ describe('parseResponseSegments', () => {
 })
 
 describe('flush buffer sizing', () => {
-  // verify that our 60ms flush buffer is correctly calculated
-  test('60ms at 8kHz L16 = 960 bytes', () => {
+  // v2.2: bumped from 60ms to 120ms to reduce stutter at flush boundaries
+  test('120ms at 8kHz L16 = 1920 bytes', () => {
     const callRate = 8000
     const bps = 2 // L16
-    const flushBytes = Math.ceil(callRate * 0.06) * bps
-    expect(flushBytes).toBe(960)
-  })
-
-  test('60ms at 16kHz L16 = 1920 bytes', () => {
-    const callRate = 16000
-    const bps = 2
-    const flushBytes = Math.ceil(callRate * 0.06) * bps
+    const flushBytes = Math.ceil(callRate * 0.12) * bps
     expect(flushBytes).toBe(1920)
   })
 
-  test('60ms at 8kHz PCMU = 480 bytes', () => {
-    const callRate = 8000
-    const bps = 1 // PCMU/PCMA
-    const flushBytes = Math.ceil(callRate * 0.06) * bps
-    expect(flushBytes).toBe(480)
+  test('120ms at 16kHz L16 = 3840 bytes', () => {
+    const callRate = 16000
+    const bps = 2
+    const flushBytes = Math.ceil(callRate * 0.12) * bps
+    expect(flushBytes).toBe(3840)
   })
 
-  // compare with old 200ms buffer to show the improvement
+  test('120ms at 8kHz PCMU = 960 bytes', () => {
+    const callRate = 8000
+    const bps = 1 // PCMU/PCMA
+    const flushBytes = Math.ceil(callRate * 0.12) * bps
+    expect(flushBytes).toBe(960)
+  })
+
+  // compare with old 200ms buffer to show we're still improved
   test('old 200ms buffer was 3200 bytes at 8kHz L16', () => {
     const callRate = 8000
     const bps = 2
