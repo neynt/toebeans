@@ -147,6 +147,8 @@ interface DiscordConfig {
   whisperModel?: string  // whisper model for voice transcription (default: medium)
   typingDelayMaxMs?: number  // max typing delay in ms (default: 1000)
   typingDelayPerCharMs?: number  // per-character typing delay in ms (default: 10)
+  logChannel?: string  // channel ID for detailed tool call/result logs
+  condenseToolCalls?: boolean  // batch tool calls into condensed summaries in main channel (default: false)
 }
 
 interface QueuedMessage {
@@ -304,8 +306,10 @@ export default function create(serverContext?: ServerContext): Plugin {
   const messageBuffers = new Map<string, string>()
   // track queued reactions per channel: channelId -> discordMessageId (for ⏳ reaction management)
   const queuedReactions = new Map<string, string>()
-  // track tool use messages by tool_use_id so we can edit them
+  // track tool use messages by tool_use_id so we can edit them (non-condensed mode)
   const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
+  // batch pending tool calls per session for condensed summaries
+  const pendingToolBatches = new Map<string, Array<{ name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }>>()
   // lock to prevent concurrent sends per session
   const sendLocks = new Map<string, Promise<void>>()
   // track last message ID per channel (for "last" shorthand in discord_react)
@@ -627,6 +631,114 @@ export default function create(serverContext?: ServerContext): Plugin {
     },
   ]
 
+  // format a tool_use message for the detailed log channel (more verbose than main channel)
+  function formatDetailedToolUse(name: string, input: unknown, inputTokens: number): string {
+    const trunc = (s: string, n = 300) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2)
+    let msg = `🔧 **${name}**\n`
+    msg += `\`\`\`json\n${trunc(inputStr, 800)}\n\`\`\`\n`
+    msg += `*${inputTokens} input tokens*`
+    return msg
+  }
+
+  // format a tool_result message for the detailed log channel
+  function formatDetailedToolResult(name: string, content: import('../../server/types.ts').ToolResultContent, isError: boolean, inputTokens: number, resultTokens: number): string {
+    const status = isError ? '❌' : '✅'
+    const contentStr = typeof content === 'string'
+      ? content
+      : content.map(b => b.type === 'text' ? b.text : `[${b.type}]`).join('\n')
+    const trunc = (s: string, n = 600) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    let msg = `${status} **${name}** result\n`
+    if (contentStr.trim()) {
+      msg += `\`\`\`\n${trunc(contentStr, 1200)}\n\`\`\`\n`
+    }
+    msg += `*${inputTokens} + ${resultTokens} tokens*`
+    return msg
+  }
+
+  // send a message to the log channel (if configured)
+  async function sendToLogChannel(text: string) {
+    if (!client || !config?.logChannel) return
+    try {
+      const channel = await client.channels.fetch(config.logChannel)
+      if (!channel?.isTextBased()) return
+      // split if over 2000 chars
+      let remaining = text
+      while (remaining.length > 0) {
+        await (channel as TextChannel | DMChannel).send(remaining.slice(0, 2000))
+        remaining = remaining.slice(2000)
+      }
+    } catch (err) {
+      console.error('discord: failed to send to log channel:', err)
+    }
+  }
+
+  // flush pending tool batch as a condensed summary to the main channel
+  async function flushToolBatch(sessionId: string, textChannel: TextChannel | DMChannel) {
+    const batch = pendingToolBatches.get(sessionId)
+    if (!batch || batch.length === 0) return
+    pendingToolBatches.delete(sessionId)
+
+    // count tools by name
+    const counts = new Map<string, number>()
+    for (const t of batch) {
+      counts.set(t.name, (counts.get(t.name) || 0) + 1)
+    }
+    const toolList = [...counts.entries()].map(([name, count]) =>
+      count > 1 ? `${name} ×${count}` : name
+    ).join(', ')
+
+    // collect brief summaries (dedupe similar ones)
+    const summaries = batch.map(t => t.summary).filter(Boolean)
+    const uniqueSummaries = [...new Set(summaries)]
+    const briefDesc = uniqueSummaries.length > 0
+      ? ' — ' + uniqueSummaries.slice(0, 4).join(', ') + (uniqueSummaries.length > 4 ? '…' : '')
+      : ''
+
+    const errors = batch.filter(t => t.isError).length
+    const errorNote = errors > 0 ? ` (${errors} failed)` : ''
+
+    const totalIn = batch.reduce((s, t) => s + t.inputTokens, 0)
+    const totalOut = batch.reduce((s, t) => s + (t.resultTokens || 0), 0)
+
+    // escape backticks in content, then wrap with inline code
+    const inner = `🔧 ${batch.length} tool${batch.length > 1 ? 's' : ''}: ${toolList}${briefDesc}${errorNote} (${totalIn}+${totalOut} tokens)`.replaceAll('`', "'")
+    await textChannel.send(`\`${inner}\``.slice(0, 2000))
+  }
+
+  // generate a brief summary for a tool call (used in condensed batches)
+  function toolBriefSummary(name: string, input: unknown): string {
+    const trunc = (s: string, n = 50) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    if (name === 'bash') {
+      const cmd = (input as any)?.command
+      return cmd ? trunc(cmd) : ''
+    }
+    if (name === 'write_file' || name === 'read_file' || name === 'edit_file') {
+      const path = (input as any)?.path || (input as any)?.file_path
+      return path ? `${path}` : ''
+    }
+    if (name === 'spawn_claude_code') {
+      const task = (input as any)?.task
+      return task ? trunc(task) : ''
+    }
+    if (name === 'web_browse') {
+      const url = (input as any)?.url
+      return url ? trunc(url) : ''
+    }
+    if (name === 'remember') {
+      const topic = (input as any)?.topic
+      return topic ? trunc(topic) : ''
+    }
+    if (name === 'recall') {
+      const query = (input as any)?.query
+      return query ? trunc(query) : ''
+    }
+    if (name.startsWith('discord_')) return ''
+    // generic
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input)
+    return trunc(inputStr)
+  }
+
   return {
     name: 'discord',
     description: `Discord bot. Text responses are automatically sent back to the channel/DM. Voice messages are transcribed. Messages include [channel_id: X] for routing.`,
@@ -710,6 +822,11 @@ export default function create(serverContext?: ServerContext): Plugin {
 
           // handle different message types
           if (message.type === 'text') {
+            // flush any pending condensed tool batch before text starts
+            if (config?.condenseToolCalls) {
+              await flushToolBatch(sessionId, textChannel)
+            }
+
             // accumulate text in buffer
             let buffer = messageBuffers.get(sessionId) || ''
             buffer += message.text
@@ -742,101 +859,123 @@ export default function create(serverContext?: ServerContext): Plugin {
               : JSON.stringify(message.input)
             const inputTokens = countTokens(inputStr)
 
-            // create tool message with verbose details
-            const trunc = (s: string, n = 100) => s.length > n ? s.slice(0, n - 3) + '...' : s
-            let toolMessage = `🔧 ${message.name}`
-
-            // add detailed summary based on tool type
-            if (message.name === 'bash') {
-              const cmd = (message.input as any)?.command
-              const desc = (message.input as any)?.description
-              if (cmd) {
-                toolMessage += `: ${trunc(cmd)}`
-              }
-              if (desc) {
-                toolMessage += ` — ${trunc(desc, 80)}`
-              }
-            } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
-              const path = (message.input as any)?.path || (message.input as any)?.file_path
-              if (path) {
-                toolMessage += `: ${path}`
-              }
-              if (message.name === 'edit_file') {
-                const oldStr = (message.input as any)?.old_string
-                const newStr = (message.input as any)?.new_string
-                if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 60)}`
-                if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 60)}`
-              } else if (message.name === 'write_file') {
-                const content = (message.input as any)?.content
-                if (content) toolMessage += ` (${content.length} chars)`
-              }
-            } else if (message.name === 'spawn_claude_code') {
-              const task = (message.input as any)?.task
-              if (task) {
-                toolMessage += `: ${trunc(task)}`
-              }
-            } else if (message.name === 'discord_send') {
-              const text = (message.input as any)?.text || (message.input as any)?.content || (message.input as any)?.message
-              if (text) toolMessage += `: ${trunc(text, 80)}`
-            } else if (message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
-              const inp = message.input as any
-              const channel = inp?.channel_id || inp?.channel
-              if (channel) toolMessage += ` in #${channel}`
-              if (message.name === 'discord_react') {
-                const emoji = inp?.emoji
-                if (emoji) toolMessage += ` with ${emoji}`
-              }
-            } else if (message.name === 'remember') {
-              const topic = (message.input as any)?.topic
-              const content = (message.input as any)?.content
-              if (topic) toolMessage += `: ${trunc(topic, 60)}`
-              if (content) toolMessage += ` — ${trunc(content, 60)}`
-            } else if (message.name === 'recall') {
-              const query = (message.input as any)?.query
-              if (query) toolMessage += `: ${trunc(query)}`
-            } else if (message.name === 'timer_create') {
-              const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
-              const interval = (message.input as any)?.interval || (message.input as any)?.cron
-              if (filename) toolMessage += `: ${filename}`
-              if (interval) toolMessage += ` (${interval})`
-            } else if (message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
-              const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
-              if (filename) toolMessage += `: ${filename}`
-            } else if (message.name === 'web_browse') {
-              const url = (message.input as any)?.url
-              const instruction = (message.input as any)?.instruction || (message.input as any)?.prompt
-              if (url) toolMessage += `: ${trunc(url)}`
-              if (instruction) toolMessage += ` — ${trunc(instruction, 60)}`
-            } else if (message.name === 'generate_image') {
-              const prompt = (message.input as any)?.prompt
-              const size = (message.input as any)?.size
-              if (prompt) toolMessage += `: ${trunc(prompt)}`
-              if (size) toolMessage += ` (${size})`
-            } else {
-              // fallback: first 100 chars of JSON
-              toolMessage += `: ${trunc(inputStr)}`
+            // send detailed log to log channel (if configured)
+            if (config?.logChannel) {
+              sendToLogChannel(formatDetailedToolUse(message.name, message.input, inputTokens))
             }
 
-            // append token count
-            toolMessage += ` (${inputTokens} tokens)`
+            if (config?.condenseToolCalls) {
+              // condensed mode: accumulate in batch, don't post to main channel yet
+              const batch = pendingToolBatches.get(sessionId) || []
+              batch.push({
+                name: message.name,
+                summary: toolBriefSummary(message.name, message.input),
+                inputTokens,
+              })
+              pendingToolBatches.set(sessionId, batch)
+              // store tool_use_id -> batch index so tool_result can update it
+              toolMessages.set(message.id, { channelId, messageId: '', toolName: message.name, originalContent: '', inputTokens })
+            } else {
+              // non-condensed: original per-tool message behavior
+              const trunc = (s: string, n = 100) => s.length > n ? s.slice(0, n - 3) + '...' : s
+              let toolMessage = `🔧 ${message.name}`
 
-            // escape backticks so they don't break Discord inline code formatting
-            toolMessage = toolMessage.replaceAll('`', "'")
+              if (message.name === 'bash') {
+                const cmd = (message.input as any)?.command
+                const desc = (message.input as any)?.description
+                if (cmd) toolMessage += `: ${trunc(cmd)}`
+                if (desc) toolMessage += ` — ${trunc(desc, 80)}`
+              } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
+                const path = (message.input as any)?.path || (message.input as any)?.file_path
+                if (path) toolMessage += `: ${path}`
+                if (message.name === 'edit_file') {
+                  const oldStr = (message.input as any)?.old_string
+                  const newStr = (message.input as any)?.new_string
+                  if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 60)}`
+                  if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 60)}`
+                } else if (message.name === 'write_file') {
+                  const content = (message.input as any)?.content
+                  if (content) toolMessage += ` (${content.length} chars)`
+                }
+              } else if (message.name === 'spawn_claude_code') {
+                const task = (message.input as any)?.task
+                if (task) toolMessage += `: ${trunc(task)}`
+              } else if (message.name === 'discord_send') {
+                const text = (message.input as any)?.text || (message.input as any)?.content || (message.input as any)?.message
+                if (text) toolMessage += `: ${trunc(text, 80)}`
+              } else if (message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
+                const inp = message.input as any
+                const channel = inp?.channel_id || inp?.channel
+                if (channel) toolMessage += ` in #${channel}`
+                if (message.name === 'discord_react') {
+                  const emoji = inp?.emoji
+                  if (emoji) toolMessage += ` with ${emoji}`
+                }
+              } else if (message.name === 'remember') {
+                const topic = (message.input as any)?.topic
+                const content = (message.input as any)?.content
+                if (topic) toolMessage += `: ${trunc(topic, 60)}`
+                if (content) toolMessage += ` — ${trunc(content, 60)}`
+              } else if (message.name === 'recall') {
+                const query = (message.input as any)?.query
+                if (query) toolMessage += `: ${trunc(query)}`
+              } else if (message.name === 'timer_create') {
+                const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+                const interval = (message.input as any)?.interval || (message.input as any)?.cron
+                if (filename) toolMessage += `: ${filename}`
+                if (interval) toolMessage += ` (${interval})`
+              } else if (message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
+                const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+                if (filename) toolMessage += `: ${filename}`
+              } else if (message.name === 'web_browse') {
+                const url = (message.input as any)?.url
+                const instruction = (message.input as any)?.instruction || (message.input as any)?.prompt
+                if (url) toolMessage += `: ${trunc(url)}`
+                if (instruction) toolMessage += ` — ${trunc(instruction, 60)}`
+              } else if (message.name === 'generate_image') {
+                const prompt = (message.input as any)?.prompt
+                const size = (message.input as any)?.size
+                if (prompt) toolMessage += `: ${trunc(prompt)}`
+                if (size) toolMessage += ` (${size})`
+              } else {
+                toolMessage += `: ${trunc(inputStr)}`
+              }
 
-            const msg = await textChannel.send(`\`${toolMessage}\``)
-            toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
+              toolMessage += ` (${inputTokens} tokens)`
+              toolMessage = toolMessage.replaceAll('`', "'")
+
+              const msg = await textChannel.send(`\`${toolMessage}\``)
+              toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
+            }
           } else if (message.type === 'tool_result') {
-            // swap emoji and add result token count
+            const resultTokens = countToolResultTokens(message.content)
             const toolInfo = toolMessages.get(message.tool_use_id)
-            if (toolInfo) {
+
+            // send detailed result to log channel (if configured)
+            if (config?.logChannel && toolInfo) {
+              sendToLogChannel(formatDetailedToolResult(toolInfo.toolName, message.content, !!message.is_error, toolInfo.inputTokens, resultTokens))
+            }
+
+            if (config?.condenseToolCalls && toolInfo) {
+              // condensed mode: update the batch entry with result info
+              const batch = pendingToolBatches.get(sessionId)
+              if (batch) {
+                // find the matching entry (last one with this tool name that has no resultTokens yet)
+                for (let i = batch.length - 1; i >= 0; i--) {
+                  if (batch[i]!.name === toolInfo.toolName && batch[i]!.resultTokens === undefined) {
+                    batch[i]!.resultTokens = resultTokens
+                    batch[i]!.isError = !!message.is_error
+                    break
+                  }
+                }
+              }
+              toolMessages.delete(message.tool_use_id)
+            } else if (toolInfo && toolInfo.messageId) {
+              // non-condensed: edit the original tool message
               try {
                 const msg = await textChannel.messages.fetch(toolInfo.messageId)
                 const status = message.is_error ? '❌' : '✅'
 
-                // calculate result tokens (image-aware)
-                const resultTokens = countToolResultTokens(message.content)
-
-                // replace emoji and update token info
                 const newContent = toolInfo.originalContent
                   .replace(/^🔧/, status)
                   .replace(/ \(.*? tokens\)$/, ` (${toolInfo.inputTokens} + ${resultTokens} tokens)`)
@@ -848,7 +987,11 @@ export default function create(serverContext?: ServerContext): Plugin {
               }
             }
           } else if (message.type === 'done') {
-            // flush remaining buffer
+            // flush any pending condensed tool batch
+            if (config?.condenseToolCalls) {
+              await flushToolBatch(sessionId, textChannel)
+            }
+            // flush remaining text buffer
             const buffer = messageBuffers.get(sessionId) || ''
             if (buffer.trim()) {
               await sendMessage(buffer, false)
