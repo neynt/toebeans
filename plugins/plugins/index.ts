@@ -60,7 +60,7 @@ export default function create(serverContext?: { routeOutput: (target: string, m
           currentConfig.plugins[name] = pluginConfig ?? {}
           await saveConfig(currentConfig)
           console.log(`enable_plugin: enabled ${name}, restarting...`)
-          setTimeout(() => process.exit(0), 100)
+          setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100)
           return { content: `Enabled plugin "${name}". Server is restarting...` }
         },
       },
@@ -83,7 +83,7 @@ export default function create(serverContext?: { routeOutput: (target: string, m
           delete currentConfig.plugins[name]
           await saveConfig(currentConfig)
           console.log(`disable_plugin: disabled ${name}, restarting...`)
-          setTimeout(() => process.exit(0), 100)
+          setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100)
           return { content: `Disabled plugin "${name}". Server is restarting...` }
         },
       },
@@ -108,7 +108,7 @@ export default function create(serverContext?: { routeOutput: (target: string, m
             }
           }
 
-          setTimeout(() => process.exit(0), 100)
+          setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100)
           return { content: 'Server is restarting...' }
         },
       },

@@ -199,7 +199,14 @@ export async function* speakStreaming(text: string, opts?: TtsOptions): AsyncGen
   }
   let timer = setTimeout(() => ac.abort(), TTS_REQUEST_TIMEOUT)
 
+  const t0 = performance.now()
+  const tag = `tts-stream[${text.slice(0, 30)}]`
+  let chunkIndex = 0
+  let totalBytes = 0
+  let lastChunkTime = t0
+
   try {
+    const connectStart = performance.now()
     const { status, stream } = await unixRequestStream(
       TTS_SOCKET_PATH,
       'POST',
@@ -208,6 +215,8 @@ export async function* speakStreaming(text: string, opts?: TtsOptions): AsyncGen
       undefined,
       ac.signal,
     )
+    const connectMs = performance.now() - connectStart
+    console.log(`${tag}: connected in ${connectMs.toFixed(0)}ms status=${status}`)
 
     if (status !== 200) {
       const chunks: Buffer[] = []
@@ -219,10 +228,28 @@ export async function* speakStreaming(text: string, opts?: TtsOptions): AsyncGen
 
     for await (const chunk of stream) {
       resetTimeout()  // each chunk resets the idle timeout
-      yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const now = performance.now()
+      const interChunkMs = now - lastChunkTime
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      chunkIndex++
+      totalBytes += buf.length
+
+      if (chunkIndex === 1) {
+        console.log(`${tag}: first chunk ${buf.length}B ttfc=${(now - t0).toFixed(0)}ms`)
+      } else if (interChunkMs > 500) {
+        console.log(`${tag}: chunk#${chunkIndex} ${buf.length}B gap=${interChunkMs.toFixed(0)}ms (stall?)`)
+      }
+
+      lastChunkTime = now
+      yield buf
     }
   } finally {
     clearTimeout(timer)
+    const elapsed = performance.now() - t0
+    console.log(`${tag}: done ${chunkIndex} chunks ${totalBytes}B in ${elapsed.toFixed(0)}ms`)
+    if (ac.signal.aborted) {
+      console.log(`${tag}: aborted (timeout or cancel)`)
+    }
   }
 }
 

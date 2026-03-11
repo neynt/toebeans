@@ -34,7 +34,7 @@ async function scanSkillsDir(baseDir: string, source: SkillSource): Promise<Skil
   const skills: SkillEntry[] = []
   const glob = new Bun.Glob('*/SKILL.md')
   try {
-    for await (const path of glob.scan(baseDir)) {
+    for await (const path of glob.scan({ cwd: baseDir, followSymlinks: true })) {
       const dir = path.replace('/SKILL.md', '')
       const fullPath = join(baseDir, path)
       try {
@@ -86,7 +86,7 @@ async function resolveSkillDir(skill: string): Promise<{ path: string; source: S
 export default function create(): Plugin {
   return {
     name: 'skills',
-    description: `Manages reusable Skills — core skills in repo, user skills in ${USER_SKILLS_DIR}/`,
+    description: `Manages reusable Skills. skills are documents that can be read when core skills in repo, user skills in ${USER_SKILLS_DIR}/. Skills can be created by populating new directories in ${USER_SKILLS_DIR}.`,
 
     tools: [
       {

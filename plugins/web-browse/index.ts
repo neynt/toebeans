@@ -17,6 +17,7 @@ interface WebBrowseConfig {
   navigationTimeout?: number
   maxContentLength?: number
   remoteDebuggingPort?: number
+  headless?: boolean // default true; set to false to see the Chrome window
 }
 
 let pluginConfig: WebBrowseConfig = {}
@@ -85,7 +86,7 @@ async function getBrowser(): Promise<Browser> {
     }
     browserPool = await chromium.launch({
       channel: 'chrome',
-      headless: true,
+      headless: pluginConfig.headless ?? true,
       args,
     })
   }

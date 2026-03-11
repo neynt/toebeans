@@ -1,6 +1,7 @@
 import type { Plugin } from '../../server/plugin.ts'
 import type { ToolResult, ToolContext } from '../../server/types.ts'
 import { resolve } from 'path'
+import { homedir } from 'os'
 
 export default function create(): Plugin {
   return {
@@ -20,7 +21,12 @@ export default function create(): Plugin {
         },
         async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
           const { image_path } = input as { image_path: string }
-          const absPath = resolve(context.workingDir, image_path)
+          const expanded = image_path.startsWith('~/')
+            ? resolve(homedir(), image_path.slice(2))
+            : image_path === '~'
+              ? homedir()
+              : image_path
+          const absPath = resolve(context.workingDir, expanded)
 
           const file = Bun.file(absPath)
           if (!(await file.exists())) {
