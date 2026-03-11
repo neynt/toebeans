@@ -102,11 +102,11 @@ function buildInput(messages: Message[]): unknown[] {
             contentParts.push({ type: 'input_text', text: block.text })
           } else if (block.type === 'image') {
             if (block.source.type === 'url') {
-              contentParts.push({ type: 'input_image', url: block.source.url })
+              contentParts.push({ type: 'input_image', image_url: block.source.url })
             } else if (block.source.type === 'base64') {
               contentParts.push({
                 type: 'input_image',
-                url: `data:${block.source.media_type};base64,${block.source.data}`,
+                image_url: `data:${block.source.media_type};base64,${block.source.data}`,
               })
             }
           }
