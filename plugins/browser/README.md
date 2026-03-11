@@ -36,7 +36,9 @@ browser: {
   locale: "en-US",
   timezone: "America/New_York",
   sessionTimeoutMs: 300000,    // auto-close after 5 min inactivity
-  navigationTimeout: 15000,
+  navigationTimeout: 15000,    // page.goto() timeout (default 15s)
+  selectorTimeout: 2000,       // click/wait_for/select timeout (default 2s)
+  downloadTimeout: 30000,      // download event timeout (default 30s)
   maxContentLength: 80000,
   remoteDebuggingPort: 9223,   // CDP port for chrome://inspect
   headless: false,             // set true to hide the window

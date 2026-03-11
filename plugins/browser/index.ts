@@ -19,6 +19,8 @@ interface BrowserConfig {
   persistentTimeoutMs?: number
   persistentMaxAgeDays?: number
   navigationTimeout?: number
+  selectorTimeout?: number
+  downloadTimeout?: number
   maxContentLength?: number
   remoteDebuggingPort?: number
   headless?: boolean
@@ -28,6 +30,8 @@ let config: BrowserConfig = {}
 
 const HARD_TIMEOUT_MS = 60_000
 const NAV_TIMEOUT = () => config.navigationTimeout ?? 15_000
+const SELECTOR_TIMEOUT = () => config.selectorTimeout ?? 2_000
+const DOWNLOAD_TIMEOUT = () => config.downloadTimeout ?? 30_000
 const SESSION_TIMEOUT = () => config.sessionTimeoutMs ?? 300_000
 const PERSISTENT_TIMEOUT = () => config.persistentTimeoutMs ?? 86_400_000 // 24h
 const PERSISTENT_MAX_AGE_DAYS = () => config.persistentMaxAgeDays ?? 7
@@ -724,7 +728,7 @@ export default function create(): Plugin {
       // --- browser_interact ---
       {
         name: 'browser_interact',
-        description: 'Perform actions on a browser session: navigate, click, click by text, type, press keys, wait, evaluate JS, take screenshots, scroll, select options, download files, and fill credentials from Bitwarden vault. Actions run sequentially. Returns the final page state as markdown.',
+        description: 'Perform actions on a browser session: navigate, click, click by text, type, press keys, wait, evaluate JS, take screenshots, scroll, select options, download files, and fill credentials from Bitwarden vault. Actions run sequentially. Returns the final page state as markdown. Selector-based actions (click, wait_for, select) have a fast 2s timeout by default — if a selector isn\'t found quickly, the action fails immediately rather than hanging.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -744,7 +748,7 @@ export default function create(): Plugin {
                   selector: { type: 'string', description: 'CSS selector for click/type/wait_for/select actions' },
                   text: { type: 'string', description: 'Text for type action or click_text action' },
                   key: { type: 'string', description: 'Key for press action (e.g. "Enter", "Tab")' },
-                  ms: { type: 'number', description: 'Milliseconds for wait action' },
+                  ms: { type: 'number', description: 'Milliseconds for wait action, or custom timeout for wait_for (default 2s)' },
                   js: { type: 'string', description: 'JavaScript code for evaluate action' },
                   value: { type: 'string', description: 'Value for select action' },
                   direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
@@ -808,7 +812,7 @@ export default function create(): Plugin {
 
                   case 'click':
                     if (!action.selector) throw new Error('click requires selector')
-                    await page.click(action.selector, { timeout: 5_000 })
+                    await page.click(action.selector, { timeout: SELECTOR_TIMEOUT() })
                     break
 
                   case 'click_text': {
@@ -885,7 +889,7 @@ export default function create(): Plugin {
 
                   case 'wait_for':
                     if (!action.selector) throw new Error('wait_for requires selector')
-                    await page.waitForSelector(action.selector, { timeout: NAV_TIMEOUT() })
+                    await page.waitForSelector(action.selector, { timeout: action.ms ?? SELECTOR_TIMEOUT() })
                     break
 
                   case 'evaluate':
@@ -917,12 +921,12 @@ export default function create(): Plugin {
                     if (!action.selector && !action.url) throw new Error('download requires selector or url')
                     const downloadPath = expandTilde(action.download_path)
 
-                    const dlPromise = page.waitForEvent('download', { timeout: NAV_TIMEOUT() })
+                    const dlPromise = page.waitForEvent('download', { timeout: DOWNLOAD_TIMEOUT() })
                     try {
                       if (action.selector) {
                         await page.click(action.selector)
                       } else {
-                        await page.goto(action.url!, { timeout: NAV_TIMEOUT() }).catch((e: Error) => {
+                        await page.goto(action.url!, { timeout: DOWNLOAD_TIMEOUT() }).catch((e: Error) => {
                           if (!e.message.includes('Download is starting')) throw e
                         })
                       }
@@ -943,7 +947,7 @@ export default function create(): Plugin {
                       dlPromise.catch(() => {})
                       const msg = (err as Error).message ?? String(err)
                       if (msg.includes('imeout')) {
-                        throw new Error(`download timed out (${NAV_TIMEOUT()}ms) — no download event received. check selector/url or increase navigationTimeout`)
+                        throw new Error(`download timed out (${DOWNLOAD_TIMEOUT()}ms) — no download event received. check selector/url or increase downloadTimeout`)
                       }
                       throw err
                     }
@@ -987,7 +991,7 @@ export default function create(): Plugin {
 
                     // submit if selector provided
                     if (action.submit_selector) {
-                      await page.click(action.submit_selector, { timeout: 5_000 })
+                      await page.click(action.submit_selector, { timeout: SELECTOR_TIMEOUT() })
                       // wait a moment for navigation/submission
                       await new Promise(r => setTimeout(r, 1500))
                     }
