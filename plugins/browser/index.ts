@@ -728,7 +728,7 @@ export default function create(): Plugin {
       // --- browser_interact ---
       {
         name: 'browser_interact',
-        description: 'Perform actions on a browser session: navigate, click, click by text, type, press keys, wait, evaluate JS, take screenshots, scroll, select options, download files, and fill credentials from Bitwarden vault. Actions run sequentially. Returns the final page state as markdown. Selector-based actions (click, wait_for, select) have a fast 2s timeout by default — if a selector isn\'t found quickly, the action fails immediately rather than hanging.',
+        description: 'Perform actions on a browser session: navigate, click, click by text, type, press keys, wait, evaluate JS, take screenshots, scroll, select options, upload files, download files, and fill credentials from Bitwarden vault. Actions run sequentially. Returns the final page state as markdown. Selector-based actions (click, wait_for, select, upload_file) have a fast 2s timeout by default — if a selector isn\'t found quickly, the action fails immediately rather than hanging.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -741,7 +741,7 @@ export default function create(): Plugin {
                 properties: {
                   type: {
                     type: 'string',
-                    enum: ['goto', 'click', 'click_text', 'type', 'press', 'wait', 'wait_for', 'evaluate', 'screenshot', 'scroll', 'select', 'download', 'bitwarden_fill'],
+                    enum: ['goto', 'click', 'click_text', 'type', 'press', 'wait', 'wait_for', 'evaluate', 'screenshot', 'scroll', 'select', 'download', 'upload_file', 'bitwarden_fill'],
                     description: 'Action type',
                   },
                   url: { type: 'string', description: 'URL for goto action' },
@@ -754,6 +754,7 @@ export default function create(): Plugin {
                   direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default: down)' },
                   amount: { type: 'number', description: 'Scroll amount in pixels (default: 500)' },
                   download_path: { type: 'string', description: 'File path to save download' },
+                  file_paths: { type: 'array', items: { type: 'string' }, description: 'Local file paths to upload (~ expanded). Pass empty array to clear the input.' },
                   session_token: { type: 'string', description: 'Bitwarden session token from `bw unlock --raw`' },
                   search: { type: 'string', description: 'Search query for bitwarden vault (e.g. domain name)' },
                   username_selector: { type: 'string', description: 'CSS selector for username/email input' },
@@ -781,6 +782,7 @@ export default function create(): Plugin {
               direction?: string
               amount?: number
               download_path?: string
+              file_paths?: string[]
               session_token?: string
               search?: string
               username_selector?: string
@@ -915,6 +917,27 @@ export default function create(): Plugin {
                     if (!action.value) throw new Error('select requires value')
                     await page.selectOption(action.selector, action.value)
                     break
+
+                  case 'upload_file': {
+                    if (!action.selector) throw new Error('upload_file requires selector')
+                    if (!action.file_paths) throw new Error('upload_file requires file_paths')
+                    const resolvedPaths = action.file_paths.map(p => expandTilde(p))
+                    // validate files exist before attempting upload
+                    for (const fp of resolvedPaths) {
+                      if (!await Bun.file(fp).exists()) {
+                        throw new Error(`upload_file: file not found: ${fp}`)
+                      }
+                    }
+                    // empty array clears the input
+                    await page.setInputFiles(action.selector, resolvedPaths, { timeout: SELECTOR_TIMEOUT() })
+                    evalResults.push(JSON.stringify({
+                      action: 'upload_file',
+                      selector: action.selector,
+                      files: resolvedPaths,
+                      count: resolvedPaths.length,
+                    }))
+                    break
+                  }
 
                   case 'download': {
                     if (!action.download_path) throw new Error('download requires download_path')

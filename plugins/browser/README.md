@@ -9,7 +9,7 @@ Stateful, CDP-based browser automation for toebeans. Browsers persist between to
 | `browser_spawn` | Create a new browser session. Optionally navigate to a URL. Returns `session_id`. |
 | `browser_screenshot` | Take a viewport screenshot, save to file, return path. |
 | `browser_view` | Get markdown text of the current page (read-only). |
-| `browser_interact` | Perform actions: goto, click, type, press, wait, evaluate, scroll, select, download. |
+| `browser_interact` | Perform actions: goto, click, type, press, wait, evaluate, scroll, select, upload_file, download. |
 | `browser_close` | Close session and free resources. |
 
 ## User visibility
