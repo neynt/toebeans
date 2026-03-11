@@ -15,7 +15,24 @@ stateful browser automation for toebeans. powered by patchright (patched playwri
 
 ## interact actions
 
-`goto`, `click`, `click_text`, `type`, `press`, `wait`, `wait_for`, `evaluate`, `screenshot`, `scroll`, `select`, `upload_file`, `download`, `bitwarden_fill`
+each action type has its own sub-schema (discriminated union via `anyOf`) so the LLM only sees the relevant fields. this prevents models from filling every property with empty defaults.
+
+| action | required fields | optional fields |
+|-|-|-|
+| `goto` | `url` | |
+| `click` | `selector` | |
+| `click_text` | `text` | |
+| `type` | `selector`, `text` | |
+| `press` | `key` | |
+| `wait` | | `ms` |
+| `wait_for` | `selector` | `ms` |
+| `evaluate` | `js` | |
+| `screenshot` | | |
+| `scroll` | | `direction`, `amount` |
+| `select` | `selector`, `value` | |
+| `upload_file` | `selector`, `file_paths` | |
+| `download` | `download_path` | `selector`, `url` |
+| `bitwarden_fill` | `session_token`, `search`, `username_selector`, `password_selector` | `submit_selector` |
 
 ## sessions
 
