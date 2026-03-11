@@ -357,9 +357,20 @@ async function extractMarkdown(page: Page, selector?: string): Promise<string> {
       }
       // snapshot live .value for inputs/textareas (not preserved by cloneNode)
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        const val = (el as HTMLInputElement).value
+        const inp = el as HTMLInputElement
+        const val = inp.value
         if (val) {
-          el.setAttribute(VALUE_MARK, val)
+          // redact sensitive input types — never leak passwords, credentials, etc.
+          const inputType = (inp.type || '').toLowerCase()
+          const nameOrId = ((inp.name || '') + ' ' + (inp.id || '') + ' ' + (inp.autocomplete || '')).toLowerCase()
+          const isSensitive =
+            inputType === 'password' ||
+            /\b(password|passwd|secret|token|api.?key|ssn|credit.?card|cvv|cvc|pin)\b/.test(nameOrId) ||
+            inp.autocomplete === 'cc-number' ||
+            inp.autocomplete === 'cc-csc' ||
+            inp.autocomplete === 'new-password' ||
+            inp.autocomplete === 'current-password'
+          el.setAttribute(VALUE_MARK, isSensitive ? '••••••' : val)
           valued.push(el)
         }
       }
@@ -1174,13 +1185,10 @@ export default function create(): Plugin {
                       await new Promise(r => setTimeout(r, 1500))
                     }
 
-                    // clear password from DOM to prevent exfiltration by subsequent page reads
-                    // only do this if we already submitted — otherwise the field still needs the password
-                    if (action.submit_selector) {
-                      try {
-                        await page.fill(action.password_selector, '')
-                      } catch { /* field may no longer exist after navigation */ }
-                    }
+                    // clear password from DOM to prevent leaking in extractMarkdown / subsequent reads
+                    try {
+                      await page.fill(action.password_selector, '')
+                    } catch { /* field may no longer exist after navigation */ }
 
                     // return metadata only — NEVER the password
                     evalResults.push(JSON.stringify({
