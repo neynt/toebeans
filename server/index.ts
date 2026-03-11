@@ -87,16 +87,16 @@ async function main() {
       break
     case 'moonshot':
     case 'openai-compatible': {
-      // "moonshot" config block; fall back to legacy "openai" block
-      const ms = config.llm.moonshot ?? config.llm.openai
+      // top-level fields preferred; fall back to nested moonshot/openai blocks
+      const legacy = config.llm.moonshot ?? config.llm.openai
       provider = new MoonshotProvider({
         apiKey: config.llm.apiKey,
-        baseUrl: ms?.baseUrl,
+        baseUrl: config.llm.baseUrl ?? legacy?.baseUrl,
         model: config.llm.model,
         maxOutputTokens: config.llm.maxOutputTokens,
-        thinking: ms?.thinking,
-        temperature: ms?.temperature,
-        topP: ms?.topP,
+        thinking: config.llm.thinking ?? legacy?.thinking,
+        temperature: config.llm.temperature ?? legacy?.temperature,
+        topP: config.llm.topP ?? legacy?.topP,
       })
       break
     }

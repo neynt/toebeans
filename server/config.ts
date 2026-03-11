@@ -23,15 +23,20 @@ const configSchema = z.object({
     maxOutputTokens: z.number().optional(),
     maxToolResultTokens: z.number().optional(),
     maxToolResultChars: z.number().optional(),
+    // fields used by moonshot provider (ignored by others)
+    baseUrl: z.string().optional(),
+    thinking: z.boolean().optional(),
+    temperature: z.number().optional(),
+    topP: z.number().optional(),
     // provider-specific config
     anthropic: z.object({}).passthrough().optional(),
+    // backward compat: nested moonshot/openai blocks still accepted
     moonshot: z.object({
       baseUrl: z.string().optional(),
-      thinking: z.boolean().optional(), // enable reasoning/thinking mode
+      thinking: z.boolean().optional(),
       temperature: z.number().optional(),
       topP: z.number().optional(),
     }).passthrough().optional(),
-    // backward compat: "openai" is accepted as alias for "moonshot"
     openai: z.object({
       baseUrl: z.string().optional(),
       thinking: z.boolean().optional(),

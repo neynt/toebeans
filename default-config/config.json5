@@ -20,13 +20,11 @@
     "maxToolResultTokens": 10000,
     "maxToolResultChars": 50000
 
-    // Moonshot/Kimi provider config (only used when provider is "moonshot"):
-    // "moonshot": {
-    //   "baseUrl": "https://api.moonshot.ai/v1",
-    //   "thinking": true,
-    //   "temperature": 1.0,
-    //   "topP": 0.95
-    // }
+    // Moonshot/Kimi fields (only used when provider is "moonshot"):
+    // "baseUrl": "https://api.moonshot.ai/v1",
+    // "thinking": true,
+    // "temperature": 1.0,
+    // "topP": 0.95
   },
   "plugins": {},
   "notifyOnRestart": "",
