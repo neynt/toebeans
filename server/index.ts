@@ -5,10 +5,15 @@ import { loadConfig } from './config.ts'
 import { ensureDataDirs, loadSession, getSoulPath, listSessions, getWorkspaceDir, setLastOutputTarget, getLastOutputTarget, getCurrentSessionId } from './session.ts'
 import { runAgentTurn } from './agent.ts'
 import { createSessionManager } from './session-manager.ts'
-import { AnthropicProvider } from '../llm-providers/anthropic.ts'
-import { MoonshotProvider } from '../llm-providers/moonshot.ts'
+import { AnthropicProvider, getModelPricing as anthropicPricing } from '../llm-providers/anthropic.ts'
+import { MoonshotProvider, getModelPricing as moonshotPricing } from '../llm-providers/moonshot.ts'
 import { ChatGPTCodexProvider } from '../llm-providers/chatgpt-codex.ts'
 import type { LlmProvider } from './llm-provider.ts'
+import { registerPricingProvider } from './cost.ts'
+
+// register provider pricing lookups
+registerPricingProvider(anthropicPricing)
+registerPricingProvider(moonshotPricing)
 import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'os'

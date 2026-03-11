@@ -1,5 +1,13 @@
-import { describe, test, expect } from 'bun:test'
-import { estimateCost, formatCost, computeInputOutputCost } from './cost.ts'
+import { describe, test, expect, beforeAll } from 'bun:test'
+import { estimateCost, formatCost, computeInputOutputCost, registerPricingProvider } from './cost.ts'
+import { getModelPricing as anthropicPricing } from '../llm-providers/anthropic.ts'
+import { getModelPricing as moonshotPricing } from '../llm-providers/moonshot.ts'
+
+// register provider pricing (normally done in server/index.ts at startup)
+beforeAll(() => {
+  registerPricingProvider(anthropicPricing)
+  registerPricingProvider(moonshotPricing)
+})
 
 describe('estimateCost', () => {
   test('returns null for unknown model', () => {
@@ -33,6 +41,16 @@ describe('estimateCost', () => {
     )
     expect(result).not.toBeNull()
     expect(result!.optimistic).toBeCloseTo(15)
+  })
+
+  test('calculates cost for kimi-k2.5 (moonshot provider)', () => {
+    const result = estimateCost(
+      { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 },
+      'kimi-k2.5',
+    )
+    expect(result).not.toBeNull()
+    expect(result!.optimistic).toBeCloseTo(10) // $2 + $8
+    expect(result!.pessimistic).toBeCloseTo(10)
   })
 })
 

@@ -1,6 +1,25 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { LlmProvider } from '../server/llm-provider.ts'
 import type { Message, StreamChunk, ToolDef, CacheHint } from '../server/types.ts'
+import type { ModelPricing } from '../server/cost.ts'
+
+// per-million-token pricing for Anthropic models
+const PRICING: Record<string, ModelPricing> = {
+  'claude-opus-4-6':   { input: 15,  output: 75,  cacheRead: 1.5,  cacheWrite: 18.75 },
+  'claude-sonnet-4-5': { input: 3,   output: 15,  cacheRead: 0.3,  cacheWrite: 3.75 },
+  'claude-haiku-4-5':  { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1.0 },
+  'claude-3-5-sonnet': { input: 3,   output: 15,  cacheRead: 0.3,  cacheWrite: 3.75 },
+  'claude-3-5-haiku':  { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1.0 },
+}
+
+/** Look up pricing for an Anthropic model (supports prefix matching for dated IDs). */
+export function getModelPricing(model: string): ModelPricing | null {
+  if (PRICING[model]) return PRICING[model]
+  for (const [key, pricing] of Object.entries(PRICING)) {
+    if (model.startsWith(key)) return pricing
+  }
+  return null
+}
 
 type AnthropicContentBlock = Anthropic.Messages.ContentBlockParam
 type AnthropicTool = Anthropic.Messages.Tool

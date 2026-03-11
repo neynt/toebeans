@@ -8,32 +8,41 @@ export interface ModelPricing {
   cacheWrite: number   // $/M tokens
 }
 
-const PRICING: Record<string, ModelPricing> = {
-  // Claude 4.5 / 4.6 family
-  'claude-opus-4-6':     { input: 15,  output: 75,  cacheRead: 1.5,  cacheWrite: 18.75 },
-  'claude-sonnet-4-5':   { input: 3,   output: 15,  cacheRead: 0.3,  cacheWrite: 3.75 },
-  'claude-haiku-4-5':    { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1.0 },
-  // Claude 3.5
-  'claude-3-5-sonnet':   { input: 3,   output: 15,  cacheRead: 0.3,  cacheWrite: 3.75 },
-  'claude-3-5-haiku':    { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1.0 },
-  // Kimi K2.5 (Moonshot AI)
-  'kimi-k2.5':           { input: 2,   output: 8,   cacheRead: 0.2,  cacheWrite: 2.5 },
+// Provider pricing lookup functions — each provider registers its own.
+type PricingLookup = (model: string) => ModelPricing | null
+const providerLookups: PricingLookup[] = []
+
+/**
+ * Register a provider's pricing lookup function.
+ * Called once per provider at import time.
+ */
+export function registerPricingProvider(lookup: PricingLookup): void {
+  providerLookups.push(lookup)
 }
+
+// Runtime overrides (e.g. from config)
+const overrides: Record<string, ModelPricing> = {}
 
 /**
  * Register custom model pricing at runtime (e.g. from config).
  */
 export function registerModelPricing(model: string, pricing: ModelPricing): void {
-  PRICING[model] = pricing
+  overrides[model] = pricing
 }
 
 function findPricing(model: string): ModelPricing | null {
-  // exact match first
-  if (PRICING[model]) return PRICING[model]
-  // prefix match (e.g. "claude-opus-4-6-20250901" -> "claude-opus-4-6")
-  for (const [key, pricing] of Object.entries(PRICING)) {
+  // runtime overrides first (exact match, then prefix)
+  if (overrides[model]) return overrides[model]
+  for (const [key, pricing] of Object.entries(overrides)) {
     if (model.startsWith(key)) return pricing
   }
+
+  // delegate to registered providers
+  for (const lookup of providerLookups) {
+    const pricing = lookup(model)
+    if (pricing) return pricing
+  }
+
   return null
 }
 

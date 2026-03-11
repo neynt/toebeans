@@ -1,6 +1,21 @@
 import OpenAI from 'openai'
 import type { LlmProvider } from '../server/llm-provider.ts'
 import type { Message, StreamChunk, ToolDef } from '../server/types.ts'
+import type { ModelPricing } from '../server/cost.ts'
+
+// per-million-token pricing for Moonshot/Kimi models
+const PRICING: Record<string, ModelPricing> = {
+  'kimi-k2.5': { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 2.5 },
+}
+
+/** Look up pricing for a Moonshot model (supports prefix matching for dated IDs). */
+export function getModelPricing(model: string): ModelPricing | null {
+  if (PRICING[model]) return PRICING[model]
+  for (const [key, pricing] of Object.entries(PRICING)) {
+    if (model.startsWith(key)) return pricing
+  }
+  return null
+}
 
 // sanitize tool call IDs for cross-provider compatibility
 function sanitizeToolId(id: string): string {
