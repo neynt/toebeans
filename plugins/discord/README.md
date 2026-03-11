@@ -31,11 +31,17 @@ text responses are buffered and sent paragraph-by-paragraph (split on `\n\n`)
 with a human-like typing delay. messages over 2000 chars are auto-split.
 
 tool calls appear as inline code: `` `🔧 toolname: brief (tokens)` ``, updated
-with ✅/❌ and token counts when results arrive. with `condenseToolCalls: true`,
-consecutive tool calls are batched into a single summary line instead.
+with ✅/❌ and token counts when results arrive.
+
+with `condenseToolCalls: true`, tool calls are shown as a single live-updating
+progress message that edits in-place as each tool starts and completes. each
+tool gets a status line (⏳ running, ✅ done, ❌ failed) with a brief summary
+and token counts. the message is sent immediately on the first tool call, then
+updated on each subsequent tool_use/tool_result event. when the batch finishes
+(next text output or turn end), it gets a final "done" header.
 
 a separate `logChannel` can be configured for verbose tool call/result logs with
-full JSON inputs and outputs.
+full JSON inputs and outputs (unaffected by condensing).
 
 ## attachments and media
 
@@ -69,7 +75,7 @@ full JSON inputs and outputs.
   typingDelayMaxMs: 1000,
   typingDelayPerCharMs: 10,
   logChannel: "channel_id",        // verbose tool call logs
-  condenseToolCalls: false,        // batch tool calls into summaries
+  condenseToolCalls: false,        // live-updating progress message for tool calls
 }
 ```
 
