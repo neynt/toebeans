@@ -24,6 +24,16 @@
 //   - text is normalized before TTS: \n\n → ". ", \n → " " — prevents TTS model
 //     from stopping generation at paragraph boundaries
 //   - fixed indexOf(' ') returning -1 on \n\n-separated text (garbled splits)
+//
+// v3.0 fix (stutter from coupled TTS ingestion + frame pacing):
+//   - root cause: streamTtsToCall consumed TTS chunks, but flush() awaited
+//     sendFrames() which paced in real-time. while blocked, TTS audio
+//     accumulated upstream, then got read in bursts → worsening stutter.
+//   - fix: AudioQueue decouples TTS ingestion from frame pacing.
+//     producer: TTS consumer loop pushes pre-sliced frames into a ring buffer.
+//     consumer: independent 20ms timer loop pulls one frame per tick and sends.
+//     on underrun the consumer waits (no silence injection — avoids pops/clicks,
+//     a brief natural pause is less disruptive for phone audio).
 
 import type { ServerWebSocket } from 'bun'
 import { join, dirname, resolve } from 'path'
@@ -174,8 +184,12 @@ interface ActiveCall {
   // pipeline cancellation
   pipelineAbort: AbortController | null
 
-  // TTS serialization: chains TTS sends so they play back-to-back
+  // TTS serialization: chains TTS calls so they produce audio back-to-back
   ttsSending: Promise<void>
+
+  // decoupled audio queue: TTS pushes frames, consumer timer sends them
+  audioQueue: AudioQueue
+  consumerTimer: ReturnType<typeof setInterval> | null
 
   // text accumulator during LLM streaming
   textBuffer: string
@@ -274,6 +288,65 @@ class DtmfDetector {
       this.currentDigit = null
     }
     return digits
+  }
+}
+
+// ── AudioQueue: decoupled producer/consumer frame buffer ──
+//
+// the producer (TTS consumer loop) pushes pre-sliced encoded frames.
+// the consumer (20ms timer) pulls one frame per tick and sends it.
+// generation tracking ensures stale frames from cancelled TTS don't leak.
+
+class AudioQueue {
+  private frames: Buffer[] = []
+  private generation = 0
+  private _onFrameAvailable: (() => void) | null = null
+
+  // stats (reset per clear)
+  totalPushed = 0
+  totalPulled = 0
+  peakDepth = 0
+  underruns = 0
+
+  /** current number of queued frames */
+  get depth(): number { return this.frames.length }
+
+  /** current generation — callers snapshot this to detect cancellation */
+  get gen(): number { return this.generation }
+
+  /** push a single encoded frame. no-op if generation has changed since snapshot. */
+  push(frame: Buffer, gen: number) {
+    if (gen !== this.generation) return  // stale push from cancelled TTS
+    this.frames.push(frame)
+    this.totalPushed++
+    if (this.frames.length > this.peakDepth) this.peakDepth = this.frames.length
+    this._onFrameAvailable?.()
+  }
+
+  /** pull the next frame, or null if empty (underrun). */
+  pull(): Buffer | null {
+    const frame = this.frames.shift() ?? null
+    if (frame) {
+      this.totalPulled++
+    } else {
+      this.underruns++
+    }
+    return frame
+  }
+
+  /** clear all queued frames and bump generation (invalidates in-flight pushes). */
+  clear() {
+    this.frames.length = 0
+    this.generation++
+    this.totalPushed = 0
+    this.totalPulled = 0
+    this.peakDepth = 0
+    this.underruns = 0
+  }
+
+  /** set a callback for when a frame becomes available (for waking the consumer). */
+  onFrameAvailable(cb: (() => void) | null) {
+    this._onFrameAvailable = cb
   }
 }
 
@@ -602,6 +675,8 @@ export default function create(_serverContext?: any) {
       silenceStart: null,
       pipelineAbort: null,
       ttsSending: Promise.resolve(),
+      audioQueue: new AudioQueue(),
+      consumerTimer: null,
       textBuffer: '',
       spokenText: '',
       initialMessage: initialMessage ?? null,
@@ -622,6 +697,8 @@ export default function create(_serverContext?: any) {
 
   function cleanupCall(call: ActiveCall) {
     call.pipelineAbort?.abort()
+    stopConsumer(call)
+    call.audioQueue.clear()
     if (call.streamId) streamToCall.delete(call.streamId)
     if (call.recording) {
       saveRecording(call).catch(e => log.err('recording', 'save failed', e))
@@ -735,10 +812,9 @@ export default function create(_serverContext?: any) {
     }
   }
 
-  // send raw 20ms frames over WebSocket, paced to real-time
-  async function sendFrames(encodedAudio: Buffer, call: ActiveCall, signal?: AbortSignal): Promise<number> {
-    if (!call.ws) return 0
-
+  // slice encoded audio into 20ms frames and push into the call's AudioQueue.
+  // non-blocking: returns immediately. the consumer timer sends them at pace.
+  function pushFrames(encodedAudio: Buffer, call: ActiveCall, gen: number) {
     call.recording?.outbound.push(encodedAudio)
 
     const rate = call.mediaFormat?.sampleRate || 8000
@@ -746,7 +822,6 @@ export default function create(_serverContext?: any) {
     const bps = enc === 'L16' ? 2 : 1
     const frameMs = 20
     const frameBytes = rate * frameMs / 1000 * bps
-    const totalFrames = Math.ceil(encodedAudio.length / frameBytes)
 
     // pad to frame boundary
     const remainder = encodedAudio.length % frameBytes
@@ -756,47 +831,112 @@ export default function create(_serverContext?: any) {
       encodedAudio = padded
     }
 
-    const expectedDurationMs = totalFrames * frameMs
-    const sendStart = performance.now()
-    let maxDriftMs = 0
-    let lateFrames = 0
-
-    for (let off = 0, fi = 0; off < encodedAudio.length; off += frameBytes, fi++) {
-      if (signal?.aborted) break
-      if (!call.ws) break
-
-      const frame = encodedAudio.subarray(off, off + frameBytes)
-      try {
-        call.ws.send(JSON.stringify({ event: 'media', media: { payload: frame.toString('base64') } }))
-      } catch {
-        break
-      }
-
-      const nextTime = sendStart + (fi + 1) * frameMs
-      const sleepMs = nextTime - performance.now()
-      if (sleepMs < -5) {
-        // we're behind schedule
-        const driftMs = -sleepMs
-        if (driftMs > maxDriftMs) maxDriftMs = driftMs
-        lateFrames++
-      }
-      if (sleepMs > 0) await new Promise(r => setTimeout(r, sleepMs))
+    for (let off = 0; off < encodedAudio.length; off += frameBytes) {
+      call.audioQueue.push(encodedAudio.subarray(off, off + frameBytes), gen)
     }
-
-    const actualDurationMs = performance.now() - sendStart
-    if (maxDriftMs > 10 || lateFrames > 0) {
-      log.warn('sendFrames', `${totalFrames} frames (${expectedDurationMs}ms audio) sent in ${actualDurationMs.toFixed(0)}ms, maxDrift=${maxDriftMs.toFixed(0)}ms lateFrames=${lateFrames}/${totalFrames}`)
-    }
-
-    return sendStart
   }
 
-  // stream a single text segment through TTS → resample → encode → send.
-  // serialized through call.ttsSending to prevent overlap.
+  // start the consumer timer for a call. pulls one frame every 20ms and sends it.
+  // on underrun (queue empty), just skips — no silence injection. for phone audio
+  // a brief natural pause is less disruptive than injected silence (pops/clicks).
+  function startConsumer(call: ActiveCall) {
+    if (call.consumerTimer) return  // already running
+
+    const frameMs = 20
+    let sendStart = performance.now()
+    let frameIndex = 0
+    let maxDriftMs = 0
+    let lateFrames = 0
+    let consecutiveUnderruns = 0
+    let totalSent = 0
+    let lastStatsTime = performance.now()
+
+    call.consumerTimer = setInterval(() => {
+      if (!call.ws) return
+
+      const frame = call.audioQueue.pull()
+      if (!frame) {
+        // underrun — nothing to send. just wait for producer to push more.
+        consecutiveUnderruns++
+        if (consecutiveUnderruns === 1) {
+          // reset pacing origin on transition to underrun so we don't
+          // try to "catch up" when audio becomes available again
+          sendStart = 0
+        }
+        return
+      }
+
+      if (consecutiveUnderruns > 0) {
+        if (consecutiveUnderruns > 5) {
+          log.info('consumer', `resumed after ${consecutiveUnderruns} underruns (${(consecutiveUnderruns * frameMs)}ms gap), queue depth=${call.audioQueue.depth}`)
+        }
+        consecutiveUnderruns = 0
+        // reset pacing origin on resume
+        sendStart = performance.now()
+        frameIndex = 0
+      }
+
+      try {
+        call.ws.send(JSON.stringify({ event: 'media', media: { payload: frame.toString('base64') } }))
+        totalSent++
+        frameIndex++
+      } catch {
+        return
+      }
+
+      // drift tracking
+      const expectedTime = sendStart + frameIndex * frameMs
+      const drift = performance.now() - expectedTime
+      if (drift > 5) {
+        lateFrames++
+        if (drift > maxDriftMs) maxDriftMs = drift
+      }
+
+      // periodic stats
+      const now = performance.now()
+      if (now - lastStatsTime > 5000) {
+        const q = call.audioQueue
+        log.info('consumer', `sent=${totalSent} depth=${q.depth} peak=${q.peakDepth} underruns=${q.underruns} maxDrift=${maxDriftMs.toFixed(0)}ms lateFrames=${lateFrames}`)
+        lastStatsTime = now
+        maxDriftMs = 0
+        lateFrames = 0
+      }
+    }, frameMs)
+  }
+
+  function stopConsumer(call: ActiveCall) {
+    if (!call.consumerTimer) return
+    clearInterval(call.consumerTimer)
+    call.consumerTimer = null
+    const q = call.audioQueue
+    if (q.totalPushed > 0) {
+      log.info('consumer', `stopped: pushed=${q.totalPushed} pulled=${q.totalPulled} peak=${q.peakDepth} underruns=${q.underruns}`)
+    }
+  }
+
+  // wait for the audio queue to drain (all pushed frames consumed).
+  // used to detect when the caller has heard everything before transitioning
+  // back to listening. polls at 50ms — good enough for state transitions.
+  function waitForQueueDrain(call: ActiveCall): Promise<void> {
+    return new Promise<void>(resolve => {
+      const check = () => {
+        if (call.audioQueue.depth === 0 || call.phase !== 'responding') {
+          resolve()
+        } else {
+          setTimeout(check, 50)
+        }
+      }
+      check()
+    })
+  }
+
+  // stream a single text segment through TTS → resample → encode → push to queue.
+  // serialized through call.ttsSending so TTS calls produce audio in order.
+  // the consumer timer (startConsumer) sends frames at 20ms pace independently.
   //
-  // FIX: reduced flush buffer from 200ms to 60ms. the first chunk flushes
-  // immediately (0ms threshold) to minimize TTFA. subsequent chunks use the
-  // 60ms threshold to batch efficiently without creating audible gaps.
+  // v3.0: the producer no longer blocks on frame pacing. it just pushes frames
+  // into the AudioQueue as fast as TTS generates them. this eliminates the stutter
+  // caused by sendFrames() blocking the TTS consumer loop.
   function streamTtsToCall(text: string, call: ActiveCall, signal?: AbortSignal) {
     // normalize text for TTS: collapse newlines/paragraph breaks into
     // speech-friendly form so the TTS model generates audio for all content
@@ -819,34 +959,32 @@ export default function create(_serverContext?: any) {
       const TTS_RATE = 24000
 
       const bps = callEnc === 'L16' ? 2 : 1
-      // v2.1: 60ms flush buffer. v2.2: bumped to 120ms. user reported residual
-      // stuttering at 60ms — 120ms gives more audio per flush boundary, reducing
-      // the number of small sends and associated jitter. still well under the
-      // ~200ms perceptual threshold for conversational latency.
+      // batch resampled PCM into ~120ms chunks before encoding+pushing.
+      // this reduces per-chunk overhead while keeping latency low.
       const flushBytes = Math.ceil(callRate * 0.12) * bps
       let pending = Buffer.alloc(0)
-      let firstFrameTime = 0
-      let totalSent = 0
+      let totalPushedBytes = 0
       let chunkCount = 0
       let totalResampleMs = 0
-      let totalFlushMs = 0
       let maxPendingBytes = 0
       let lastChunkTime = t0
+      let firstPushTime = 0
 
-      const flush = async () => {
+      // snapshot the queue generation so pushes are invalidated on cancel
+      const gen = call.audioQueue.gen
+
+      const flush = () => {
         if (pending.length === 0) return
-        const flushStart = performance.now()
         const encoded = fromPcm16(pending, callEnc)
         pending = Buffer.alloc(0)
-        const t = await sendFrames(encoded, call, signal)
-        if (!firstFrameTime && t) firstFrameTime = t
-        totalSent += encoded.length
-        totalFlushMs += performance.now() - flushStart
+        pushFrames(encoded, call, gen)
+        if (!firstPushTime) firstPushTime = performance.now()
+        totalPushedBytes += encoded.length
       }
 
       try {
         for await (const chunk of speakStreaming(text, getTtsOpts())) {
-          if (signal?.aborted) break
+          if (signal?.aborted || gen !== call.audioQueue.gen) break
           chunkCount++
           const now = performance.now()
           const gapMs = now - lastChunkTime
@@ -863,20 +1001,19 @@ export default function create(_serverContext?: any) {
             log.warn('tts-stream', `chunk#${chunkCount} gap=${gapMs.toFixed(0)}ms pending=${pending.length}B (stall in TTS generation?)`)
           }
 
-          // FIX: flush the very first chunk immediately to minimize TTFA,
-          // then use the normal threshold for subsequent chunks.
-          if (chunkCount === 1 || pending.length >= flushBytes) await flush()
+          // push first chunk immediately for minimum TTFA, then batch
+          if (chunkCount === 1 || pending.length >= flushBytes) flush()
         }
-        if (!signal?.aborted) await flush()
+        if (!signal?.aborted && gen === call.audioQueue.gen) flush()
       } catch (e: any) {
         if (!signal?.aborted) log.err('tts', `stream error: ${e.message}`)
       }
 
       const elapsed = performance.now() - t0
-      const audioMs = (totalSent / bps / callRate) * 1000
-      const ttfa = firstFrameTime ? (firstFrameTime - t0).toFixed(0) : 'n/a'
-      log.info('tts', `"${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" → ${audioMs.toFixed(0)}ms audio, TTFA ${ttfa}ms, total ${elapsed.toFixed(0)}ms, ` +
-        `chain_wait=${chainWaitMs.toFixed(0)}ms chunks=${chunkCount} resample=${totalResampleMs.toFixed(0)}ms flush=${totalFlushMs.toFixed(0)}ms maxPending=${maxPendingBytes}B`)
+      const audioMs = (totalPushedBytes / bps / callRate) * 1000
+      const ttfp = firstPushTime ? (firstPushTime - t0).toFixed(0) : 'n/a'
+      log.info('tts', `"${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" → ${audioMs.toFixed(0)}ms audio, TTFP ${ttfp}ms, total ${elapsed.toFixed(0)}ms, ` +
+        `chain_wait=${chainWaitMs.toFixed(0)}ms chunks=${chunkCount} resample=${totalResampleMs.toFixed(0)}ms maxPending=${maxPendingBytes}B queueDepth=${call.audioQueue.depth}`)
     }).catch(e => {
       if (!signal?.aborted) log.err('tts', `send chain error`, e)
     })
@@ -887,13 +1024,18 @@ export default function create(_serverContext?: any) {
   function interruptCall(call: ActiveCall, reason: string) {
     if (call.phase !== 'responding') return
 
-    log.info('barge-in', `interrupting call ${call.callControlId}: ${reason}`)
+    log.info('barge-in', `interrupting call ${call.callControlId}: ${reason} (queue depth=${call.audioQueue.depth})`)
 
     // abort the entire pipeline (LLM streaming + TTS)
     call.pipelineAbort?.abort()
     call.pipelineAbort = null
 
-    // FIX: flush any agent audio buffered on the Telnyx side by sending
+    // clear the audio queue. this bumps the generation counter, so any
+    // in-flight TTS pushFrames() calls with the old generation are silently
+    // dropped — no stale audio leaks into the next turn.
+    call.audioQueue.clear()
+
+    // flush any agent audio buffered on the Telnyx side by sending
     // a short burst of silence. this prevents the caller from hearing
     // the tail end of the agent's sentence smeared over their speech.
     clearCallAudio(call.callControlId)
@@ -1036,8 +1178,9 @@ export default function create(_serverContext?: any) {
               call.spokenText += seg.text + ' '
               streamTtsToCall(seg.text, call, signal)
             } else {
-              // wait for pending TTS before sending DTMF
+              // wait for pending TTS production + queue drain before sending DTMF
               await call.ttsSending
+              await waitForQueueDrain(call)
               if (!signal.aborted) {
                 await sendDtmf(call.callControlId, seg.digits).catch(e =>
                   log.err('dtmf', `send failed: ${e}`)
@@ -1060,14 +1203,11 @@ export default function create(_serverContext?: any) {
         for (const seg of segments) {
           if (signal.aborted) break
           if (seg.type === 'text') {
-            // FIX: send the entire remaining text as a single TTS call instead of
-            // splitting into sentences. this avoids per-sentence cold starts.
-            // each `speakStreaming` call pays ~400ms TTFA. for a 3-sentence tail,
-            // that's 1.2s of unnecessary gaps. sending as one call means one TTFA.
             call.spokenText += seg.text + ' '
             streamTtsToCall(seg.text, call, signal)
           } else {
             await call.ttsSending
+            await waitForQueueDrain(call)
             if (!signal.aborted) {
               await sendDtmf(call.callControlId, seg.digits).catch(e =>
                 log.err('dtmf', `send failed: ${e}`)
@@ -1076,8 +1216,9 @@ export default function create(_serverContext?: any) {
           }
         }
       }
-      // wait for all TTS to finish, then go back to listening
-      call.ttsSending.then(() => {
+      // wait for TTS production to finish, then wait for the queue to drain
+      // (caller hears everything), then go back to listening.
+      call.ttsSending.then(() => waitForQueueDrain(call)).then(() => {
         if (call.phase === 'responding') {
           call.phase = 'listening'
           call.spokenText = ''
@@ -1085,8 +1226,8 @@ export default function create(_serverContext?: any) {
         }
       })
     } else if (message.type === 'done') {
-      // agent turn done — ensure we're back in listening state after TTS finishes
-      call.ttsSending.then(() => {
+      // agent turn done — ensure we're back in listening state after queue drains
+      call.ttsSending.then(() => waitForQueueDrain(call)).then(() => {
         if (call.phase === 'responding') {
           call.phase = 'listening'
           call.spokenText = ''
@@ -1184,6 +1325,9 @@ export default function create(_serverContext?: any) {
         initRecording(call)
 
         call.dtmfDetector = new DtmfDetector(media_format.sample_rate)
+
+        // start the consumer timer — sends queued frames at 20ms pace
+        startConsumer(call)
 
         // speak initial message for outbound calls
         if (call.initialMessage) {

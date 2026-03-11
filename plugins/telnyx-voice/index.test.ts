@@ -449,3 +449,197 @@ describe('frame pacing', () => {
     expect(silenceFrames * frameMs).toBe(100)
   })
 })
+
+// ── AudioQueue tests ──
+// recreate the class here since we can't import internals from the factory
+
+class AudioQueue {
+  private frames: Buffer[] = []
+  private generation = 0
+  private _onFrameAvailable: (() => void) | null = null
+  totalPushed = 0
+  totalPulled = 0
+  peakDepth = 0
+  underruns = 0
+
+  get depth(): number { return this.frames.length }
+  get gen(): number { return this.generation }
+
+  push(frame: Buffer, gen: number) {
+    if (gen !== this.generation) return
+    this.frames.push(frame)
+    this.totalPushed++
+    if (this.frames.length > this.peakDepth) this.peakDepth = this.frames.length
+    this._onFrameAvailable?.()
+  }
+
+  pull(): Buffer | null {
+    const frame = this.frames.shift() ?? null
+    if (frame) { this.totalPulled++ } else { this.underruns++ }
+    return frame
+  }
+
+  clear() {
+    this.frames.length = 0
+    this.generation++
+    this.totalPushed = 0
+    this.totalPulled = 0
+    this.peakDepth = 0
+    this.underruns = 0
+  }
+
+  onFrameAvailable(cb: (() => void) | null) {
+    this._onFrameAvailable = cb
+  }
+}
+
+describe('AudioQueue', () => {
+  test('push and pull single frame', () => {
+    const q = new AudioQueue()
+    const frame = Buffer.alloc(320, 0x42)
+    q.push(frame, q.gen)
+    expect(q.depth).toBe(1)
+    expect(q.totalPushed).toBe(1)
+
+    const pulled = q.pull()
+    expect(pulled).toBe(frame)
+    expect(q.depth).toBe(0)
+    expect(q.totalPulled).toBe(1)
+  })
+
+  test('pull from empty queue returns null and increments underruns', () => {
+    const q = new AudioQueue()
+    expect(q.pull()).toBeNull()
+    expect(q.underruns).toBe(1)
+    expect(q.pull()).toBeNull()
+    expect(q.underruns).toBe(2)
+  })
+
+  test('FIFO ordering', () => {
+    const q = new AudioQueue()
+    const gen = q.gen
+    const a = Buffer.from([1])
+    const b = Buffer.from([2])
+    const c = Buffer.from([3])
+    q.push(a, gen)
+    q.push(b, gen)
+    q.push(c, gen)
+    expect(q.pull()).toBe(a)
+    expect(q.pull()).toBe(b)
+    expect(q.pull()).toBe(c)
+    expect(q.pull()).toBeNull()
+  })
+
+  test('peak depth tracks maximum queue size', () => {
+    const q = new AudioQueue()
+    const gen = q.gen
+    q.push(Buffer.alloc(1), gen)
+    q.push(Buffer.alloc(1), gen)
+    q.push(Buffer.alloc(1), gen)
+    expect(q.peakDepth).toBe(3)
+    q.pull()
+    q.pull()
+    expect(q.peakDepth).toBe(3) // peak doesn't decrease
+    expect(q.depth).toBe(1)
+  })
+
+  test('clear empties queue and bumps generation', () => {
+    const q = new AudioQueue()
+    const gen0 = q.gen
+    q.push(Buffer.alloc(1), gen0)
+    q.push(Buffer.alloc(1), gen0)
+    expect(q.depth).toBe(2)
+
+    q.clear()
+    expect(q.depth).toBe(0)
+    expect(q.gen).toBe(gen0 + 1)
+    expect(q.totalPushed).toBe(0)
+    expect(q.totalPulled).toBe(0)
+    expect(q.peakDepth).toBe(0)
+    expect(q.underruns).toBe(0)
+  })
+
+  test('stale generation pushes are silently dropped', () => {
+    const q = new AudioQueue()
+    const gen0 = q.gen
+    q.push(Buffer.alloc(1), gen0)
+    expect(q.depth).toBe(1)
+
+    q.clear()
+    // push with old generation should be ignored
+    q.push(Buffer.alloc(1), gen0)
+    expect(q.depth).toBe(0)
+    expect(q.totalPushed).toBe(0)
+
+    // push with new generation should work
+    const gen1 = q.gen
+    q.push(Buffer.alloc(1), gen1)
+    expect(q.depth).toBe(1)
+    expect(q.totalPushed).toBe(1)
+  })
+
+  test('onFrameAvailable callback fires on push', () => {
+    const q = new AudioQueue()
+    let called = 0
+    q.onFrameAvailable(() => { called++ })
+    q.push(Buffer.alloc(1), q.gen)
+    expect(called).toBe(1)
+    q.push(Buffer.alloc(1), q.gen)
+    expect(called).toBe(2)
+  })
+
+  test('onFrameAvailable not called for stale push', () => {
+    const q = new AudioQueue()
+    let called = 0
+    q.onFrameAvailable(() => { called++ })
+    const staleGen = q.gen
+    q.clear()
+    q.push(Buffer.alloc(1), staleGen)
+    expect(called).toBe(0)
+  })
+
+  test('simulates producer/consumer scenario', () => {
+    const q = new AudioQueue()
+    const gen = q.gen
+    const frameSize = 320  // 20ms at 8kHz L16
+
+    // producer pushes 50 frames (1 second of audio)
+    for (let i = 0; i < 50; i++) {
+      q.push(Buffer.alloc(frameSize, i), gen)
+    }
+    expect(q.depth).toBe(50)
+    expect(q.peakDepth).toBe(50)
+
+    // consumer pulls 30 frames
+    for (let i = 0; i < 30; i++) {
+      const frame = q.pull()
+      expect(frame).not.toBeNull()
+      expect(frame![0]).toBe(i) // FIFO order preserved
+    }
+    expect(q.depth).toBe(20)
+    expect(q.totalPulled).toBe(30)
+  })
+
+  test('barge-in scenario: clear mid-stream prevents old audio leaking', () => {
+    const q = new AudioQueue()
+    const gen0 = q.gen
+
+    // producer starts pushing
+    q.push(Buffer.from([1]), gen0)
+    q.push(Buffer.from([2]), gen0)
+
+    // barge-in! clear the queue
+    q.clear()
+
+    // old producer tries to push more with stale generation
+    q.push(Buffer.from([3]), gen0)
+    q.push(Buffer.from([4]), gen0)
+    expect(q.depth).toBe(0) // nothing leaked
+
+    // new TTS starts with fresh generation
+    const gen1 = q.gen
+    q.push(Buffer.from([10]), gen1)
+    expect(q.depth).toBe(1)
+    expect(q.pull()![0]).toBe(10)
+  })
+})
