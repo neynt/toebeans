@@ -86,7 +86,7 @@ Plugins are enabled by having a key in `config.json5 → plugins`.
 
 ## Key patterns
 
-- **Session routing**: each channel/DM/WS connection gets its own session via route string. Compaction triggers at `compactAtTokens` (default 20k) or `lifespanSeconds` (default 1h) + `compactMinTokens` (5k).
+- **Session routing**: each channel/DM/WS connection gets its own session via route string. Compaction triggers at `compactAtTokens` (default 80k) or `lifespanSeconds` (default 1h) + `compactMinTokens` (5k).
 - **Message repair** (`agent.ts`): merges consecutive assistant messages, inserts synthetic tool_results for interrupted calls, reorders wedged user messages. Important for understanding "impossible" message history states.
 - **Tool results** are truncated at `maxToolResultChars` (50k) and `maxToolResultTokens` (10k).
 - **Abort**: `/stop` → AbortController → propagates to LLM stream and `ToolContext.abortSignal`.
