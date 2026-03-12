@@ -12,6 +12,23 @@ import { transcribe } from '../../server/services/index.ts'
 import https from 'https'
 import http from 'http'
 
+// --- constants for streaming output ---
+export const DISCORD_MAX_LENGTH = 2000
+export const STREAM_EDIT_INTERVAL_MS = 1000
+
+// find a good break point at or before maxLen (prefer \n\n, then \n, then space)
+export function findBreakPoint(text: string, maxLen: number): number {
+  if (text.length <= maxLen) return text.length
+  const region = text.slice(0, maxLen)
+  const doubleNewline = region.lastIndexOf('\n\n')
+  if (doubleNewline > maxLen * 0.5) return doubleNewline + 2
+  const newline = region.lastIndexOf('\n')
+  if (newline > maxLen * 0.5) return newline + 1
+  const space = region.lastIndexOf(' ')
+  if (space > maxLen * 0.5) return space + 1
+  return maxLen
+}
+
 // --- helpers for /session enrichment ---
 
 interface ClaudeCodeMeta {
@@ -302,8 +319,10 @@ export default function create(serverContext?: ServerContext): Plugin {
   const messageQueue: QueuedMessage[] = []
   let resolveWaiter: (() => void) | null = null
 
-  // track buffered content per session (for sentence-based sending)
+  // track buffered content per session for streaming edits
   const messageBuffers = new Map<string, string>()
+  // track the current streaming Discord message per session (edit-in-place)
+  const streamingMessages = new Map<string, { messageId: string; channelId: string; sentLength: number; lastEditTime: number }>()
   // track queued reactions per channel: channelId -> discordMessageId (for ⏳ reaction management)
   const queuedReactions = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them (non-condensed mode)
@@ -806,32 +825,85 @@ export default function create(serverContext?: ServerContext): Plugin {
           if (!channel?.isTextBased()) return
           const textChannel = channel as TextChannel | DMChannel
 
-          // helper to send a message with human-like delay, splitting if over 2000 chars
-          const sendMessage = async (text: string, moreToFollow: boolean) => {
-            const trimmed = text.trim()
+          // finalize the current streaming message and clear tracking state
+          const finalizeStreamingMessage = async () => {
+            const streaming = streamingMessages.get(sessionId)
+            const buffer = messageBuffers.get(sessionId) || ''
+            if (streaming && buffer.trim()) {
+              try {
+                const msg = await textChannel.messages.fetch(streaming.messageId)
+                await msg.edit(buffer.trim().slice(0, DISCORD_MAX_LENGTH))
+              } catch (err) {
+                console.error('discord: failed to finalize streaming message:', err)
+              }
+            }
+            streamingMessages.delete(sessionId)
+            messageBuffers.delete(sessionId)
+          }
+
+          // send or edit the streaming message with current buffer contents.
+          // if the buffer exceeds Discord's limit, finalize the current message
+          // (truncated to a clean break point) and start a new one for the rest.
+          const flushStreamingBuffer = async () => {
+            let buffer = messageBuffers.get(sessionId) || ''
+            const trimmed = buffer.trim()
             if (!trimmed) return
 
-            // human-like delay: 300ms + per-char delay, capped at max
-            const maxDelay = config?.typingDelayMaxMs ?? 1000
-            const perChar = config?.typingDelayPerCharMs ?? 10
-            const delay = Math.min(maxDelay, 300 + trimmed.length * perChar)
-            await new Promise(resolve => setTimeout(resolve, delay))
+            const streaming = streamingMessages.get(sessionId)
+            const now = Date.now()
 
-            let remaining = trimmed
-            const messages: DiscordMessage[] = []
-            while (remaining.length > 0) {
-              const chunk = remaining.slice(0, 2000)
-              const msg = await textChannel.send(chunk)
-              messages.push(msg)
-              remaining = remaining.slice(2000)
+            if (trimmed.length <= DISCORD_MAX_LENGTH) {
+              // fits in one message — send or edit
+              if (streaming) {
+                if (trimmed.length !== streaming.sentLength) {
+                  try {
+                    const msg = await textChannel.messages.fetch(streaming.messageId)
+                    await msg.edit(trimmed)
+                    streaming.sentLength = trimmed.length
+                    streaming.lastEditTime = now
+                  } catch (err) {
+                    console.error('discord: failed to edit streaming message:', err)
+                  }
+                }
+              } else {
+                const msg = await textChannel.send(trimmed)
+                streamingMessages.set(sessionId, { messageId: msg.id, channelId, sentLength: trimmed.length, lastEditTime: now })
+              }
+            } else {
+              // exceeds limit — find a clean break point near the limit
+              // in the current message, finalize it, then continue with remainder
+              if (streaming) {
+                const breakPoint = findBreakPoint(trimmed, DISCORD_MAX_LENGTH)
+                const toKeep = trimmed.slice(0, breakPoint).trim()
+                const remainder = trimmed.slice(breakPoint).trim()
+
+                try {
+                  const msg = await textChannel.messages.fetch(streaming.messageId)
+                  await msg.edit(toKeep.slice(0, DISCORD_MAX_LENGTH))
+                } catch (err) {
+                  console.error('discord: failed to edit streaming message:', err)
+                }
+                streamingMessages.delete(sessionId)
+
+                buffer = remainder
+                messageBuffers.set(sessionId, buffer)
+              }
+
+              // send overflow in chunks
+              while (buffer.trim().length > DISCORD_MAX_LENGTH) {
+                const breakPoint = findBreakPoint(buffer.trim(), DISCORD_MAX_LENGTH)
+                const chunk = buffer.trim().slice(0, breakPoint).trim()
+                buffer = buffer.trim().slice(breakPoint).trim()
+                messageBuffers.set(sessionId, buffer)
+                await textChannel.send(chunk.slice(0, DISCORD_MAX_LENGTH))
+              }
+
+              // start tracking the last chunk as the new streaming message
+              if (buffer.trim()) {
+                const msg = await textChannel.send(buffer.trim().slice(0, DISCORD_MAX_LENGTH))
+                streamingMessages.set(sessionId, { messageId: msg.id, channelId, sentLength: buffer.trim().length, lastEditTime: now })
+              }
             }
-
-            // show typing indicator if more content is coming
-            if (moreToFollow) {
-              textChannel.sendTyping().catch(() => {})
-            }
-
-            return messages[0] // return first message for tracking
           }
 
           // handle queued/dequeued control messages (reaction management)
@@ -876,27 +948,29 @@ export default function create(serverContext?: ServerContext): Plugin {
             buffer += message.text
             messageBuffers.set(sessionId, buffer)
 
-            // look for complete paragraphs to send (double newline)
-            while (true) {
-              const paraBreak = buffer.indexOf('\n\n')
-              if (paraBreak !== -1) {
-                const toSend = buffer.slice(0, paraBreak)
-                buffer = buffer.slice(paraBreak + 2)
-                messageBuffers.set(sessionId, buffer)
-                const hasMore = buffer.trim().length > 0
-                await sendMessage(toSend, hasMore)
-                continue
-              }
-              break
+            const streaming = streamingMessages.get(sessionId)
+
+            if (buffer.trim().length > DISCORD_MAX_LENGTH) {
+              // exceeds discord limit — flush immediately to split
+              await flushStreamingBuffer()
+            } else if (!streaming) {
+              // first chunk — send immediately so the user sees something right away
+              await flushStreamingBuffer()
+            } else if (Date.now() - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
+              // throttle: only edit if at least 1s since last edit
+              await flushStreamingBuffer()
             }
+            // otherwise: buffer accumulates, will be flushed on next interval or at end
           } else if (message.type === 'text_block_end') {
-            // flush remaining buffer when text block ends
-            const buffer = messageBuffers.get(sessionId) || ''
-            if (buffer.trim()) {
-              await sendMessage(buffer, false)
-              messageBuffers.delete(sessionId)
-            }
+            // finalize: do a final edit with complete content
+            await flushStreamingBuffer()
+            streamingMessages.delete(sessionId)
+            messageBuffers.delete(sessionId)
           } else if (message.type === 'tool_use') {
+            // finalize any in-progress streaming message before showing tool use
+            if (streamingMessages.has(sessionId)) {
+              await finalizeStreamingMessage()
+            }
             // calculate input tokens
             const inputStr = typeof message.input === 'string'
               ? message.input
@@ -1039,12 +1113,8 @@ export default function create(serverContext?: ServerContext): Plugin {
             if (config?.condenseToolCalls) {
               await flushToolBatch(sessionId, textChannel)
             }
-            // flush remaining text buffer
-            const buffer = messageBuffers.get(sessionId) || ''
-            if (buffer.trim()) {
-              await sendMessage(buffer, false)
-            }
-            messageBuffers.delete(sessionId)
+            // finalize any streaming message with remaining buffer
+            await finalizeStreamingMessage()
             sendLocks.delete(sessionId)
             stopTyping(channelId)
             // clean up any stale queued reactions for this channel

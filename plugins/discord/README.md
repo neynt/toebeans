@@ -27,8 +27,13 @@ incoming messages are annotated with context:
 
 ## output formatting
 
-text responses are buffered and sent paragraph-by-paragraph (split on `\n\n`)
-with a human-like typing delay. messages over 2000 chars are auto-split.
+text responses stream into a single discord message per assistant turn, edited
+in-place roughly every 1 second as more text arrives. the first chunk is sent
+immediately, then subsequent content updates the same message via edits. this
+avoids the choppy multi-message behavior of splitting on paragraph boundaries.
+if a response exceeds discord's 2000-char limit, the current message is
+finalized at a clean break point (\n\n > \n > space) and a new message is
+started for the remainder.
 
 tool calls appear as inline code: `` `🔧 toolname: brief (tokens)` ``, updated
 with ✅/❌ and token counts when results arrive.
