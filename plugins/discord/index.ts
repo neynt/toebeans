@@ -14,7 +14,7 @@ import http from 'http'
 
 // --- constants for streaming output ---
 export const DISCORD_MAX_LENGTH = 2000
-export const STREAM_EDIT_INTERVAL_MS = 1000
+export const STREAM_EDIT_INTERVAL_MS = 2000
 
 // find a good break point at or before maxLen (prefer \n\n, then \n, then space)
 export function findBreakPoint(text: string, maxLen: number): number {
@@ -323,6 +323,8 @@ export default function create(serverContext?: ServerContext): Plugin {
   const messageBuffers = new Map<string, string>()
   // track the current streaming Discord message per session (edit-in-place)
   const streamingMessages = new Map<string, { messageId: string; channelId: string; sentLength: number; lastEditTime: number }>()
+  // track when text buffering started per session (for delaying initial message send)
+  const streamStartTimes = new Map<string, number>()
   // track queued reactions per channel: channelId -> discordMessageId (for ⏳ reaction management)
   const queuedReactions = new Map<string, string>()
   // track tool use messages by tool_use_id so we can edit them (non-condensed mode)
@@ -839,6 +841,7 @@ export default function create(serverContext?: ServerContext): Plugin {
             }
             streamingMessages.delete(sessionId)
             messageBuffers.delete(sessionId)
+            streamStartTimes.delete(sessionId)
           }
 
           // send or edit the streaming message with current buffer contents.
@@ -948,16 +951,24 @@ export default function create(serverContext?: ServerContext): Plugin {
             buffer += message.text
             messageBuffers.set(sessionId, buffer)
 
+            // track when buffering started (for delaying initial message)
+            if (!streamStartTimes.has(sessionId)) {
+              streamStartTimes.set(sessionId, Date.now())
+            }
+
             const streaming = streamingMessages.get(sessionId)
+            const now = Date.now()
 
             if (buffer.trim().length > DISCORD_MAX_LENGTH) {
               // exceeds discord limit — flush immediately to split
               await flushStreamingBuffer()
             } else if (!streaming) {
-              // first chunk — send immediately so the user sees something right away
-              await flushStreamingBuffer()
-            } else if (Date.now() - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
-              // throttle: only edit if at least 1s since last edit
+              // no message sent yet — only send after initial delay
+              if (now - streamStartTimes.get(sessionId)! >= STREAM_EDIT_INTERVAL_MS) {
+                await flushStreamingBuffer()
+              }
+            } else if (now - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
+              // throttle: only edit if at least 2s since last edit
               await flushStreamingBuffer()
             }
             // otherwise: buffer accumulates, will be flushed on next interval or at end
@@ -966,6 +977,7 @@ export default function create(serverContext?: ServerContext): Plugin {
             await flushStreamingBuffer()
             streamingMessages.delete(sessionId)
             messageBuffers.delete(sessionId)
+            streamStartTimes.delete(sessionId)
           } else if (message.type === 'tool_use') {
             // finalize any in-progress streaming message before showing tool use
             if (streamingMessages.has(sessionId)) {

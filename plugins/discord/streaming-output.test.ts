@@ -48,15 +48,17 @@ describe('streaming output constants', () => {
     expect(DISCORD_MAX_LENGTH).toBe(2000)
   })
 
-  test('STREAM_EDIT_INTERVAL_MS is 1000', () => {
-    expect(STREAM_EDIT_INTERVAL_MS).toBe(1000)
+  test('STREAM_EDIT_INTERVAL_MS is 2000', () => {
+    expect(STREAM_EDIT_INTERVAL_MS).toBe(2000)
   })
 })
 
 // integration-style tests for the streaming behavior using mock Discord objects
 describe('streaming output behavior', () => {
   // helper to create a mock discord plugin output pipeline
-  function createMockOutput() {
+  // nowFn allows tests to control time
+  function createMockOutput(nowFn?: () => number) {
+    const getNow = nowFn || (() => Date.now())
     const sentMessages: Array<{ id: string; content: string; edits: string[] }> = []
     let nextId = 1
 
@@ -91,6 +93,7 @@ describe('streaming output behavior', () => {
     // simulate the streaming output logic from the plugin
     const messageBuffers = new Map<string, string>()
     const streamingMessages = new Map<string, { messageId: string; sentLength: number; lastEditTime: number }>()
+    const streamStartTimes = new Map<string, number>()
 
     const flushStreamingBuffer = async (sessionId: string) => {
       let buffer = messageBuffers.get(sessionId) || ''
@@ -98,7 +101,7 @@ describe('streaming output behavior', () => {
       if (!trimmed) return
 
       const streaming = streamingMessages.get(sessionId)
-      const now = Date.now()
+      const now = getNow()
 
       if (trimmed.length <= DISCORD_MAX_LENGTH) {
         if (streaming) {
@@ -146,45 +149,93 @@ describe('streaming output behavior', () => {
       buffer += text
       messageBuffers.set(sessionId, buffer)
 
+      if (!streamStartTimes.has(sessionId)) {
+        streamStartTimes.set(sessionId, getNow())
+      }
+
       const streaming = streamingMessages.get(sessionId)
+      const now = getNow()
 
       if (buffer.trim().length > DISCORD_MAX_LENGTH) {
         await flushStreamingBuffer(sessionId)
       } else if (!streaming) {
-        await flushStreamingBuffer(sessionId)
-      } else if (Date.now() - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
+        // no message sent yet — only send after initial delay
+        if (now - streamStartTimes.get(sessionId)! >= STREAM_EDIT_INTERVAL_MS) {
+          await flushStreamingBuffer(sessionId)
+        }
+      } else if (now - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
         await flushStreamingBuffer(sessionId)
       }
     }
 
     const finalizeStreamingMessage = async (sessionId: string) => {
-      const streaming = streamingMessages.get(sessionId)
-      const buffer = messageBuffers.get(sessionId) || ''
-      if (streaming && buffer.trim()) {
-        const msg = await mockChannel.messages.fetch(streaming.messageId)
-        await msg.edit(buffer.trim().slice(0, DISCORD_MAX_LENGTH))
-      }
+      await flushStreamingBuffer(sessionId)
       streamingMessages.delete(sessionId)
       messageBuffers.delete(sessionId)
+      streamStartTimes.delete(sessionId)
     }
 
-    return { sentMessages, handleText, finalizeStreamingMessage, flushStreamingBuffer, messageBuffers, streamingMessages }
+    return { sentMessages, handleText, finalizeStreamingMessage, flushStreamingBuffer, messageBuffers, streamingMessages, streamStartTimes }
   }
 
-  test('short response produces a single message that gets edited', async () => {
+  test('first text chunk is buffered, not sent immediately', async () => {
+    const { sentMessages, handleText } = createMockOutput()
+    const sid = 'test-session'
+
+    await handleText(sid, 'Hi')
+    expect(sentMessages).toHaveLength(0) // not sent yet — waiting for delay
+  })
+
+  test('short response finalized before delay sends single message', async () => {
     const { sentMessages, handleText, finalizeStreamingMessage } = createMockOutput()
     const sid = 'test-session'
 
-    await handleText(sid, 'Hello ')
-    expect(sentMessages).toHaveLength(1)
-    expect(sentMessages[0]!.content).toBe('Hello')
+    await handleText(sid, 'Hello world!')
+    expect(sentMessages).toHaveLength(0) // buffered
 
-    await handleText(sid, 'world!\n\nSecond paragraph.')
-    // should still be 1 message — no splitting on \n\n
-    // (might not edit yet due to throttle, but finalize will)
     await finalizeStreamingMessage(sid)
     expect(sentMessages).toHaveLength(1)
-    expect(sentMessages[0]!.content).toBe('Hello world!\n\nSecond paragraph.')
+    expect(sentMessages[0]!.content).toBe('Hello world!')
+    expect(sentMessages[0]!.edits).toHaveLength(0) // sent fresh, no edits needed
+  })
+
+  test('initial message sent after delay elapses', async () => {
+    let now = 1000
+    const { sentMessages, handleText } = createMockOutput(() => now)
+    const sid = 'test-session'
+
+    await handleText(sid, 'Hello ')
+    expect(sentMessages).toHaveLength(0)
+
+    // advance time past the interval
+    now = 1000 + STREAM_EDIT_INTERVAL_MS
+    await handleText(sid, 'world')
+    expect(sentMessages).toHaveLength(1)
+    expect(sentMessages[0]!.content).toBe('Hello world')
+  })
+
+  test('subsequent edits throttled to 2s intervals', async () => {
+    let now = 1000
+    const { sentMessages, handleText } = createMockOutput(() => now)
+    const sid = 'test-session'
+
+    await handleText(sid, 'Hello ')
+    // advance past initial delay to send first message
+    now = 1000 + STREAM_EDIT_INTERVAL_MS
+    await handleText(sid, 'world ')
+    expect(sentMessages).toHaveLength(1)
+    expect(sentMessages[0]!.edits).toHaveLength(0)
+
+    // still within 2s of last edit — should NOT trigger edit
+    now = 1000 + STREAM_EDIT_INTERVAL_MS + 500
+    await handleText(sid, 'foo ')
+    expect(sentMessages[0]!.edits).toHaveLength(0)
+
+    // past 2s from last edit — should trigger edit
+    now = 1000 + STREAM_EDIT_INTERVAL_MS * 2
+    await handleText(sid, 'bar')
+    expect(sentMessages[0]!.edits).toHaveLength(1)
+    expect(sentMessages[0]!.content).toBe('Hello world foo bar')
   })
 
   test('multi-paragraph response stays as single message', async () => {
@@ -213,33 +264,10 @@ describe('streaming output behavior', () => {
     expect(sentMessages.length).toBeGreaterThanOrEqual(2)
     // all content should be preserved
     const totalContent = sentMessages.map(m => m.content).join('')
-    // just check the chars are all there (trimming may remove some whitespace)
     expect(totalContent.replace(/\s/g, '').length).toBe(3000)
   })
 
-  test('first text chunk creates message immediately', async () => {
-    const { sentMessages, handleText } = createMockOutput()
-    const sid = 'test-session'
-
-    await handleText(sid, 'Hi')
-    expect(sentMessages).toHaveLength(1)
-    expect(sentMessages[0]!.content).toBe('Hi')
-  })
-
-  test('subsequent chunks within 1s are buffered (not edited immediately)', async () => {
-    const { sentMessages, handleText } = createMockOutput()
-    const sid = 'test-session'
-
-    await handleText(sid, 'Hello ')
-    expect(sentMessages).toHaveLength(1)
-    expect(sentMessages[0]!.edits).toHaveLength(0)
-
-    // second chunk within 1s — should NOT trigger edit
-    await handleText(sid, 'world')
-    expect(sentMessages[0]!.edits).toHaveLength(0) // not edited yet
-  })
-
-  test('finalize edits message with complete content', async () => {
+  test('finalize sends buffered content even if no message was sent yet', async () => {
     const { sentMessages, handleText, finalizeStreamingMessage } = createMockOutput()
     const sid = 'test-session'
 
@@ -247,9 +275,20 @@ describe('streaming output behavior', () => {
     await handleText(sid, 'part two ')
     await handleText(sid, 'part three')
 
+    expect(sentMessages).toHaveLength(0) // all buffered
+
     await finalizeStreamingMessage(sid)
     expect(sentMessages).toHaveLength(1)
     expect(sentMessages[0]!.content).toBe('part one part two part three')
-    expect(sentMessages[0]!.edits.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('long response exceeding limit flushes immediately even before delay', async () => {
+    const { sentMessages, handleText } = createMockOutput()
+    const sid = 'test-session'
+
+    // send >2000 chars in one go — should flush immediately regardless of delay
+    const longText = 'a'.repeat(2100)
+    await handleText(sid, longText)
+    expect(sentMessages.length).toBeGreaterThanOrEqual(1)
   })
 })

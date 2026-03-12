@@ -28,8 +28,9 @@ incoming messages are annotated with context:
 ## output formatting
 
 text responses stream into a single discord message per assistant turn, edited
-in-place roughly every 1 second as more text arrives. the first chunk is sent
-immediately, then subsequent content updates the same message via edits. this
+in-place roughly every 2 seconds as more text arrives. the initial message is
+delayed ~2 seconds to avoid a flickery one-character stub; if the response
+completes before the delay, the full text is sent as a single message. this
 avoids the choppy multi-message behavior of splitting on paragraph boundaries.
 if a response exceeds discord's 2000-char limit, the current message is
 finalized at a clean break point (\n\n > \n > space) and a new message is
