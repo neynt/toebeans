@@ -123,7 +123,7 @@ async function gmailDelete(path: string): Promise<void> {
   }
 }
 
-function encodeBase64Url(str: string): string {
+export function encodeBase64Url(str: string): string {
   return Buffer.from(str, 'utf-8')
     .toString('base64')
     .replace(/\+/g, '-')
@@ -180,16 +180,16 @@ async function buildMessage(params: ComposeParams): Promise<{ raw: string; threa
   return { raw: encodeBase64Url(lines.join('\r\n')), threadId }
 }
 
-function getHeader(headers: { name: string; value: string }[], name: string): string {
+export function getHeader(headers: { name: string; value: string }[], name: string): string {
   return headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value ?? ''
 }
 
-function decodeBase64Url(data: string): string {
+export function decodeBase64Url(data: string): string {
   const base64 = data.replace(/-/g, '+').replace(/_/g, '/')
   return Buffer.from(base64, 'base64').toString('utf-8')
 }
 
-function stripHtml(html: string): string {
+export function stripHtml(html: string): string {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -207,7 +207,7 @@ function stripHtml(html: string): string {
     .trim()
 }
 
-function extractBody(payload: any): string {
+export function extractBody(payload: any): string {
   // direct body
   if (payload.body?.data) {
     const decoded = decodeBase64Url(payload.body.data)
