@@ -10,8 +10,8 @@ read, search, compose, and send gmail via OAuth2. full draft lifecycle managemen
 | `gmail_read` | fetch full message by id. extracts plain text from multipart MIME, falls back to stripped HTML. |
 | `gmail_drafts_list` | list drafts with optional search query. returns draft id, message id, to, subject, date, snippet. |
 | `gmail_draft_read` | read a draft's full content by draft id. returns headers and body. |
-| `gmail_draft_create` | create a new draft. supports replies via `in_reply_to` (preserves threading). returns draft id. |
-| `gmail_draft_update` | update an existing draft in place by draft id. replaces all content; draft id is preserved. |
+| `gmail_draft_create` | create a new draft. supports plain text and optional HTML (multipart/alternative). supports replies via `in_reply_to`. returns draft id. |
+| `gmail_draft_update` | update an existing draft in place by draft id. same compose params as create; draft id is preserved. |
 | `gmail_draft_delete` | permanently delete a draft by draft id. |
 | `gmail_send` | send an email directly. same compose parameters as `gmail_draft_create`. |
 | `gmail_labels` | list all labels with their ids and names. |
@@ -32,13 +32,19 @@ draft ids and message ids are different things. `gmail_drafts_list` and `gmail_d
 
 both `gmail_draft_create` and `gmail_draft_update` accept `in_reply_to` (a message id). when set, the tool fetches the original message's `Message-ID` header and `threadId`, then adds `In-Reply-To` and `References` headers so gmail threads the reply correctly. the subject is auto-prefixed with "Re: " if needed.
 
+### html emails
+
+`gmail_draft_create`, `gmail_draft_update`, and `gmail_send` accept an optional `html_body` parameter. when provided, the email is constructed as `multipart/alternative` with both `text/plain` and `text/html` parts. the plain `body` is always required and serves as the fallback for clients that can't render HTML.
+
+when `html_body` is omitted, emails are sent as plain `text/plain` — no behavioral change from before.
+
 ## how it works
 
 authenticates via OAuth2 refresh token. access tokens are cached in memory and auto-refreshed with a 30-second expiry buffer.
 
 `gmail_search` fetches matching message ids, then batch-fetches metadata headers for each result. `gmail_read` fetches the full message and walks the MIME tree — prefers `text/plain`, falls back to `text/html` with tag stripping, handles nested multipart.
 
-draft and send tools build RFC 2822 messages and base64url-encode them. the Gmail API's drafts endpoint supports POST (create), PUT (update), GET (read), and DELETE operations, all of which are exposed.
+draft and send tools build RFC 2822 messages and base64url-encode them. when `html_body` is provided, the message uses `multipart/alternative` with both text/plain and text/html parts; otherwise it's plain text/plain. the Gmail API's drafts endpoint supports POST (create), PUT (update), GET (read), and DELETE operations, all of which are exposed.
 
 ## setup
 
