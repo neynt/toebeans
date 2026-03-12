@@ -135,12 +135,13 @@ interface ComposeParams {
   to: string
   subject: string
   body: string
+  html_body?: string
   cc?: string
   bcc?: string
   in_reply_to?: string
 }
 
-async function buildMessage(params: ComposeParams): Promise<{ raw: string; threadId?: string }> {
+export async function buildMessage(params: ComposeParams): Promise<{ raw: string; threadId?: string }> {
   const lines: string[] = [
     `From: Jim Zhang <hyriodula@gmail.com>`,
     `To: ${params.to}`,
@@ -173,9 +174,27 @@ async function buildMessage(params: ComposeParams): Promise<{ raw: string; threa
   }
 
   lines.push(`Subject: ${subject}`)
-  lines.push(`Content-Type: text/plain; charset="UTF-8"`)
-  lines.push(``)
-  lines.push(params.body)
+  lines.push(`MIME-Version: 1.0`)
+
+  if (params.html_body) {
+    // multipart/alternative with both text/plain and text/html
+    const boundary = `----toebeans_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+    lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`)
+    lines.push(``)
+    lines.push(`--${boundary}`)
+    lines.push(`Content-Type: text/plain; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.body)
+    lines.push(`--${boundary}`)
+    lines.push(`Content-Type: text/html; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.html_body)
+    lines.push(`--${boundary}--`)
+  } else {
+    lines.push(`Content-Type: text/plain; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.body)
+  }
 
   return { raw: encodeBase64Url(lines.join('\r\n')), threadId }
 }
@@ -493,13 +512,14 @@ const tools: Tool[] = [
   },
   {
     name: 'gmail_draft_create',
-    description: 'Create a new draft email in Gmail. Returns the new draft ID. To update an existing draft, use gmail_draft_update instead.',
+    description: 'Create a new draft email in Gmail. Returns the new draft ID. Supports plain text and optional HTML (sends multipart/alternative). To update an existing draft, use gmail_draft_update instead.',
     inputSchema: {
       type: 'object',
       properties: {
         to: { type: 'string', description: 'Recipient email address(es)' },
         subject: { type: 'string', description: 'Email subject' },
-        body: { type: 'string', description: 'Email body (plain text)' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
         cc: { type: 'string', description: 'CC recipients (optional)' },
         bcc: { type: 'string', description: 'BCC recipients (optional)' },
         in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId for threading.' },
@@ -522,14 +542,15 @@ const tools: Tool[] = [
   },
   {
     name: 'gmail_draft_update',
-    description: 'Update an existing Gmail draft in place, replacing its content. The draft keeps the same draft ID. Use gmail_draft_read to see current content first.',
+    description: 'Update an existing Gmail draft in place, replacing its content. The draft keeps the same draft ID. Supports plain text and optional HTML (sends multipart/alternative). Use gmail_draft_read to see current content first.',
     inputSchema: {
       type: 'object',
       properties: {
         draft_id: { type: 'string', description: 'The draft ID to update (from gmail_drafts_list or gmail_draft_create)' },
         to: { type: 'string', description: 'Recipient email address(es)' },
         subject: { type: 'string', description: 'Email subject' },
-        body: { type: 'string', description: 'Email body (plain text)' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
         cc: { type: 'string', description: 'CC recipients (optional)' },
         bcc: { type: 'string', description: 'BCC recipients (optional)' },
         in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId for threading.' },
@@ -573,13 +594,14 @@ const tools: Tool[] = [
   },
   {
     name: 'gmail_send',
-    description: 'Send an email directly via Gmail.',
+    description: 'Send an email directly via Gmail. Supports plain text and optional HTML (sends multipart/alternative).',
     inputSchema: {
       type: 'object',
       properties: {
         to: { type: 'string', description: 'Recipient email address(es)' },
         subject: { type: 'string', description: 'Email subject' },
-        body: { type: 'string', description: 'Email body (plain text)' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
         cc: { type: 'string', description: 'CC recipients (optional)' },
         bcc: { type: 'string', description: 'BCC recipients (optional)' },
         in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId.' },
