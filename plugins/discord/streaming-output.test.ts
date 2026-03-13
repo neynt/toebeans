@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { findBreakPoint, DISCORD_MAX_LENGTH, STREAM_EDIT_INTERVAL_MS } from './index.ts'
+import { findBreakPoint, DISCORD_MAX_LENGTH, STREAM_EDIT_INTERVAL_MS, renderToolBatch, type ToolBatchEntry } from './index.ts'
 
 describe('findBreakPoint', () => {
   test('returns text length when text fits within maxLen', () => {
@@ -290,5 +290,66 @@ describe('streaming output behavior', () => {
     const longText = 'a'.repeat(2100)
     await handleText(sid, longText)
     expect(sentMessages.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('renderToolBatch', () => {
+  test('wraps output in fenced code block', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'bash', summary: 'ls', inputTokens: 10 },
+    ]
+    const result = renderToolBatch(batch, false)
+    expect(result).toStartWith('```\n')
+    expect(result).toEndWith('\n```')
+  })
+
+  test('header is inside the code block', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'bash', summary: 'ls', inputTokens: 10, resultTokens: 5 },
+    ]
+    const result = renderToolBatch(batch, true)
+    const lines = result.split('\n')
+    expect(lines[0]).toBe('```')
+    expect(lines[1]).toContain('🔧')
+    expect(lines[lines.length - 1]).toBe('```')
+  })
+
+  test('in-progress batch shows count', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'bash', summary: 'ls', inputTokens: 10, resultTokens: 5 },
+      { name: 'read_file', summary: '/foo.ts', inputTokens: 20 },
+    ]
+    const result = renderToolBatch(batch, false)
+    expect(result).toContain('1/2 done')
+    expect(result).toContain('⏳ read_file')
+    expect(result).toContain('✅ bash')
+  })
+
+  test('finished batch shows done', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'bash', summary: 'ls', inputTokens: 10, resultTokens: 5 },
+    ]
+    const result = renderToolBatch(batch, true)
+    expect(result).toContain('done — 1 tool')
+  })
+
+  test('errors shown with ❌ and error count', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'bash', summary: 'bad cmd', inputTokens: 10, resultTokens: 5, isError: true },
+      { name: 'read_file', summary: '/foo.ts', inputTokens: 20, resultTokens: 3 },
+    ]
+    const result = renderToolBatch(batch, true)
+    expect(result).toContain('❌ bash')
+    expect(result).toContain('1 failed')
+    expect(result).toContain('✅ read_file')
+  })
+
+  test('pluralizes tools correctly', () => {
+    const batch: ToolBatchEntry[] = [
+      { name: 'a', summary: '', inputTokens: 1, resultTokens: 1 },
+      { name: 'b', summary: '', inputTokens: 1, resultTokens: 1 },
+    ]
+    const result = renderToolBatch(batch, true)
+    expect(result).toContain('done — 2 tools')
   })
 })
