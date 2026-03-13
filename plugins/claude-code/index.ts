@@ -4,6 +4,7 @@ import { mkdir, readdir, stat, symlink, access } from 'node:fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getDataDir } from '../../server/session.ts'
+import { expandTilde } from '../../server/paths.ts'
 
 const LOG_DIR = join(getDataDir(), 'claude-code')
 const PENDING_PATH = join(LOG_DIR, 'pending.json')
@@ -343,7 +344,7 @@ export default function create(): Plugin {
     // handle worktree merge if applicable
     if (meta.worktree && meta.originalWorkingDir) {
       const wtBase = config?.worktreeBase
-        ? config.worktreeBase.replace(/^~/, homedir())
+        ? expandTilde(config.worktreeBase)
         : join(homedir(), 'code', 'toebeans-wt')
       const mergeMsg = await handleWorktreeMerge(
         meta.worktree, meta.originalWorkingDir, meta.sessionId, taskPreview, logPath, status, wtBase,
@@ -450,7 +451,7 @@ export default function create(): Plugin {
             }
 
             const worktreeBase = config?.worktreeBase
-              ? config.worktreeBase.replace(/^~/, homedir())
+              ? expandTilde(config.worktreeBase)
               : join(homedir(), 'code', 'toebeans-wt')
             const worktreePath = join(worktreeBase, worktree)
             await mkdir(worktreeBase, { recursive: true })
@@ -611,7 +612,7 @@ export default function create(): Plugin {
               // handle worktree merge if applicable
               if (worktree && meta.originalWorkingDir) {
                 const wtBase = config?.worktreeBase
-                  ? config.worktreeBase.replace(/^~/, homedir())
+                  ? expandTilde(config.worktreeBase)
                   : join(homedir(), 'code', 'toebeans-wt')
                 const mergeMsg = await handleWorktreeMerge(
                   worktree, meta.originalWorkingDir, sessionId, taskPreview, logPath, status, wtBase,
