@@ -199,7 +199,7 @@ export function createSessionManager(
         const costStr = `$${oldSessionCost.toFixed(2)}`
         await routeOutput(config.notifyOnRestart, {
           type: 'text',
-          text: `🔄 \`compacted\` old: \`${sessionId}\` → new: \`${newId}\` (${formattedBefore} → ${formattedAfter} tokens, old session cost: ${costStr})`
+          text: `\`\`\`\n🔄 compacted old: ${sessionId} → new: ${newId} (${formattedBefore} → ${formattedAfter} tokens, old session cost: ${costStr})\n\`\`\``
         })
         await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
       } catch (err) {
@@ -290,7 +290,7 @@ export function createSessionManager(
           const costStr = `$${oldSessionCost.toFixed(2)}`
           await routeOutput(config.notifyOnRestart, {
             type: 'text',
-            text: `🧹 \`reset\` old: \`${sessionId}\` → new: \`${newId}\` (old session cost: ${costStr})`
+            text: `\`\`\`\n🧹 reset old: ${sessionId} → new: ${newId} (old session cost: ${costStr})\n\`\`\``
           })
           await routeOutput(config.notifyOnRestart, { type: 'text_block_end' })
         } catch (err) {

@@ -16,6 +16,40 @@ import http from 'http'
 export const DISCORD_MAX_LENGTH = 2000
 export const STREAM_EDIT_INTERVAL_MS = 2000
 
+// render a condensed batch summary as a fenced code block
+export type ToolBatchEntry = { name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }
+export function renderToolBatch(batch: ToolBatchEntry[], finished: boolean): string {
+  const completed = batch.filter(t => t.resultTokens !== undefined).length
+  const errors = batch.filter(t => t.isError).length
+
+  // per-tool lines with status indicators
+  const lines: string[] = []
+  for (const t of batch) {
+    let status: string
+    if (t.resultTokens !== undefined) {
+      status = t.isError ? '❌' : '✅'
+    } else {
+      status = '⏳'
+    }
+    let line = `${status} ${t.name}`
+    if (t.summary) line += `: ${t.summary}`
+    const tokens = t.resultTokens !== undefined
+      ? `${t.inputTokens}+${t.resultTokens}`
+      : `${t.inputTokens}`
+    line += ` (${tokens} tok)`
+    lines.push(line)
+  }
+
+  const errorNote = errors > 0 ? ` | ${errors} failed` : ''
+  const statusLabel = finished
+    ? `done — ${completed} tool${completed !== 1 ? 's' : ''}${errorNote}`
+    : `${completed}/${batch.length} done${errorNote}`
+
+  const header = `🔧 [${statusLabel}]`
+  const body = lines.join('\n')
+  return `\`\`\`\n${header}\n${body}\n\`\`\``.slice(0, 2000)
+}
+
 // find a good break point at or before maxLen (prefer \n\n, then \n, then space)
 export function findBreakPoint(text: string, maxLen: number): number {
   if (text.length <= maxLen) return text.length
@@ -696,39 +730,6 @@ export default function create(serverContext?: ServerContext): Plugin {
     }
   }
 
-  // render a condensed batch summary as a string (for live progress message)
-  function renderToolBatch(batch: Array<{ name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }>, finished: boolean): string {
-    const completed = batch.filter(t => t.resultTokens !== undefined).length
-    const errors = batch.filter(t => t.isError).length
-
-    // per-tool lines with status indicators
-    const lines: string[] = []
-    for (const t of batch) {
-      let status: string
-      if (t.resultTokens !== undefined) {
-        status = t.isError ? '❌' : '✅'
-      } else {
-        status = '⏳'
-      }
-      let line = `${status} ${t.name}`
-      if (t.summary) line += `: ${t.summary}`
-      const tokens = t.resultTokens !== undefined
-        ? `${t.inputTokens}+${t.resultTokens}`
-        : `${t.inputTokens}`
-      line += ` (${tokens} tok)`
-      lines.push(line)
-    }
-
-    const errorNote = errors > 0 ? ` | ${errors} failed` : ''
-    const statusLabel = finished
-      ? `done — ${completed} tool${completed !== 1 ? 's' : ''}${errorNote}`
-      : `${completed}/${batch.length} done${errorNote}`
-
-    const header = `🔧 [${statusLabel}]`
-    const body = lines.join('\n')
-    return `${header}\n\`\`\`\n${body}\n\`\`\``.slice(0, 2000)
-  }
-
   // send or edit the live progress message for condensed mode
   async function updateLiveProgress(sessionId: string, textChannel: TextChannel | DMChannel, finished: boolean) {
     const batch = pendingToolBatches.get(sessionId)
@@ -1076,7 +1077,7 @@ export default function create(serverContext?: ServerContext): Plugin {
               toolMessage += ` (${inputTokens} tokens)`
               toolMessage = toolMessage.replaceAll('`', "'")
 
-              const msg = await textChannel.send(`\`${toolMessage}\``)
+              const msg = await textChannel.send(`\`\`\`\n${toolMessage}\n\`\`\``)
               toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
             }
           } else if (message.type === 'tool_result') {
@@ -1114,7 +1115,7 @@ export default function create(serverContext?: ServerContext): Plugin {
                   .replace(/^🔧/, status)
                   .replace(/ \(.*? tokens\)$/, ` (${toolInfo.inputTokens} + ${resultTokens} tokens)`)
 
-                await msg.edit(`\`${newContent}\``)
+                await msg.edit(`\`\`\`\n${newContent}\n\`\`\``)
                 toolMessages.delete(message.tool_use_id)
               } catch (err) {
                 console.error('failed to edit tool message:', err)
