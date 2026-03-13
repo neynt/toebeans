@@ -1,4 +1,5 @@
 import { homedir } from 'os'
+import { join } from 'path'
 
 /**
  * Expand a leading `~` or `~/` in a path string to the user's home directory.
@@ -8,6 +9,15 @@ export function expandTilde(path: string): string {
   if (path === '~') return homedir()
   if (path.startsWith('~/')) return homedir() + path.slice(1)
   return path
+}
+
+/**
+ * Resolve the worktree base directory from an optional config value.
+ * Expands `~` if present, falls back to `~/code/toebeans-wt`.
+ */
+export function resolveWorktreeBase(configured: string | undefined): string {
+  if (configured) return expandTilde(configured)
+  return join(homedir(), 'code', 'toebeans-wt')
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test'
-import { expandTilde, expandTildeInFields } from './paths.ts'
+import { expandTilde, expandTildeInFields, resolveWorktreeBase } from './paths.ts'
 import { homedir } from 'os'
+import { join } from 'path'
 
 const HOME = homedir()
 
@@ -83,5 +84,28 @@ describe('expandTildeInFields', () => {
     expect(expandTildeInFields('string', ['field'])).toBe('string')
     expect(expandTildeInFields(null, ['field'])).toBe(null)
     expect(expandTildeInFields(42, ['field'])).toBe(42)
+  })
+})
+
+describe('resolveWorktreeBase', () => {
+  test('expands tilde in configured value', () => {
+    expect(resolveWorktreeBase('~/my-worktrees')).toBe(`${HOME}/my-worktrees`)
+  })
+
+  test('returns absolute configured value as-is', () => {
+    expect(resolveWorktreeBase('/tmp/worktrees')).toBe('/tmp/worktrees')
+  })
+
+  test('returns default when undefined', () => {
+    expect(resolveWorktreeBase(undefined)).toBe(join(HOME, 'code', 'toebeans-wt'))
+  })
+
+  test('returns default when empty string', () => {
+    // empty string is falsy, so falls through to default
+    expect(resolveWorktreeBase('')).toBe(join(HOME, 'code', 'toebeans-wt'))
+  })
+
+  test('expands bare tilde', () => {
+    expect(resolveWorktreeBase('~')).toBe(HOME)
   })
 })
