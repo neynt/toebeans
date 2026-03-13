@@ -385,3 +385,110 @@ describe('runAgentTurn queued message handling', () => {
     expect(savedMessages.indexOf(queuedMsg!)).toBeGreaterThan(savedMessages.indexOf(toolResultMsg!))
   })
 })
+
+describe('pathFields tilde expansion', () => {
+  setupSessionMock()
+
+  function makeMockProvider(responses: StreamChunk[][]): LlmProvider {
+    let callCount = 0
+    return {
+      name: 'mock',
+      async *stream() {
+        const chunks = responses[callCount++] || []
+        for (const chunk of chunks) {
+          yield chunk
+        }
+      },
+    }
+  }
+
+  test('tool with pathFields receives expanded ~ in input', async () => {
+    const receivedInputs: unknown[] = []
+    setupSessionMock({
+      appendMessage: async () => {},
+    })
+
+    const provider = makeMockProvider([
+      [
+        { type: 'tool_use', id: 'tu_1', name: 'test_tool', input: { workingDir: '~/projects/foo', task: 'build' } },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+      [
+        { type: 'text', text: 'done' },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+    ])
+
+    const { homedir } = await import('os')
+    const HOME = homedir()
+
+    await runAgentTurn(
+      [{ type: 'text', text: 'go' }],
+      {
+        provider,
+        system: async () => 'test',
+        tools: () => [{
+          name: 'test_tool',
+          description: 'test',
+          inputSchema: { type: 'object', properties: {} },
+          pathFields: ['workingDir'],
+          execute: async (input) => {
+            receivedInputs.push(input)
+            return { content: 'ok' }
+          },
+        }],
+        sessionId: 'test-session',
+        workingDir: '/tmp',
+        model: 'claude-sonnet-4-5',
+      },
+    )
+
+    expect(receivedInputs).toHaveLength(1)
+    const input = receivedInputs[0] as { workingDir: string; task: string }
+    expect(input.workingDir).toBe(`${HOME}/projects/foo`)
+    expect(input.task).toBe('build')  // non-path fields unchanged
+  })
+
+  test('tool without pathFields does not expand ~', async () => {
+    const receivedInputs: unknown[] = []
+    setupSessionMock({
+      appendMessage: async () => {},
+    })
+
+    const provider = makeMockProvider([
+      [
+        { type: 'tool_use', id: 'tu_1', name: 'test_tool', input: { workingDir: '~/projects/foo' } },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+      [
+        { type: 'text', text: 'done' },
+        { type: 'usage', input: 100, output: 50 },
+      ],
+    ])
+
+    await runAgentTurn(
+      [{ type: 'text', text: 'go' }],
+      {
+        provider,
+        system: async () => 'test',
+        tools: () => [{
+          name: 'test_tool',
+          description: 'test',
+          inputSchema: { type: 'object', properties: {} },
+          // no pathFields declared
+          execute: async (input) => {
+            receivedInputs.push(input)
+            return { content: 'ok' }
+          },
+        }],
+        sessionId: 'test-session',
+        workingDir: '/tmp',
+        model: 'claude-sonnet-4-5',
+      },
+    )
+
+    expect(receivedInputs).toHaveLength(1)
+    const input = receivedInputs[0] as { workingDir: string }
+    expect(input.workingDir).toBe('~/projects/foo')  // not expanded
+  })
+})
