@@ -142,9 +142,11 @@ export function createSessionManager(
     // repair interrupted tool calls before sending to API
     const messages = repairMessages(rawMessages)
 
-    // fire pre-compaction hooks (plugins can extract knowledge, write logs, etc.)
+    // fire pre-compaction hooks in the background — they don't affect the summary,
+    // so we can generate the summary and unblock the new session without waiting.
     if (pluginManager) {
-      await pluginManager.firePreCompaction({ sessionId, route, messages, provider })
+      pluginManager.firePreCompaction({ sessionId, route, messages, provider })
+        .catch(err => console.error(`session-manager: pre-compaction hook error (session ${sessionId}):`, err))
     }
 
     // generate summary (and capture compaction LLM usage)
@@ -268,10 +270,11 @@ export function createSessionManager(
 
       const rawMessages = await loadSession(sessionId)
 
-      // fire pre-compaction hooks so plugins can extract knowledge
+      // fire pre-compaction hooks in the background so reset isn't blocked by slow plugins
       if (pluginManager && rawMessages.length > 0) {
         const messages = repairMessages(rawMessages)
-        await pluginManager.firePreCompaction({ sessionId, route, messages, provider })
+        pluginManager.firePreCompaction({ sessionId, route, messages, provider })
+          .catch(err => console.error(`session-manager: pre-compaction hook error during reset (session ${sessionId}):`, err))
       }
 
       // compute old session's total cost

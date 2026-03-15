@@ -520,6 +520,75 @@ describe('session-manager compaction', () => {
     expect(await getCurrentSessionId(testRoute)).toBe(result1)
   })
 
+  test('pre-compaction hooks run in background without blocking session switch', async () => {
+    // a slow onPreCompaction hook should NOT block the new session from being created.
+    // the compaction should return as soon as the summary is ready.
+    let hookStarted = false
+    let hookFinished = false
+    const hookPromise = new Promise<void>(resolve => {
+      var fakePluginManager = {
+        async firePreCompaction(_context: any) {
+          hookStarted = true
+          await new Promise(r => setTimeout(r, 200)) // slow hook
+          hookFinished = true
+          resolve()
+        },
+      }
+      Object.assign(fakePluginManager, { firePreCompaction: fakePluginManager.firePreCompaction })
+      // we'll pass this as pluginManager below
+      ;(globalThis as any).__testPluginManager = fakePluginManager
+    })
+
+    const pluginManager = (globalThis as any).__testPluginManager
+
+    const sm = createSessionManager(
+      fakeProvider('compacted'),
+      fakeConfig({ compactAtTokens: 100 }),
+      undefined,
+      pluginManager,
+    )
+    const sessionId = await sm.getSessionForMessage(testRoute)
+    await writeSessionFile(sessionId, bulkEntries(5))
+
+    const newId = await sm.forceCompact(sessionId, testRoute)
+
+    // compaction returned — new session is ready
+    expect(newId).not.toBe(sessionId)
+    expect(await getCurrentSessionId(testRoute)).toBe(newId)
+
+    // hook was started but hasn't finished yet (it's in the background)
+    expect(hookStarted).toBe(true)
+    expect(hookFinished).toBe(false)
+
+    // wait for hook to complete so we don't leak the promise
+    await hookPromise
+    expect(hookFinished).toBe(true)
+
+    delete (globalThis as any).__testPluginManager
+  })
+
+  test('pre-compaction hook errors are caught and do not break compaction', async () => {
+    const pluginManager = {
+      async firePreCompaction(_context: any) {
+        throw new Error('hook explosion')
+      },
+    }
+
+    const sm = createSessionManager(
+      fakeProvider('compacted'),
+      fakeConfig({ compactAtTokens: 100 }),
+      undefined,
+      pluginManager as any,
+    )
+    const sessionId = await sm.getSessionForMessage(testRoute)
+    await writeSessionFile(sessionId, bulkEntries(5))
+
+    // should not throw — error is caught internally
+    const newId = await sm.forceCompact(sessionId, testRoute)
+    expect(newId).not.toBe(sessionId)
+    expect(await getCurrentSessionId(testRoute)).toBe(newId)
+  })
+
   test('compaction with slow provider still atomically updates route map', async () => {
     // verifies that even with a slow LLM summary, the route map is updated
     // atomically after compaction completes, so no window exists where the
