@@ -18,6 +18,7 @@ import { setTimezone, formatLocalTime, getTimezone } from './time.ts'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { acquirePidfile, releasePidfile } from './pidfile.ts'
 
 // set up file logging — tee all console output to ~/.toebeans/server.log
 const LOG_DIR = join(homedir(), '.toebeans')
@@ -62,6 +63,12 @@ async function main() {
   console.log('toebeans server starting...')
 
   await ensureDataDirs()
+
+  // single-instance guard: exit if another live server holds the pidfile
+  if (!await acquirePidfile()) {
+    console.error('[server] another toebeans server instance is already running. exiting.')
+    process.exit(1)
+  }
   process.chdir(getWorkspaceDir())
   const config = await loadConfig()
   setTimezone(config.timezone)
@@ -881,6 +888,7 @@ async function main() {
     } catch (err) {
       console.error('[server] error during plugin cleanup:', err)
     }
+    await releasePidfile()
     process.exit(0)
   }
 
