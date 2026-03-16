@@ -12,12 +12,17 @@ Physical hardware plugin for toebeans. Connects to a Teensy 4.1 microcontroller 
 
 ## Firmware
 
-The teensy firmware is in `src/main.cpp` with `platformio.ini`. build and flash with:
+The teensy firmware is in `src/main.cpp` with `platformio.ini`.
+
+**Any change to `src/main.cpp` or `platformio.ini` requires reflashing the Teensy** — the firmware runs on the microcontroller, not the host. Software-side changes to `index.ts` take effect on server restart, but firmware changes do nothing until you upload.
+
+Build and flash:
 
 ```bash
-cd ~/.toebeans/plugins/teensy-embodiment
-pio run --target upload
+cd ~/.toebeans/plugins/teensy-embodiment && pio run --target upload
 ```
+
+The Teensy must be connected via USB. After flashing, the serial port reconnects automatically and the plugin will re-establish communication.
 
 ## Serial protocol
 
