@@ -11,7 +11,7 @@
 cd ~/.toebeans/plugins/teensy-embodiment && pio run --target upload
 ```
 
-The Teensy must be connected via USB (`/dev/ttyACM0`). The serial port reconnects automatically after flashing.
+The Teensy must be connected via USB. The plugin auto-discovers the port via `/dev/serial/by-id/` and reconnects automatically after flashing (even if the device re-enumerates to a different `/dev/ttyACMn`).
 
 ## What lives where
 

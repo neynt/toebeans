@@ -1,5 +1,5 @@
 import type { Tool, ToolResult } from '../../server/types'
-import { openSync, read, writeSync, closeSync, mkdirSync } from 'node:fs'
+import { openSync, read, writeSync, closeSync, mkdirSync, readdirSync } from 'node:fs'
 
 // Protocol constants (match teensy firmware)
 const MSG_AUDIO = 0x01
@@ -7,6 +7,9 @@ const MSG_EVENT = 0x02
 
 const PLUGIN_NAME = 'teensy-embodiment'
 const DATA_DIR = `${process.env.HOME}/.toebeans/${PLUGIN_NAME}`
+
+// Reconnect timing
+const RECONNECT_DELAY_MS = 1000
 
 interface TeensyConfig {
   serialPort?: string
@@ -29,9 +32,19 @@ export default function create(): Plugin {
   let serialFd: number | null = null
   let readerRunning = false
   let audioFrameCount = 0
+  let connected = false
 
-  function getSerialPort(): string {
-    return config.serialPort || '/dev/ttyACM0'
+  /** Discover the teensy serial port.
+   *  Priority: explicit config > /dev/serial/by-id/Teensyduino match > fallback /dev/ttyACM0 */
+  function discoverPort(): string {
+    if (config.serialPort) return config.serialPort
+    try {
+      const byId = '/dev/serial/by-id'
+      const entries = readdirSync(byId)
+      const teensy = entries.find(e => e.includes('Teensyduino'))
+      if (teensy) return `${byId}/${teensy}`
+    } catch {}
+    return '/dev/ttyACM0'
   }
 
   function audioDir(): string {
@@ -40,38 +53,63 @@ export default function create(): Plugin {
     return dir
   }
 
-  async function startReader() {
-    const portPath = getSerialPort()
-    console.log(`[${PLUGIN_NAME}] opening serial port: ${portPath}`)
-
-    Bun.spawnSync(['stty', '-F', portPath, '115200', 'raw', '-echo', '-echoe', '-echok'])
-
-    try {
-      serialFd = openSync(portPath, 'r+')
-    } catch (err) {
-      console.error(`[${PLUGIN_NAME}] failed to open ${portPath}:`, err)
-      return
+  function closeFd() {
+    if (serialFd !== null) {
+      try { closeSync(serialFd) } catch {}
+      serialFd = null
     }
+    connected = false
+  }
 
-    console.log(`[${PLUGIN_NAME}] serial port opened (fd=${serialFd})`)
+  function sleep(ms: number): Promise<void> {
+    return new Promise(r => setTimeout(r, ms))
+  }
+
+  async function connectAndRead() {
     readerRunning = true
 
-    let buffer = Buffer.alloc(0)
-    const readBuf = Buffer.alloc(4096)
-
-    function readAsync(fd: number, buf: Buffer): Promise<number> {
-      return new Promise((resolve, reject) => {
-        read(fd, buf, 0, buf.length, null, (err, bytesRead) => {
-          if (err) reject(err)
-          else resolve(bytesRead)
-        })
-      })
-    }
-
     while (readerRunning) {
+      const portPath = discoverPort()
+      console.log(`[${PLUGIN_NAME}] opening serial port: ${portPath}`)
+
       try {
-        const bytesRead = await readAsync(serialFd, readBuf)
-        if (bytesRead > 0) {
+        Bun.spawnSync(['stty', '-F', portPath, '115200', 'raw', '-echo', '-echoe', '-echok'])
+        serialFd = openSync(portPath, 'r+')
+      } catch (err) {
+        console.error(`[${PLUGIN_NAME}] failed to open ${portPath}:`, err)
+        serialFd = null
+        connected = false
+        if (!readerRunning) break
+        await sleep(RECONNECT_DELAY_MS)
+        continue
+      }
+
+      console.log(`[${PLUGIN_NAME}] serial port opened (fd=${serialFd})`)
+      connected = true
+      audioFrameCount = 0
+
+      // --- read loop for this connection ---
+      let buffer = Buffer.alloc(0)
+      const readBuf = Buffer.alloc(4096)
+
+      function readAsync(fd: number, buf: Buffer): Promise<number> {
+        return new Promise((resolve, reject) => {
+          read(fd, buf, 0, buf.length, null, (err, bytesRead) => {
+            if (err) reject(err)
+            else resolve(bytesRead)
+          })
+        })
+      }
+
+      let readOk = true
+      while (readerRunning && readOk) {
+        try {
+          const bytesRead = await readAsync(serialFd!, readBuf)
+          if (bytesRead === 0) {
+            // EOF — device gone
+            readOk = false
+            break
+          }
           buffer = Buffer.concat([buffer, readBuf.subarray(0, bytesRead)])
 
           while (buffer.length > 0) {
@@ -102,16 +140,22 @@ export default function create(): Plugin {
               buffer = buffer.subarray(1)
             }
           }
+        } catch (err: any) {
+          console.error(`[${PLUGIN_NAME}] read error:`, err)
+          readOk = false
         }
-      } catch (err: any) {
-        console.error(`[${PLUGIN_NAME}] read error:`, err)
-        break
       }
+
+      // connection lost — clean up and retry
+      closeFd()
+      if (!readerRunning) break
+      console.log(`[${PLUGIN_NAME}] connection lost, will reconnect...`)
+      await sleep(RECONNECT_DELAY_MS)
     }
   }
 
   function sendCommand(json: string) {
-    if (!serialFd) return
+    if (!serialFd || !connected) return
     try {
       const data = Buffer.from(json + '\n', 'utf-8')
       writeSync(serialFd, data)
@@ -192,7 +236,7 @@ export default function create(): Plugin {
     async init(cfg: unknown) {
       config = (cfg as TeensyConfig) || {}
       mkdirSync(DATA_DIR, { recursive: true })
-      startReader()
+      connectAndRead()
     },
 
     async destroy() {
@@ -202,14 +246,12 @@ export default function create(): Plugin {
         audioWriter.end()
         audioWriter = null
       }
-      if (serialFd !== null) {
-        try { closeSync(serialFd) } catch {}
-        serialFd = null
-      }
+      closeFd()
     },
 
     buildSystemPrompt() {
-      return `kanoko hardware is connected. you can display text on the LCD with kanoko_display and record audio with kanoko_record/kanoko_stop_record. audio is saved as raw 16-bit signed LE mono PCM at 44100Hz.`
+      const status = connected ? 'connected' : 'disconnected (reconnecting...)'
+      return `kanoko hardware: ${status}. you can display text on the LCD with kanoko_display and record audio with kanoko_record/kanoko_stop_record. audio is saved as raw 16-bit signed LE mono PCM at 44100Hz.`
     },
   }
 }

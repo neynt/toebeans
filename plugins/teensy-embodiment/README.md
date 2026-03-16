@@ -4,7 +4,7 @@ Physical hardware plugin for toebeans. Connects to a Teensy 4.1 microcontroller 
 
 ## Hardware
 
-- **Teensy 4.1** — main MCU, connected via USB serial (`/dev/ttyACM0`)
+- **Teensy 4.1** — main MCU, connected via USB serial (auto-discovered via `/dev/serial/by-id/`)
 - **ST7789V** 240×320 rect LCD — text/status display, on SPI0
 - **GC9A01** 240×240 round LCD — avatar display, on SPI1
 - **INMP441** I2S MEMS microphone — audio input
@@ -22,7 +22,7 @@ Build and flash:
 cd ~/.toebeans/plugins/teensy-embodiment && pio run --target upload
 ```
 
-The Teensy must be connected via USB. After flashing, the serial port reconnects automatically and the plugin will re-establish communication.
+The Teensy must be connected via USB. After flashing, the device re-enumerates (possibly on a different `/dev/ttyACMn`). The plugin auto-reconnects using `/dev/serial/by-id/` discovery, so no server restart is needed.
 
 ## Serial protocol
 
@@ -47,7 +47,8 @@ In `~/.toebeans/config.json5`:
 
 ```json5
 'teensy-embodiment': {
-  serialPort: '/dev/ttyACM0',  // optional, default shown
+  // optional — auto-discovers via /dev/serial/by-id/ if omitted
+  serialPort: '/dev/serial/by-id/usb-Teensyduino_USB_Serial_XXXXXXXX-if00',
 }
 ```
 
