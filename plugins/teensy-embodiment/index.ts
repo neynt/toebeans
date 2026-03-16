@@ -176,6 +176,9 @@ export default function create(): Plugin {
         required: ['text'],
       },
       async execute(input: unknown): Promise<ToolResult> {
+        if (!connected) {
+          return { content: 'teensy is disconnected — display command not sent', is_error: true }
+        }
         const { text } = input as { text: string }
         sendCommand(JSON.stringify({ cmd: 'display', text }))
         return { content: `displayed: ${text}` }
