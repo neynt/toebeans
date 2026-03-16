@@ -68,6 +68,12 @@ Plugins are enabled by having a key in `config.json5 → plugins`.
 
 **When you modify a plugin, update its README (`plugins/{name}/README.md`) too.**
 
+### Local-only plugins
+
+Some plugins are hardware-specific and live only in `~/.toebeans/plugins/`, not in this repo:
+
+- **teensy-embodiment** — Teensy 4.1 hardware interface (LCD, mic, speaker). Lives in `~/.toebeans/plugins/teensy-embodiment/` with its own firmware, `index.ts`, and docs. Do NOT add a `plugins/teensy-embodiment/` to this repo — the plugin loader would shadow the local copy or vice versa.
+
 ## Runtime data (`~/.toebeans/`)
 
 | Path | Contents |
