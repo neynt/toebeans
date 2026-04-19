@@ -1,0 +1,724 @@
+// gmail plugin for toebeans
+// read and compose gmail via OAuth2
+
+import type { Plugin } from '../../server/plugin.ts'
+import type { Tool, ToolResult } from '../../server/types.ts'
+import { readFile } from 'node:fs/promises'
+import { join } from 'path'
+import { homedir } from 'os'
+
+const OAUTH_PATH = join(homedir(), '.toebeans', 'secrets', 'gmail-oauth.json')
+const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me'
+
+interface OAuthCreds {
+  client_id: string
+  client_secret: string
+  refresh_token: string
+  token_uri: string
+}
+
+let creds: OAuthCreds | null = null
+let accessToken: string | null = null
+let tokenExpiresAt = 0
+
+async function loadCreds(): Promise<OAuthCreds> {
+  if (creds) return creds
+  creds = JSON.parse(await readFile(OAUTH_PATH, 'utf-8'))
+  return creds!
+}
+
+async function getAccessToken(): Promise<string> {
+  if (accessToken && Date.now() < tokenExpiresAt - 30_000) {
+    return accessToken
+  }
+
+  const c = await loadCreds()
+  const res = await fetch(c.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: c.client_id,
+      client_secret: c.client_secret,
+      refresh_token: c.refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  })
+
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`token refresh failed (${res.status}): ${text}`)
+  }
+
+  const data = await res.json() as { access_token: string; expires_in: number }
+  accessToken = data.access_token
+  tokenExpiresAt = Date.now() + data.expires_in * 1000
+  return accessToken
+}
+
+async function gmailGet(path: string, params?: Record<string, string | string[]>): Promise<unknown> {
+  const token = await getAccessToken()
+  const url = new URL(`${GMAIL_API}${path}`)
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, item)
+      } else {
+        url.searchParams.set(k, v)
+      }
+    }
+  }
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`gmail API error (${res.status}): ${text}`)
+  }
+  return res.json()
+}
+
+async function gmailPost(path: string, body: unknown): Promise<unknown> {
+  const token = await getAccessToken()
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`gmail API error (${res.status}): ${text}`)
+  }
+  return res.json()
+}
+
+async function gmailPut(path: string, body: unknown): Promise<unknown> {
+  const token = await getAccessToken()
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`gmail API error (${res.status}): ${text}`)
+  }
+  return res.json()
+}
+
+async function gmailDelete(path: string): Promise<void> {
+  const token = await getAccessToken()
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`gmail API error (${res.status}): ${text}`)
+  }
+}
+
+export function encodeBase64Url(str: string): string {
+  return Buffer.from(str, 'utf-8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+}
+
+interface ComposeParams {
+  to: string
+  subject: string
+  body: string
+  html_body?: string
+  cc?: string
+  bcc?: string
+  in_reply_to?: string
+}
+
+export interface FromIdentity {
+  email: string
+  name?: string
+}
+
+function formatFrom(from: FromIdentity): string {
+  return from.name ? `${from.name} <${from.email}>` : from.email
+}
+
+export async function buildMessage(
+  params: ComposeParams,
+  from: FromIdentity = { email: 'me' },
+): Promise<{ raw: string; threadId?: string }> {
+  const lines: string[] = [
+    `From: ${formatFrom(from)}`,
+    `To: ${params.to}`,
+  ]
+  if (params.cc) lines.push(`Cc: ${params.cc}`)
+  if (params.bcc) lines.push(`Bcc: ${params.bcc}`)
+
+  let threadId: string | undefined
+  let subject = params.subject
+
+  if (params.in_reply_to) {
+    // fetch original message to get threadId and Message-ID header
+    const original = await gmailGet(`/messages/${params.in_reply_to}`, {
+      format: 'metadata',
+      metadataHeaders: ['Message-ID'],
+    }) as {
+      threadId: string
+      payload: { headers: { name: string; value: string }[] }
+    }
+    threadId = original.threadId
+    const originalHeaders = original.payload?.headers ?? []
+    const messageId = getHeader(originalHeaders, 'Message-ID')
+    if (messageId) {
+      lines.push(`In-Reply-To: ${messageId}`)
+      lines.push(`References: ${messageId}`)
+    }
+    if (!subject.toLowerCase().startsWith('re:')) {
+      subject = `Re: ${subject}`
+    }
+  }
+
+  lines.push(`Subject: ${subject}`)
+  lines.push(`MIME-Version: 1.0`)
+
+  if (params.html_body) {
+    // multipart/alternative with both text/plain and text/html
+    const boundary = `----toebeans_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+    lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`)
+    lines.push(``)
+    lines.push(`--${boundary}`)
+    lines.push(`Content-Type: text/plain; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.body)
+    lines.push(`--${boundary}`)
+    lines.push(`Content-Type: text/html; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.html_body)
+    lines.push(`--${boundary}--`)
+  } else {
+    lines.push(`Content-Type: text/plain; charset="UTF-8"`)
+    lines.push(``)
+    lines.push(params.body)
+  }
+
+  return { raw: encodeBase64Url(lines.join('\r\n')), threadId }
+}
+
+export function getHeader(headers: { name: string; value: string }[], name: string): string {
+  return headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value ?? ''
+}
+
+export function decodeBase64Url(data: string): string {
+  const base64 = data.replace(/-/g, '+').replace(/_/g, '/')
+  return Buffer.from(base64, 'base64').toString('utf-8')
+}
+
+export function stripHtml(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+export function extractBody(payload: any): string {
+  // direct body
+  if (payload.body?.data) {
+    const decoded = decodeBase64Url(payload.body.data)
+    if (payload.mimeType === 'text/plain') return decoded
+    if (payload.mimeType === 'text/html') return stripHtml(decoded)
+  }
+
+  // multipart — prefer text/plain, fall back to text/html
+  if (payload.parts) {
+    let plainText = ''
+    let htmlText = ''
+    for (const part of payload.parts) {
+      if (part.mimeType === 'text/plain' && part.body?.data) {
+        plainText += decodeBase64Url(part.body.data)
+      } else if (part.mimeType === 'text/html' && part.body?.data) {
+        htmlText += decodeBase64Url(part.body.data)
+      } else if (part.parts) {
+        // nested multipart (e.g. multipart/alternative inside multipart/mixed)
+        const nested = extractBody(part)
+        if (nested) return nested
+      }
+    }
+    if (plainText) return plainText
+    if (htmlText) return stripHtml(htmlText)
+  }
+
+  return '(no body)'
+}
+
+/** Check if a Gmail search query explicitly mentions drafts */
+export function queryMentionsDrafts(query: string): boolean {
+  const lower = query.toLowerCase()
+  return /\b(in|is|label)\s*:\s*draft(s)?\b/.test(lower)
+}
+
+interface GmailPluginConfig {
+  allowSend?: boolean
+  fromEmail?: string
+  fromName?: string
+}
+
+// module-level config reference; populated by init() and read by tools that call buildMessage.
+// defaults to 'me' (Gmail accepts this as the authenticated user).
+let pluginConfig: GmailPluginConfig = {}
+
+function currentFrom(): FromIdentity {
+  return { email: pluginConfig.fromEmail ?? 'me', name: pluginConfig.fromName }
+}
+
+const baseTools: Tool[] = [
+  {
+    name: 'gmail_labels',
+    description: 'List all Gmail labels with their IDs and names.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    async execute(): Promise<ToolResult> {
+      try {
+        const data = await gmailGet('/labels') as {
+          labels: { id: string; name: string; type: string }[]
+        }
+        const lines = data.labels
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map(l => `${l.name} (${l.id})`)
+        return { content: lines.join('\n') }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to list labels: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_search',
+    description: 'Search Gmail messages. Returns id, threadId, labels, from, to, subject, date, and snippet for each match. Drafts are excluded by default unless your query explicitly mentions drafts (e.g. "in:draft"). Use gmail_drafts_list to search drafts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Gmail search query (e.g. "from:someone", "is:unread", "subject:hello"). Drafts are auto-excluded; use "in:draft" to include them.',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Maximum number of results (default 10)',
+        },
+      },
+      required: ['query'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { query, max_results = 10 } = input as { query: string; max_results?: number }
+
+      // auto-exclude drafts unless query explicitly mentions them
+      const effectiveQuery = queryMentionsDrafts(query) ? query : `${query} -in:draft`
+
+      try {
+        // search for message IDs
+        const listData = await gmailGet('/messages', {
+          q: effectiveQuery,
+          maxResults: String(max_results),
+        }) as { messages?: { id: string; threadId: string }[] }
+
+        if (!listData.messages?.length) {
+          return { content: 'no messages found' }
+        }
+
+        // batch-fetch metadata for each message
+        const results: string[] = []
+        for (const msg of listData.messages) {
+          const detail = await gmailGet(`/messages/${msg.id}`, {
+            format: 'metadata',
+            metadataHeaders: ['From', 'To', 'Subject', 'Date'],
+          }) as {
+            id: string
+            threadId: string
+            labelIds?: string[]
+            snippet: string
+            payload: { headers: { name: string; value: string }[] }
+          }
+
+          const headers = detail.payload?.headers ?? []
+          const labels = detail.labelIds?.join(', ') ?? ''
+          results.push([
+            `ID: ${detail.id}`,
+            `Thread: ${detail.threadId}`,
+            `Labels: ${labels}`,
+            `From: ${getHeader(headers, 'From')}`,
+            `To: ${getHeader(headers, 'To')}`,
+            `Subject: ${getHeader(headers, 'Subject')}`,
+            `Date: ${getHeader(headers, 'Date')}`,
+            `Snippet: ${detail.snippet}`,
+          ].join('\n'))
+        }
+
+        return { content: results.join('\n\n---\n\n') }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to search messages: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_read',
+    description: 'Read a full Gmail message by ID. Returns from, to, cc, subject, date, and body text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message_id: {
+          type: 'string',
+          description: 'The message ID (from gmail_search results)',
+        },
+      },
+      required: ['message_id'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { message_id } = input as { message_id: string }
+
+      try {
+        const msg = await gmailGet(`/messages/${message_id}`, {
+          format: 'full',
+        }) as {
+          id: string
+          threadId: string
+          labelIds?: string[]
+          payload: {
+            headers: { name: string; value: string }[]
+            mimeType: string
+            body?: { data?: string }
+            parts?: any[]
+          }
+        }
+
+        const headers = msg.payload?.headers ?? []
+        const body = extractBody(msg.payload)
+        const labels = msg.labelIds?.join(', ') ?? ''
+
+        const lines = [
+          `Labels: ${labels}`,
+          `From: ${getHeader(headers, 'From')}`,
+          `To: ${getHeader(headers, 'To')}`,
+          `CC: ${getHeader(headers, 'Cc')}`,
+          `Subject: ${getHeader(headers, 'Subject')}`,
+          `Date: ${getHeader(headers, 'Date')}`,
+          ``,
+          body,
+        ]
+
+        return { content: lines.join('\n') }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to read message: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_drafts_list',
+    description: 'List Gmail drafts. Returns draft ID, message ID, and subject/snippet for each draft.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Gmail search query to filter drafts (optional, e.g. "subject:hello")',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Maximum number of results (default 10)',
+        },
+      },
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { query, max_results = 10 } = input as { query?: string; max_results?: number }
+
+      try {
+        const params: Record<string, string> = { maxResults: String(max_results) }
+        if (query) params.q = query
+        const listData = await gmailGet('/drafts', params) as {
+          drafts?: { id: string; message: { id: string; threadId: string } }[]
+        }
+
+        if (!listData.drafts?.length) {
+          return { content: 'no drafts found' }
+        }
+
+        const results: string[] = []
+        for (const draft of listData.drafts) {
+          const detail = await gmailGet(`/messages/${draft.message.id}`, {
+            format: 'metadata',
+            metadataHeaders: ['To', 'Subject', 'Date'],
+          }) as {
+            id: string
+            threadId: string
+            snippet: string
+            payload: { headers: { name: string; value: string }[] }
+          }
+
+          const headers = detail.payload?.headers ?? []
+          results.push([
+            `Draft ID: ${draft.id}`,
+            `Message ID: ${detail.id}`,
+            `Thread: ${detail.threadId}`,
+            `To: ${getHeader(headers, 'To')}`,
+            `Subject: ${getHeader(headers, 'Subject')}`,
+            `Date: ${getHeader(headers, 'Date')}`,
+            `Snippet: ${detail.snippet}`,
+          ].join('\n'))
+        }
+
+        return { content: results.join('\n\n---\n\n') }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to list drafts: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_draft_read',
+    description: 'Read a Gmail draft by draft ID. Returns the full draft content including headers and body. Use gmail_drafts_list to find draft IDs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        draft_id: {
+          type: 'string',
+          description: 'The draft ID (from gmail_drafts_list results)',
+        },
+      },
+      required: ['draft_id'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { draft_id } = input as { draft_id: string }
+
+      try {
+        const draft = await gmailGet(`/drafts/${draft_id}`, {
+          format: 'full',
+        }) as {
+          id: string
+          message: {
+            id: string
+            threadId: string
+            payload: {
+              headers: { name: string; value: string }[]
+              mimeType: string
+              body?: { data?: string }
+              parts?: any[]
+            }
+          }
+        }
+
+        const headers = draft.message.payload?.headers ?? []
+        const body = extractBody(draft.message.payload)
+
+        const lines = [
+          `Draft ID: ${draft.id}`,
+          `Message ID: ${draft.message.id}`,
+          `Thread: ${draft.message.threadId}`,
+          `From: ${getHeader(headers, 'From')}`,
+          `To: ${getHeader(headers, 'To')}`,
+          `CC: ${getHeader(headers, 'Cc')}`,
+          `BCC: ${getHeader(headers, 'Bcc')}`,
+          `Subject: ${getHeader(headers, 'Subject')}`,
+          `Date: ${getHeader(headers, 'Date')}`,
+          ``,
+          body,
+        ]
+
+        return { content: lines.join('\n') }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to read draft: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_draft_create',
+    description: 'Create a new draft email in Gmail. Returns the new draft ID. Supports plain text and optional HTML (sends multipart/alternative). To update an existing draft, use gmail_draft_update instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId for threading.' },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const params = input as ComposeParams
+      try {
+        const { raw, threadId } = await buildMessage(params, currentFrom())
+        const reqBody: Record<string, unknown> = { message: { raw } }
+        if (threadId) reqBody.message = { raw, threadId }
+        const data = await gmailPost('/drafts', reqBody) as { id: string }
+        return { content: `draft created (id: ${data.id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to create draft: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_draft_update',
+    description: 'Update an existing Gmail draft in place, replacing its content. The draft keeps the same draft ID. Supports plain text and optional HTML (sends multipart/alternative). Use gmail_draft_read to see current content first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        draft_id: { type: 'string', description: 'The draft ID to update (from gmail_drafts_list or gmail_draft_create)' },
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId for threading.' },
+      },
+      required: ['draft_id', 'to', 'subject', 'body'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { draft_id, ...compose } = input as { draft_id: string } & ComposeParams
+      try {
+        const { raw, threadId } = await buildMessage(compose, currentFrom())
+        const reqBody: Record<string, unknown> = { message: { raw } }
+        if (threadId) reqBody.message = { raw, threadId }
+        const data = await gmailPut(`/drafts/${draft_id}`, reqBody) as { id: string }
+        return { content: `draft updated (id: ${data.id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to update draft: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_draft_delete',
+    description: 'Permanently delete a Gmail draft by draft ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        draft_id: { type: 'string', description: 'The draft ID to delete' },
+      },
+      required: ['draft_id'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { draft_id } = input as { draft_id: string }
+      try {
+        await gmailDelete(`/drafts/${draft_id}`)
+        return { content: `draft deleted (id: ${draft_id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to delete draft: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_send',
+    description: 'Send an email directly via Gmail. Supports plain text and optional HTML (sends multipart/alternative).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body (plain text). Always required — used as the plain-text part and as fallback for clients that cannot render HTML.' },
+        html_body: { type: 'string', description: 'HTML email body (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts.' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message ID to reply to (optional). Sets In-Reply-To/References headers and threadId.' },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const params = input as ComposeParams
+      try {
+        const { raw, threadId } = await buildMessage(params, currentFrom())
+        const reqBody: Record<string, unknown> = { raw }
+        if (threadId) reqBody.threadId = threadId
+        const data = await gmailPost('/messages/send', reqBody) as { id: string }
+        return { content: `message sent (id: ${data.id})` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to send message: ${error.message}`, is_error: true }
+      }
+    },
+  },
+  {
+    name: 'gmail_modify_labels',
+    description: 'Add or remove labels from a Gmail message.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'The message ID to modify' },
+        add_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Label IDs to add (optional)',
+        },
+        remove_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Label IDs to remove (optional)',
+        },
+      },
+      required: ['message_id'],
+    },
+    async execute(input: unknown): Promise<ToolResult> {
+      const { message_id, add_labels = [], remove_labels = [] } = input as {
+        message_id: string
+        add_labels?: string[]
+        remove_labels?: string[]
+      }
+
+      try {
+        await gmailPost(`/messages/${message_id}/modify`, {
+          addLabelIds: add_labels,
+          removeLabelIds: remove_labels,
+        })
+        return { content: `labels modified on message ${message_id}` }
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        return { content: `failed to modify labels: ${error.message}`, is_error: true }
+      }
+    },
+  },
+]
+
+export default function create(): Plugin {
+  pluginConfig = { allowSend: false }
+
+  return {
+    name: 'gmail',
+    description: 'read and compose gmail via OAuth2',
+    configSchema: [
+      { key: 'allowSend', type: 'boolean', description: 'Expose gmail_send for direct sending. Default false - drafts only.', default: false },
+      { key: 'fromEmail', type: 'string', description: 'Email address used in the From: header. Defaults to "me", which Gmail resolves to the authenticated account.' },
+      { key: 'fromName', type: 'string', description: 'Optional display name for the From: header (e.g. "Jane Doe"). Paired with fromEmail as "Name <email>".' },
+    ],
+    tools: baseTools.filter(tool => pluginConfig.allowSend || tool.name !== 'gmail_send'),
+    init(config: unknown) {
+      pluginConfig = { allowSend: false, ...(config as GmailPluginConfig ?? {}) }
+      this.tools = baseTools.filter(tool => pluginConfig.allowSend || tool.name !== 'gmail_send')
+    },
+  }
+}

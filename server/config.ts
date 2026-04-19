@@ -1,0 +1,110 @@
+import { z } from 'zod'
+import JSON5 from 'json5'
+import { getDataDir } from './session.ts'
+import { join } from 'path'
+
+const configSchema = z.object({
+  server: z.object({
+    port: z.number(),
+  }).passthrough(),
+  session: z.object({
+    compactAtTokens: z.number(),
+    compactMinTokens: z.number().default(10000),
+    warnAtTokens: z.number().default(150000),
+    lifespanSeconds: z.number(),
+    compactionPrompt: z.string().optional(),
+    compactionTrimLength: z.number().optional(),
+  }).passthrough(),
+  plugins: z.record(z.string(), z.unknown()),
+  llm: z.object({
+    provider: z.string(),
+    model: z.string(),
+    apiKey: z.string().optional(),
+    effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+    maxOutputTokens: z.number().optional(),
+    maxToolResultTokens: z.number().optional(),
+    maxToolResultChars: z.number().optional(),
+    // fields used by moonshot provider (ignored by others)
+    baseUrl: z.string().optional(),
+    thinking: z.boolean().optional(),
+    temperature: z.number().optional(),
+    topP: z.number().optional(),
+    // provider-specific config
+    anthropic: z.object({}).passthrough().optional(),
+    // backward compat: nested moonshot/openai blocks still accepted
+    moonshot: z.object({
+      baseUrl: z.string().optional(),
+      thinking: z.boolean().optional(),
+      temperature: z.number().optional(),
+      topP: z.number().optional(),
+    }).passthrough().optional(),
+    openai: z.object({
+      baseUrl: z.string().optional(),
+      thinking: z.boolean().optional(),
+      temperature: z.number().optional(),
+      topP: z.number().optional(),
+    }).passthrough().optional(),
+  }).passthrough(),
+  timezone: z.string().default('America/New_York'),
+  notifyOnRestart: z.string().optional(),
+  restartMessage: z.string().default('server restarted successfully. continue from where you left off.'),
+}).passthrough()
+
+export type Config = z.infer<typeof configSchema>
+
+// cache the raw config to preserve key order on save
+let rawConfigCache: Record<string, unknown> | null = null
+
+export async function loadConfig(): Promise<Config> {
+  const configPath = join(getDataDir(), 'config.json5')
+  const file = Bun.file(configPath)
+
+  if (!(await file.exists())) {
+    console.error(`config file not found: ${configPath}`)
+    console.error('create one to get started.')
+    process.exit(1)
+  }
+
+  try {
+    const text = await file.text()
+    const raw = JSON5.parse(text) as Record<string, unknown>
+    rawConfigCache = raw
+    return configSchema.parse(raw)
+  } catch (err) {
+    console.error('Failed to parse config:', err)
+    process.exit(1)
+  }
+}
+
+export async function saveConfig(config: Config): Promise<void> {
+  const configPath = join(getDataDir(), 'config.json5')
+
+  // merge changes into the raw cache to preserve key order
+  if (rawConfigCache) {
+    // update top-level keys in original order, then add new ones
+    for (const key of Object.keys(config) as (keyof Config)[]) {
+      if (key === 'plugins') {
+        // preserve plugin order: keep existing, add new at end
+        const rawPlugins = (rawConfigCache.plugins ?? {}) as Record<string, unknown>
+        const newPlugins = config.plugins
+
+        // remove plugins that were deleted
+        for (const name of Object.keys(rawPlugins)) {
+          if (!(name in newPlugins)) {
+            delete rawPlugins[name]
+          }
+        }
+        // update existing and add new
+        for (const [name, pluginConfig] of Object.entries(newPlugins)) {
+          rawPlugins[name] = pluginConfig
+        }
+        rawConfigCache.plugins = rawPlugins
+      } else {
+        rawConfigCache[key] = config[key]
+      }
+    }
+    await Bun.write(configPath, JSON5.stringify(rawConfigCache, null, 2))
+  } else {
+    await Bun.write(configPath, JSON5.stringify(config, null, 2))
+  }
+}

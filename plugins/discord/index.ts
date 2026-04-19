@@ -1,0 +1,1539 @@
+import type { Plugin, PluginStatus, PluginStatusTask } from '../../server/plugin.ts'
+import type { PluginManager } from '../../server/plugin.ts'
+import type { Tool, ToolResult, Message, ServerMessage } from '../../server/types.ts'
+import { Client, GatewayIntentBits, Partials, Events, ChannelType, type TextChannel, type DMChannel, type Message as DiscordMessage } from 'discord.js'
+import { writeFile, mkdir, unlink } from 'fs/promises'
+import { join } from 'path'
+import { readdir, stat } from 'fs/promises'
+import { getDataDir } from '../../server/session.ts'
+import { countTokens } from '../../server/tokens.ts'
+import { countToolResultTokens } from '../../server/tokens.ts'
+import { formatLocalTime } from '../../server/time.ts'
+import { transcribe } from '../../server/services/index.ts'
+import https from 'https'
+import http from 'http'
+import { buildDiscordRoute } from './routes.ts'
+
+// --- constants for streaming output ---
+export const DISCORD_MAX_LENGTH = 2000
+export const STREAM_EDIT_INTERVAL_MS = 2000
+
+// render a condensed batch summary as a fenced code block
+export type ToolBatchEntry = { name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }
+const MAX_DISPLAYED_TOOL_CALLS = 5
+
+export function renderToolBatch(batch: ToolBatchEntry[], finished: boolean): string {
+  const completed = batch.filter(t => t.resultTokens !== undefined).length
+  const errors = batch.filter(t => t.isError).length
+
+  // per-tool lines with status indicators
+  const lines: string[] = []
+  for (const t of batch) {
+    let status: string
+    if (t.resultTokens !== undefined) {
+      status = t.isError ? '❌' : '✅'
+    } else {
+      status = '⏳'
+    }
+    let line = `${status} ${t.name}`
+    if (t.summary) line += `: ${t.summary}`
+    const tokens = t.resultTokens !== undefined
+      ? `${t.inputTokens}+${t.resultTokens}`
+      : `${t.inputTokens}`
+    line += ` (${tokens} tok)`
+    lines.push(line)
+  }
+
+  // only show the most recent tool calls to keep the message compact
+  const displayedLines = lines.slice(-MAX_DISPLAYED_TOOL_CALLS)
+  const hidden = lines.length - displayedLines.length
+
+  const errorNote = errors > 0 ? ` | ${errors} failed` : ''
+  const statusLabel = finished
+    ? `done — ${completed} tool${completed !== 1 ? 's' : ''}${errorNote}`
+    : `${completed}/${batch.length} done${errorNote}`
+
+  const header = `🔧 [${statusLabel}]`
+
+  // when tools are hidden, show a summary line naming every tool (consecutive dupes collapsed)
+  let hiddenNote = ''
+  if (hidden > 0) {
+    const deduped: string[] = []
+    for (const t of batch) {
+      if (deduped.length === 0 || deduped[deduped.length - 1] !== t.name) {
+        deduped.push(t.name)
+      }
+    }
+    hiddenNote = `  ${deduped.join(' → ')}\n  ... ${hidden} earlier tool${hidden !== 1 ? 's' : ''} hidden\n`
+  }
+  const body = hiddenNote + displayedLines.join('\n')
+  return `\`\`\`\n${header}\n${body}\n\`\`\``.slice(0, 2000)
+}
+
+// find a good break point at or before maxLen (prefer \n\n, then \n, then space)
+export function findBreakPoint(text: string, maxLen: number): number {
+  if (text.length <= maxLen) return text.length
+  const region = text.slice(0, maxLen)
+  const doubleNewline = region.lastIndexOf('\n\n')
+  if (doubleNewline > maxLen * 0.5) return doubleNewline + 2
+  const newline = region.lastIndexOf('\n')
+  if (newline > maxLen * 0.5) return newline + 1
+  const space = region.lastIndexOf(' ')
+  if (space > maxLen * 0.5) return space + 1
+  return maxLen
+}
+
+// format the context prefix shown to the model for each incoming Discord message
+export function formatChannelContext(channelId: string, author: string, isDM: boolean, channelName?: string, guildName?: string): string {
+  if (isDM) {
+    return `[DM from ${author}, channel ${channelId}]`
+  }
+  return `[#${channelName || channelId} in ${guildName || 'unknown'}, channel ${channelId}, from ${author}]`
+}
+
+// --- helpers for /session enrichment ---
+
+export interface CodingAgentMeta {
+  sessionId: string
+  task: string
+  workingDir: string
+  startedAt: string
+  pid: number
+  exitCode?: number
+  endedAt?: string
+}
+
+export interface CodingAgentInfo {
+  name: string
+  emoji: string
+  dir: string
+}
+
+export const CODING_AGENTS: CodingAgentInfo[] = [
+  { name: 'Claude Code', emoji: '🖥️', dir: 'claude-code' },
+  { name: 'Gemini CLI', emoji: '♊', dir: 'gemini-cli' },
+  { name: 'OpenAI Codex', emoji: '🤖', dir: 'openai-codex' },
+]
+
+// display metadata for known plugins (used by /status formatting)
+const PLUGIN_DISPLAY: Record<string, { emoji: string; displayName: string }> = {
+  'claude-code': { emoji: '🖥️', displayName: 'Claude Code' },
+  'gemini-cli': { emoji: '♊', displayName: 'Gemini CLI' },
+  'openai-codex': { emoji: '🤖', displayName: 'OpenAI Codex' },
+  'bash': { emoji: '🐚', displayName: 'Bash' },
+}
+
+export function formatPluginStatuses(statuses: Map<string, PluginStatus>): string {
+  let result = ''
+  for (const [name, status] of statuses) {
+    const display = PLUGIN_DISPLAY[name] ?? { emoji: '🔌', displayName: name }
+    const tasks = status.tasks ?? []
+    if (tasks.length === 0) continue
+    result += `\n\n${display.emoji} **Active ${display.displayName} Tasks**\n`
+    for (const task of tasks) {
+      const mins = Math.floor((Date.now() - new Date(task.startedAt).getTime()) / 60000)
+      const desc = task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description
+      result += `\`${task.id}\` (${mins}m) — ${desc}\n`
+    }
+  }
+  return result
+}
+
+export async function getActiveSessions(subdir: string): Promise<CodingAgentMeta[]> {
+  const dir = join(getDataDir(), subdir)
+  try {
+    const files = await readdir(dir)
+    const metaFiles = files.filter(f => f.endsWith('.meta.json'))
+
+    const active: CodingAgentMeta[] = []
+    for (const file of metaFiles) {
+      try {
+        const meta: CodingAgentMeta = await Bun.file(join(dir, file)).json()
+        if (meta.endedAt) continue
+        // check if process is still alive
+        try {
+          process.kill(meta.pid, 0)
+          active.push(meta)
+        } catch {
+          // process dead, skip
+        }
+      } catch {
+        // bad meta file, skip
+      }
+    }
+    return active.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+  } catch {
+    return []
+  }
+}
+
+interface UpcomingTimer {
+  filename: string
+  nextFire: Date
+}
+
+function parseTimerSchedule(filename: string): { next: Date } | null {
+  const name = filename.replace('.md', '')
+
+  // absolute: 2024-02-05T14:30:00
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(name)) {
+    const date = new Date(name)
+    if (isNaN(date.getTime()) || date <= new Date()) return null
+    return { next: date }
+  }
+
+  const now = new Date()
+
+  // daily: daily-HH:MM
+  const dailyMatch = name.match(/^daily-(\d{2}):(\d{2})$/)
+  if (dailyMatch) {
+    const next = new Date(now)
+    next.setHours(parseInt(dailyMatch[1]!), parseInt(dailyMatch[2]!), 0, 0)
+    if (next <= now) next.setDate(next.getDate() + 1)
+    return { next }
+  }
+
+  // weekly: weekly-day-HH:MM
+  const weeklyMatch = name.match(/^weekly-(mon|tue|wed|thu|fri|sat|sun)-(\d{2}):(\d{2})$/)
+  if (weeklyMatch) {
+    const days: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+    const targetDay = days[weeklyMatch[1]!] ?? 0
+    const next = new Date(now)
+    next.setHours(parseInt(weeklyMatch[2]!), parseInt(weeklyMatch[3]!), 0, 0)
+    let daysUntil = targetDay - now.getDay()
+    if (daysUntil < 0 || (daysUntil === 0 && next <= now)) daysUntil += 7
+    next.setDate(next.getDate() + daysUntil)
+    return { next }
+  }
+
+  // hourly: hourly-MM
+  const hourlyMatch = name.match(/^hourly-(\d{2})$/)
+  if (hourlyMatch) {
+    const next = new Date(now)
+    next.setMinutes(parseInt(hourlyMatch[1]!), 0, 0)
+    if (next <= now) next.setHours(next.getHours() + 1)
+    return { next }
+  }
+
+  return null
+}
+
+async function getUpcomingTimers(limit: number = 5): Promise<UpcomingTimer[]> {
+  const dir = join(getDataDir(), 'timers')
+  try {
+    const files = await readdir(dir)
+    const timers: UpcomingTimer[] = []
+    for (const file of files) {
+      if (!file.endsWith('.md') || file.startsWith('.')) continue
+      const schedule = parseTimerSchedule(file)
+      if (schedule) {
+        timers.push({ filename: file, nextFire: schedule.next })
+      }
+    }
+    timers.sort((a, b) => a.nextFire.getTime() - b.nextFire.getTime())
+    return timers.slice(0, limit)
+  } catch {
+    return []
+  }
+}
+
+function formatTimeUntil(date: Date): string {
+  const ms = date.getTime() - Date.now()
+  if (ms < 0) return 'past'
+  const secs = Math.floor(ms / 1000)
+  const mins = Math.floor(secs / 60)
+  const hours = Math.floor(mins / 60)
+  const days = Math.floor(hours / 24)
+
+  if (days > 0) return `${days}d ${hours % 24}h`
+  if (hours > 0) return `${hours}h ${mins % 60}m`
+  if (mins > 0) return `${mins}m`
+  return `${secs}s`
+}
+
+interface DiscordConfig {
+  token: string
+  allowedUsers: string[]  // user IDs allowed to interact (required for safety)
+  channels?: string[]  // channel IDs to listen to (empty = all accessible)
+  onlyRespondToMentions?: boolean  // in guilds, only process messages that @mention the bot
+  autoReplyChannels?: string[]  // channel IDs where bot replies without @mention (overrides onlyRespondToMentions)
+  allowDMs?: boolean  // respond to direct messages (default: true)
+  transcribeVoice?: boolean  // transcribe voice messages (default: true)
+  sessionManager?: any  // session manager instance for slash commands
+  typingDelayMaxMs?: number  // max typing delay in ms (default: 1000)
+  typingDelayPerCharMs?: number  // per-character typing delay in ms (default: 10)
+  logChannel?: string  // channel ID for detailed tool call/result logs
+  condenseToolCalls?: boolean  // batch tool calls into condensed summaries in main channel (default: false)
+}
+
+interface QueuedMessage {
+  message: Message
+  outputTarget?: string
+  route?: string
+  metadata?: Record<string, unknown>
+  stopRequested?: boolean
+}
+
+async function downloadFile(url: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http
+    client.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`))
+        return
+      }
+      const chunks: Buffer[] = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', async () => {
+        try {
+          await writeFile(outputPath, Buffer.concat(chunks))
+          resolve()
+        } catch (err) {
+          reject(err)
+        }
+      })
+      response.on('error', reject)
+    }).on('error', reject)
+  })
+}
+
+async function downloadImageAsBase64(url: string): Promise<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> {
+  const tmpInput = join('/tmp', `discord-img-${Date.now()}-input`)
+  const tmpOutput = join('/tmp', `discord-img-${Date.now()}-output`)
+
+  try {
+    // download to temp file
+    await downloadFile(url, tmpInput)
+
+    // check file size - if base64 would exceed ~4MB, resize
+    const stats = await Bun.file(tmpInput).size
+    const base64Size = Math.ceil((stats * 4) / 3) // estimate base64 size
+    const maxSize = 4 * 1024 * 1024 // 4MB
+
+    let finalPath = tmpInput
+    let media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' = 'image/jpeg'
+
+    // detect media type from file extension or content
+    const urlLower = url.toLowerCase()
+    if (urlLower.includes('.png')) media_type = 'image/png'
+    else if (urlLower.includes('.gif')) media_type = 'image/gif'
+    else if (urlLower.includes('.webp')) media_type = 'image/webp'
+
+    if (base64Size > maxSize) {
+      console.log(`discord: image too large (${Math.round(base64Size / 1024 / 1024)}MB), resizing...`)
+
+      // use imagemagick to resize - preserve format by using appropriate extension
+      const ext = media_type === 'image/png' ? 'png' : 'jpg'
+      const outputPath = `${tmpOutput}.${ext}`
+
+      const proc = Bun.spawn(['magick', tmpInput, '-resize', '2048x2048>', '-quality', '85', outputPath], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+
+      const exitCode = await proc.exited
+      if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text()
+        throw new Error(`magick failed: ${stderr}`)
+      }
+
+      finalPath = outputPath
+      // convert gif/webp to jpeg for simplicity after resize
+      if (media_type === 'image/gif' || media_type === 'image/webp') {
+        media_type = 'image/jpeg'
+      }
+    }
+
+    // read and encode
+    const buffer = await Bun.file(finalPath).arrayBuffer()
+    const base64 = Buffer.from(buffer).toString('base64')
+
+    return { media_type, data: base64 }
+  } finally {
+    // cleanup temp files
+    try { await unlink(tmpInput) } catch {}
+    try { await unlink(tmpOutput + '.png') } catch {}
+    try { await unlink(tmpOutput + '.jpg') } catch {}
+  }
+}
+
+async function transcribeAudio(audioPath: string): Promise<string> {
+  try {
+    // convert to WAV (16kHz mono 16-bit) for the whisper server
+    // discord voice messages can be ogg/opus/mp3/etc
+    const wavPath = audioPath.replace(/\.[^.]+$/, '.wav')
+    const proc = Bun.spawn(['ffmpeg', '-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-f', 'wav', wavPath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text()
+      throw new Error(`ffmpeg conversion failed: ${stderr.slice(0, 200)}`)
+    }
+
+    const wavBuffer = Buffer.from(await Bun.file(wavPath).arrayBuffer())
+    try { await unlink(wavPath) } catch {}
+
+    const result = await transcribe(wavBuffer)
+    return result || '(empty transcription)'
+  } catch (err) {
+    console.error('discord: transcription error:', err)
+    return `(transcription failed: ${err})`
+  }
+}
+
+const ATTACHMENT_DIR = join(getDataDir(), 'discord', 'attachments')
+const ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+async function cleanupOldAttachments() {
+  try {
+    await mkdir(ATTACHMENT_DIR, { recursive: true })
+    const files = await readdir(ATTACHMENT_DIR)
+    const now = Date.now()
+    for (const file of files) {
+      try {
+        const filePath = join(ATTACHMENT_DIR, file)
+        const fileStat = await stat(filePath)
+        if (now - fileStat.mtimeMs > ATTACHMENT_MAX_AGE_MS) {
+          await unlink(filePath)
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error('discord: attachment cleanup failed:', err)
+  }
+}
+
+interface ServerContext {
+  routeOutput: (target: string, message: any) => Promise<void>
+  requestStop: (outputTarget: string) => Promise<boolean>
+  requestCompact: (route: string) => Promise<string | null>
+  config: any
+  pluginManager: PluginManager
+}
+
+export default function create(serverContext?: ServerContext): Plugin {
+  let client: Client | null = null
+  let config: DiscordConfig | null = null
+  let cleanupInterval: ReturnType<typeof setInterval> | null = null
+  const messageQueue: QueuedMessage[] = []
+  let resolveWaiter: (() => void) | null = null
+
+  // track buffered content per session for streaming edits
+  const messageBuffers = new Map<string, string>()
+  // track the current streaming Discord message per session (edit-in-place)
+  const streamingMessages = new Map<string, { messageId: string; channelId: string; sentLength: number; lastEditTime: number }>()
+  // track when text buffering started per session (for delaying initial message send)
+  const streamStartTimes = new Map<string, number>()
+  // track queued reactions per channel: channelId -> discordMessageId (for ⏳ reaction management)
+  const queuedReactions = new Map<string, string>()
+  // track tool use messages by tool_use_id so we can edit them (non-condensed mode)
+  const toolMessages = new Map<string, { channelId: string; messageId: string; toolName: string; originalContent: string; inputTokens: number }>()
+  // batch pending tool calls per session for condensed summaries
+  const pendingToolBatches = new Map<string, Array<{ name: string; summary: string; inputTokens: number; resultTokens?: number; isError?: boolean }>>()
+  // track the live progress message per session (condensed mode): sessionId -> discord message ID
+  const liveProgressMessages = new Map<string, string>()
+  // lock to prevent concurrent sends per session
+  const sendLocks = new Map<string, Promise<void>>()
+  // track last message ID per channel (for "last" shorthand in discord_react)
+  const lastMessageIds = new Map<string, string>()
+  // track friendly route per channel (for /stop, /reset, slash commands)
+  const channelRouteMap = new Map<string, string>()
+  // persistent typing indicators per channel
+  const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+  const typingDelays = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const MAX_TYPING_MS = 5 * 60 * 1000 // 5 min safety cap
+  const TYPING_START_DELAY_MS = 300
+
+  function startTyping(channel: TextChannel | DMChannel) {
+    stopTyping(channel.id)
+    const delay = setTimeout(() => {
+      typingDelays.delete(channel.id)
+      channel.sendTyping().catch(() => {})
+      const interval = setInterval(() => {
+        channel.sendTyping().catch(() => {})
+      }, 4000)
+      typingIntervals.set(channel.id, interval)
+      setTimeout(() => stopTyping(channel.id), MAX_TYPING_MS)
+    }, TYPING_START_DELAY_MS)
+    typingDelays.set(channel.id, delay)
+  }
+
+  function stopTyping(channelId: string) {
+    const delay = typingDelays.get(channelId)
+    if (delay) {
+      clearTimeout(delay)
+      typingDelays.delete(channelId)
+    }
+    const interval = typingIntervals.get(channelId)
+    if (interval) {
+      clearInterval(interval)
+      typingIntervals.delete(channelId)
+    }
+  }
+
+  // build a friendly route string for a channel and cache it
+  function buildRoute(channelId: string, isDM: boolean, username?: string, guildName?: string, channelName?: string): string {
+    const route = buildDiscordRoute(channelId, isDM, username, guildName, channelName)
+    channelRouteMap.set(channelId, route)
+    return route
+  }
+
+  // get the cached route for a channel, falling back to plain channelId
+  function getRoute(channelId: string): string {
+    return channelRouteMap.get(channelId) || `discord:${channelId}`
+  }
+
+  function queueMessage(channelId: string, content: string, author: string, isDM: boolean, route: string, channelName?: string, guildName?: string, images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = [], discordMessageId?: string) {
+    const channelContext = formatChannelContext(channelId, author, isDM, channelName, guildName)
+
+    const contentBlocks: Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string } }> = [
+      { type: 'text', text: `${channelContext}\n${content}` }
+    ]
+
+    // add image blocks after text
+    for (const img of images) {
+      contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } })
+    }
+
+    const msg: QueuedMessage = {
+      message: {
+        role: 'user',
+        content: contentBlocks,
+      },
+      outputTarget: `discord:${channelId}`,
+      route,
+      metadata: discordMessageId ? { discordMessageId } : undefined,
+    }
+    messageQueue.push(msg)
+    if (resolveWaiter) {
+      resolveWaiter()
+      resolveWaiter = null
+    }
+  }
+
+  async function* inputGenerator(): AsyncGenerator<QueuedMessage> {
+    while (true) {
+      while (messageQueue.length > 0) {
+        yield messageQueue.shift()!
+      }
+      await new Promise<void>(resolve => {
+        resolveWaiter = resolve
+      })
+    }
+  }
+
+  const tools: Tool[] = [
+    {
+      name: 'discord_send',
+      description: 'Send a message to a Discord channel. Do NOT use this if your message was triggered by a source with an outputTarget already set to a Discord channel (e.g. a timer with `output: discord:channelId`), because your text response is automatically routed there. Calling discord_send in that case causes duplicate messages.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID to send to' },
+          content: { type: 'string', description: 'Message content (max 2000 chars)' },
+        },
+        required: ['channel_id', 'content'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, content } = input as { channel_id: string; content: string }
+        try {
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+          const truncated = content.slice(0, 2000)
+          // works for both TextChannel and DMChannel
+          const sent = await (channel as TextChannel | DMChannel).send(truncated)
+          lastMessageIds.set(channel_id, sent.id)
+          return { content: `Sent message to channel ${channel_id}` }
+        } catch (err) {
+          return { content: `Failed to send: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_read_history',
+      description: 'Read recent messages from a Discord channel.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID' },
+          limit: { type: 'number', description: 'Number of messages to fetch (default 20, max 100)' },
+        },
+        required: ['channel_id'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, limit = 20 } = input as { channel_id: string; limit?: number }
+        try {
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+          const messages = await (channel as TextChannel).messages.fetch({ limit: Math.min(limit, 100) })
+          const formatted = messages
+            .reverse()
+            .map(m => {
+              let line = `[${m.id}] [${m.author.username}] ${m.content}`
+              if (m.attachments.size > 0) {
+                const atts = [...m.attachments.values()].map(a => `${a.name} (${a.contentType || 'unknown'}, ${a.size} bytes)`).join(', ')
+                line += ` [attachments: ${atts}]`
+              }
+              return line
+            })
+            .join('\n')
+          return { content: formatted || '(no messages)' }
+        } catch (err) {
+          return { content: `Failed to read: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_react',
+      description: 'Add a reaction to a message. Use message_id "last" to react to the most recent message in the channel.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID' },
+          message_id: { type: 'string', description: 'Message ID to react to, or "last" for the most recent message in the channel' },
+          emoji: { type: 'string', description: 'Emoji to react with (unicode or custom emoji name)' },
+        },
+        required: ['channel_id', 'message_id', 'emoji'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, emoji } = input as { channel_id: string; message_id: string; emoji: string }
+        let { message_id } = input as { message_id: string }
+
+        // resolve "last" to the most recent tracked message in this channel
+        if (message_id === 'last') {
+          const lastId = lastMessageIds.get(channel_id)
+          if (!lastId) {
+            return { content: `No tracked messages in channel ${channel_id}. Use a specific message ID, or send/receive a message first.`, is_error: true }
+          }
+          message_id = lastId
+        }
+
+        try {
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+          const message = await (channel as TextChannel).messages.fetch(message_id)
+          await message.react(emoji)
+          return { content: `Reacted with ${emoji} on message ${message_id}` }
+        } catch (err) {
+          return { content: `Failed to react: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_send_image',
+      description: 'Send an image file to a Discord channel.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID to send to' },
+          image_path: { type: 'string', description: 'Path to the image file to send' },
+          message: { type: 'string', description: 'Optional message text to include with the image' },
+        },
+        required: ['channel_id', 'image_path'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, image_path, message } = input as { channel_id: string; image_path: string; message?: string }
+        try {
+          const file = Bun.file(image_path)
+          if (!(await file.exists())) {
+            return { content: `image file not found: ${image_path}`, is_error: true }
+          }
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+          const buffer = Buffer.from(await file.arrayBuffer())
+          const filename = image_path.split('/').pop() || 'image.png'
+          await (channel as TextChannel | DMChannel).send({
+            content: message || undefined,
+            files: [{ attachment: buffer, name: filename }],
+          })
+          return { content: `image sent to channel ${channel_id}` }
+        } catch (err) {
+          return { content: `Failed to send image: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_fetch_attachment',
+      description: 'Fetch a specific message by ID and download its attachment(s) to disk. Returns local file paths for further processing. Handles voice messages (audio), images, and general file attachments.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel ID containing the message' },
+          message_id: { type: 'string', description: 'Message ID to fetch attachments from' },
+          attachment_index: { type: 'number', description: 'Optional: download only the Nth attachment (0-indexed). If omitted, downloads all.' },
+        },
+        required: ['channel_id', 'message_id'],
+      },
+      async execute(input: unknown): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        const { channel_id, message_id, attachment_index } = input as { channel_id: string; message_id: string; attachment_index?: number }
+        try {
+          const channel = await client.channels.fetch(channel_id)
+          if (!channel?.isTextBased()) {
+            return { content: 'Channel not found or not a text channel', is_error: true }
+          }
+
+          let msg: DiscordMessage
+          try {
+            msg = await (channel as TextChannel).messages.fetch(message_id)
+          } catch {
+            return { content: `Message ${message_id} not found in channel ${channel_id}`, is_error: true }
+          }
+
+          if (msg.attachments.size === 0) {
+            return { content: `Message ${message_id} has no attachments. Content: ${msg.content || '(empty)'}`, is_error: true }
+          }
+
+          const attachments = [...msg.attachments.values()]
+          let toDownload = attachments
+          if (attachment_index !== undefined) {
+            if (attachment_index < 0 || attachment_index >= attachments.length) {
+              return { content: `Attachment index ${attachment_index} out of range (message has ${attachments.length} attachment(s))`, is_error: true }
+            }
+            toDownload = [attachments[attachment_index]] as typeof attachments
+          }
+
+          await mkdir(ATTACHMENT_DIR, { recursive: true })
+          const results: string[] = []
+
+          for (const attachment of toDownload) {
+            const safeName = (attachment.name || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_')
+            const filename = `${msg.id}_${attachment.id}_${safeName}`
+            const filePath = join(ATTACHMENT_DIR, filename)
+            await downloadFile(attachment.url, filePath)
+            results.push(JSON.stringify({
+              path: filePath,
+              name: attachment.name,
+              contentType: attachment.contentType,
+              size: attachment.size,
+            }))
+          }
+
+          return { content: `Downloaded ${results.length} attachment(s):\n${results.join('\n')}` }
+        } catch (err) {
+          return { content: `Failed to fetch attachment: ${err}`, is_error: true }
+        }
+      },
+    },
+    {
+      name: 'discord_list_channels',
+      description: 'List accessible text channels in all guilds.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+      async execute(): Promise<ToolResult> {
+        if (!client) {
+          return { content: 'Discord client not connected', is_error: true }
+        }
+        try {
+          const channels: string[] = []
+          for (const guild of client.guilds.cache.values()) {
+            for (const channel of guild.channels.cache.values()) {
+              if (channel.isTextBased() && 'name' in channel) {
+                channels.push(`${guild.name} / #${channel.name} (${channel.id})`)
+              }
+            }
+          }
+          return { content: channels.join('\n') || '(no channels)' }
+        } catch (err) {
+          return { content: `Failed to list: ${err}`, is_error: true }
+        }
+      },
+    },
+  ]
+
+  // format a tool_use message for the detailed log channel (more verbose than main channel)
+  function formatDetailedToolUse(name: string, input: unknown, inputTokens: number): string {
+    const trunc = (s: string, n = 300) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2)
+    let msg = `🔧 **${name}**\n`
+    msg += `\`\`\`json\n${trunc(inputStr, 800)}\n\`\`\`\n`
+    msg += `*${inputTokens} input tokens*`
+    return msg
+  }
+
+  // format a tool_result message for the detailed log channel
+  function formatDetailedToolResult(name: string, content: import('../../server/types.ts').ToolResultContent, isError: boolean, inputTokens: number, resultTokens: number): string {
+    const status = isError ? '❌' : '✅'
+    const contentStr = typeof content === 'string'
+      ? content
+      : content.map(b => b.type === 'text' ? b.text : `[${b.type}]`).join('\n')
+    const trunc = (s: string, n = 600) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    let msg = `${status} **${name}** result\n`
+    if (contentStr.trim()) {
+      msg += `\`\`\`\n${trunc(contentStr, 1200)}\n\`\`\`\n`
+    }
+    msg += `*${inputTokens} + ${resultTokens} tokens*`
+    return msg
+  }
+
+  // send a message to the log channel (if configured)
+  async function sendToLogChannel(text: string) {
+    if (!client || !config?.logChannel) return
+    try {
+      const channel = await client.channels.fetch(config.logChannel)
+      if (!channel?.isTextBased()) return
+      // split if over 2000 chars
+      let remaining = text
+      while (remaining.length > 0) {
+        await (channel as TextChannel | DMChannel).send(remaining.slice(0, 2000))
+        remaining = remaining.slice(2000)
+      }
+    } catch (err) {
+      console.error('discord: failed to send to log channel:', err)
+    }
+  }
+
+  // send or edit the live progress message for condensed mode
+  async function updateLiveProgress(sessionId: string, textChannel: TextChannel | DMChannel, finished: boolean) {
+    const batch = pendingToolBatches.get(sessionId)
+    if (!batch || batch.length === 0) return
+
+    const content = renderToolBatch(batch, finished)
+    const existingMsgId = liveProgressMessages.get(sessionId)
+
+    try {
+      if (existingMsgId) {
+        const msg = await textChannel.messages.fetch(existingMsgId)
+        await msg.edit(content)
+      } else {
+        const msg = await textChannel.send(content)
+        liveProgressMessages.set(sessionId, msg.id)
+      }
+    } catch (err) {
+      console.error('discord: failed to update live progress:', err)
+      // fallback: try sending a new message
+      if (existingMsgId) {
+        try {
+          const msg = await textChannel.send(content)
+          liveProgressMessages.set(sessionId, msg.id)
+        } catch {}
+      }
+    }
+  }
+
+  // flush pending tool batch: final update + cleanup
+  async function flushToolBatch(sessionId: string, textChannel: TextChannel | DMChannel) {
+    const batch = pendingToolBatches.get(sessionId)
+    if (!batch || batch.length === 0) {
+      liveProgressMessages.delete(sessionId)
+      pendingToolBatches.delete(sessionId)
+      return
+    }
+
+    await updateLiveProgress(sessionId, textChannel, true)
+    pendingToolBatches.delete(sessionId)
+    liveProgressMessages.delete(sessionId)
+  }
+
+  // generate a brief summary for a tool call (used in condensed batches)
+  function toolBriefSummary(name: string, input: unknown): string {
+    const trunc = (s: string, n = 150) => s.length > n ? s.slice(0, n - 3) + '...' : s
+    if (name === 'bash') {
+      const cmd = (input as any)?.command
+      return cmd ? trunc(cmd) : ''
+    }
+    if (name === 'write_file' || name === 'read_file' || name === 'edit_file') {
+      const path = (input as any)?.path || (input as any)?.file_path
+      return path ? `${path}` : ''
+    }
+    if (name === 'spawn_claude_code') {
+      const task = (input as any)?.task
+      return task ? trunc(task) : ''
+    }
+    if (name === 'web_browse') {
+      const url = (input as any)?.url
+      return url ? trunc(url) : ''
+    }
+    if (name === 'remember') {
+      const topic = (input as any)?.topic
+      return topic ? trunc(topic) : ''
+    }
+    if (name === 'recall') {
+      const query = (input as any)?.query
+      return query ? trunc(query) : ''
+    }
+    if (name.startsWith('discord_')) return ''
+    // generic
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input)
+    return trunc(inputStr)
+  }
+
+  return {
+    name: 'discord',
+    configSchema: [
+      { key: 'token', type: 'string', description: 'Discord bot token', secret: true },
+      { key: 'allowedUsers', type: 'string', description: 'comma-separated user IDs allowed to interact' },
+      { key: 'channels', type: 'string', description: 'comma-separated channel IDs to listen to (empty = all)' },
+      { key: 'onlyRespondToMentions', type: 'boolean', description: 'only respond when mentioned' },
+      { key: 'autoReplyChannels', type: 'string', description: 'comma-separated channel IDs for auto-reply' },
+      { key: 'allowDMs', type: 'boolean', description: 'allow DMs', default: true },
+      { key: 'transcribeVoice', type: 'boolean', description: 'transcribe voice messages', default: true },
+      { key: 'typingDelayMaxMs', type: 'number', description: 'max typing delay (ms)', default: 1000 },
+      { key: 'typingDelayPerCharMs', type: 'number', description: 'per-character typing delay (ms)', default: 10 },
+      { key: 'logChannel', type: 'string', description: 'channel ID for logging' },
+      { key: 'condenseToolCalls', type: 'boolean', description: 'condense tool call output', default: false },
+    ],
+    description: `Discord bot. Text responses are automatically sent back to the channel/DM. Voice messages are transcribed. Messages include [channel_id: X] for routing.`,
+
+    tools,
+
+    input: inputGenerator(),
+
+    async output(sessionId: string, message: ServerMessage) {
+      if (!client) return
+
+      // sessionId format: channelId (already stripped of discord: prefix by routeOutput)
+      const channelId = sessionId
+      if (!channelId) return
+
+      // serialize sends per session to prevent out-of-order messages
+      const prevLock = sendLocks.get(sessionId) || Promise.resolve()
+      const currentLock = prevLock.then(async () => {
+        try {
+          const channel = await client!.channels.fetch(channelId)
+          if (!channel?.isTextBased()) return
+          const textChannel = channel as TextChannel | DMChannel
+
+          // finalize the current streaming message and clear tracking state
+          const finalizeStreamingMessage = async () => {
+            const streaming = streamingMessages.get(sessionId)
+            const buffer = messageBuffers.get(sessionId) || ''
+            if (streaming && buffer.trim()) {
+              try {
+                const msg = await textChannel.messages.fetch(streaming.messageId)
+                await msg.edit(buffer.trim().slice(0, DISCORD_MAX_LENGTH))
+              } catch (err) {
+                console.error('discord: failed to finalize streaming message:', err)
+              }
+            }
+            streamingMessages.delete(sessionId)
+            messageBuffers.delete(sessionId)
+            streamStartTimes.delete(sessionId)
+          }
+
+          // send or edit the streaming message with current buffer contents.
+          // if the buffer exceeds Discord's limit, finalize the current message
+          // (truncated to a clean break point) and start a new one for the rest.
+          const flushStreamingBuffer = async () => {
+            let buffer = messageBuffers.get(sessionId) || ''
+            const trimmed = buffer.trim()
+            if (!trimmed) return
+
+            const streaming = streamingMessages.get(sessionId)
+            const now = Date.now()
+
+            if (trimmed.length <= DISCORD_MAX_LENGTH) {
+              // fits in one message — send or edit
+              if (streaming) {
+                if (trimmed.length !== streaming.sentLength) {
+                  try {
+                    const msg = await textChannel.messages.fetch(streaming.messageId)
+                    await msg.edit(trimmed)
+                    streaming.sentLength = trimmed.length
+                    streaming.lastEditTime = now
+                  } catch (err) {
+                    console.error('discord: failed to edit streaming message:', err)
+                  }
+                }
+              } else {
+                const msg = await textChannel.send(trimmed)
+                streamingMessages.set(sessionId, { messageId: msg.id, channelId, sentLength: trimmed.length, lastEditTime: now })
+              }
+            } else {
+              // exceeds limit — find a clean break point near the limit
+              // in the current message, finalize it, then continue with remainder
+              if (streaming) {
+                const breakPoint = findBreakPoint(trimmed, DISCORD_MAX_LENGTH)
+                const toKeep = trimmed.slice(0, breakPoint).trim()
+                const remainder = trimmed.slice(breakPoint).trim()
+
+                try {
+                  const msg = await textChannel.messages.fetch(streaming.messageId)
+                  await msg.edit(toKeep.slice(0, DISCORD_MAX_LENGTH))
+                } catch (err) {
+                  console.error('discord: failed to edit streaming message:', err)
+                }
+                streamingMessages.delete(sessionId)
+
+                buffer = remainder
+                messageBuffers.set(sessionId, buffer)
+              }
+
+              // send overflow in chunks
+              while (buffer.trim().length > DISCORD_MAX_LENGTH) {
+                const breakPoint = findBreakPoint(buffer.trim(), DISCORD_MAX_LENGTH)
+                const chunk = buffer.trim().slice(0, breakPoint).trim()
+                buffer = buffer.trim().slice(breakPoint).trim()
+                messageBuffers.set(sessionId, buffer)
+                await textChannel.send(chunk.slice(0, DISCORD_MAX_LENGTH))
+              }
+
+              // start tracking the last chunk as the new streaming message
+              if (buffer.trim()) {
+                const msg = await textChannel.send(buffer.trim().slice(0, DISCORD_MAX_LENGTH))
+                streamingMessages.set(sessionId, { messageId: msg.id, channelId, sentLength: buffer.trim().length, lastEditTime: now })
+              }
+            }
+          }
+
+          // handle queued/dequeued control messages (reaction management)
+          if (message.type === 'queued') {
+            const discordMessageId = (message.metadata?.discordMessageId as string) || undefined
+            if (discordMessageId) {
+              try {
+                const msg = await textChannel.messages.fetch(discordMessageId)
+                await msg.react('⏳')
+                queuedReactions.set(channelId, discordMessageId)
+              } catch (err) {
+                console.error('discord: failed to add ⏳ reaction:', err)
+              }
+            }
+            return
+          }
+
+          if (message.type === 'dequeued') {
+            const discordMessageId = (message.metadata?.discordMessageId as string) || queuedReactions.get(channelId)
+            if (discordMessageId) {
+              try {
+                const msg = await textChannel.messages.fetch(discordMessageId)
+                const botReaction = msg.reactions.cache.get('⏳')
+                if (botReaction) await botReaction.users.remove(client!.user!.id)
+              } catch (err) {
+                console.error('discord: failed to remove ⏳ reaction:', err)
+              }
+              queuedReactions.delete(channelId)
+            }
+            return
+          }
+
+          // handle trigger_notice — compact status line for async plugin events
+          if (message.type === 'trigger_notice') {
+            await textChannel.send(`\`⚡ ${(message as any).text}\``)
+            return
+          }
+
+          // handle different message types
+          if (message.type === 'text') {
+            // flush any pending condensed tool batch before text starts
+            if (config?.condenseToolCalls) {
+              await flushToolBatch(sessionId, textChannel)
+            }
+
+            // accumulate text in buffer
+            let buffer = messageBuffers.get(sessionId) || ''
+            buffer += message.text
+            messageBuffers.set(sessionId, buffer)
+
+            // track when buffering started (for delaying initial message)
+            if (!streamStartTimes.has(sessionId)) {
+              streamStartTimes.set(sessionId, Date.now())
+            }
+
+            const streaming = streamingMessages.get(sessionId)
+            const now = Date.now()
+
+            if (buffer.trim().length > DISCORD_MAX_LENGTH) {
+              // exceeds discord limit — flush immediately to split
+              await flushStreamingBuffer()
+            } else if (!streaming) {
+              // no message sent yet — only send after initial delay
+              if (now - streamStartTimes.get(sessionId)! >= STREAM_EDIT_INTERVAL_MS) {
+                await flushStreamingBuffer()
+              }
+            } else if (now - streaming.lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
+              // throttle: only edit if at least 2s since last edit
+              await flushStreamingBuffer()
+            }
+            // otherwise: buffer accumulates, will be flushed on next interval or at end
+          } else if (message.type === 'text_block_end') {
+            // finalize: do a final edit with complete content
+            await flushStreamingBuffer()
+            streamingMessages.delete(sessionId)
+            messageBuffers.delete(sessionId)
+            streamStartTimes.delete(sessionId)
+          } else if (message.type === 'tool_use') {
+            // finalize any in-progress streaming message before showing tool use
+            if (streamingMessages.has(sessionId)) {
+              await finalizeStreamingMessage()
+            }
+            // calculate input tokens
+            const inputStr = typeof message.input === 'string'
+              ? message.input
+              : JSON.stringify(message.input)
+            const inputTokens = countTokens(inputStr)
+
+            // send detailed log to log channel (if configured)
+            if (config?.logChannel) {
+              sendToLogChannel(formatDetailedToolUse(message.name, message.input, inputTokens))
+            }
+
+            if (config?.condenseToolCalls) {
+              // condensed mode: accumulate in batch and update live progress message
+              const batch = pendingToolBatches.get(sessionId) || []
+              batch.push({
+                name: message.name,
+                summary: toolBriefSummary(message.name, message.input),
+                inputTokens,
+              })
+              pendingToolBatches.set(sessionId, batch)
+              // store tool_use_id -> batch index so tool_result can update it
+              toolMessages.set(message.id, { channelId, messageId: '', toolName: message.name, originalContent: '', inputTokens })
+              // send or edit the live progress message immediately
+              await updateLiveProgress(sessionId, textChannel, false)
+            } else {
+              // non-condensed: original per-tool message behavior
+              const trunc = (s: string, n = 300) => s.length > n ? s.slice(0, n - 3) + '...' : s
+              let toolMessage = `🔧 ${message.name}`
+
+              if (message.name === 'bash') {
+                const cmd = (message.input as any)?.command
+                const desc = (message.input as any)?.description
+                if (cmd) toolMessage += `: ${trunc(cmd)}`
+                if (desc) toolMessage += ` — ${trunc(desc, 240)}`
+              } else if (message.name === 'write_file' || message.name === 'read_file' || message.name === 'edit_file') {
+                const path = (message.input as any)?.path || (message.input as any)?.file_path
+                if (path) toolMessage += `: ${path}`
+                if (message.name === 'edit_file') {
+                  const oldStr = (message.input as any)?.old_string
+                  const newStr = (message.input as any)?.new_string
+                  if (oldStr) toolMessage += ` | replacing ${trunc(JSON.stringify(oldStr), 180)}`
+                  if (newStr) toolMessage += ` → ${trunc(JSON.stringify(newStr), 180)}`
+                } else if (message.name === 'write_file') {
+                  const content = (message.input as any)?.content
+                  if (content) toolMessage += ` (${content.length} chars)`
+                }
+              } else if (message.name === 'spawn_claude_code') {
+                const task = (message.input as any)?.task
+                if (task) toolMessage += `: ${trunc(task)}`
+              } else if (message.name === 'discord_send') {
+                const text = (message.input as any)?.text || (message.input as any)?.content || (message.input as any)?.message
+                if (text) toolMessage += `: ${trunc(text, 240)}`
+              } else if (message.name === 'discord_send_image' || message.name === 'discord_read_history' || message.name === 'discord_react' || message.name === 'discord_fetch_attachment') {
+                const inp = message.input as any
+                const channel = inp?.channel_id || inp?.channel
+                if (channel) toolMessage += ` in #${channel}`
+                if (message.name === 'discord_react') {
+                  const emoji = inp?.emoji
+                  if (emoji) toolMessage += ` with ${emoji}`
+                }
+              } else if (message.name === 'remember') {
+                const topic = (message.input as any)?.topic
+                const content = (message.input as any)?.content
+                if (topic) toolMessage += `: ${trunc(topic, 180)}`
+                if (content) toolMessage += ` — ${trunc(content, 180)}`
+              } else if (message.name === 'recall') {
+                const query = (message.input as any)?.query
+                if (query) toolMessage += `: ${trunc(query)}`
+              } else if (message.name === 'timer_create') {
+                const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+                const interval = (message.input as any)?.interval || (message.input as any)?.cron
+                if (filename) toolMessage += `: ${filename}`
+                if (interval) toolMessage += ` (${interval})`
+              } else if (message.name === 'timer_delete' || message.name === 'timer_read' || message.name === 'timer_list') {
+                const filename = (message.input as any)?.filename || (message.input as any)?.timer_filename
+                if (filename) toolMessage += `: ${filename}`
+              } else if (message.name === 'web_browse') {
+                const url = (message.input as any)?.url
+                const instruction = (message.input as any)?.instruction || (message.input as any)?.prompt
+                if (url) toolMessage += `: ${trunc(url)}`
+                if (instruction) toolMessage += ` — ${trunc(instruction, 180)}`
+              } else if (message.name === 'generate_image') {
+                const prompt = (message.input as any)?.prompt
+                const size = (message.input as any)?.size
+                if (prompt) toolMessage += `: ${trunc(prompt)}`
+                if (size) toolMessage += ` (${size})`
+              } else {
+                toolMessage += `: ${trunc(inputStr)}`
+              }
+
+              toolMessage += ` (${inputTokens} tokens)`
+              toolMessage = toolMessage.replaceAll('`', "'")
+
+              const msg = await textChannel.send(`\`\`\`\n${toolMessage}\n\`\`\``)
+              toolMessages.set(message.id, { channelId, messageId: msg.id, toolName: message.name, originalContent: toolMessage, inputTokens })
+            }
+          } else if (message.type === 'tool_result') {
+            const resultTokens = countToolResultTokens(message.content)
+            const toolInfo = toolMessages.get(message.tool_use_id)
+
+            // send detailed result to log channel (if configured)
+            if (config?.logChannel && toolInfo) {
+              sendToLogChannel(formatDetailedToolResult(toolInfo.toolName, message.content, !!message.is_error, toolInfo.inputTokens, resultTokens))
+            }
+
+            if (config?.condenseToolCalls && toolInfo) {
+              // condensed mode: update the batch entry with result info
+              const batch = pendingToolBatches.get(sessionId)
+              if (batch) {
+                // find the matching entry (last one with this tool name that has no resultTokens yet)
+                for (let i = batch.length - 1; i >= 0; i--) {
+                  if (batch[i]!.name === toolInfo.toolName && batch[i]!.resultTokens === undefined) {
+                    batch[i]!.resultTokens = resultTokens
+                    batch[i]!.isError = !!message.is_error
+                    break
+                  }
+                }
+              }
+              toolMessages.delete(message.tool_use_id)
+              // update the live progress message with completion status
+              await updateLiveProgress(sessionId, textChannel, false)
+            } else if (toolInfo && toolInfo.messageId) {
+              // non-condensed: edit the original tool message
+              try {
+                const msg = await textChannel.messages.fetch(toolInfo.messageId)
+                const status = message.is_error ? '❌' : '✅'
+
+                const newContent = toolInfo.originalContent
+                  .replace(/^🔧/, status)
+                  .replace(/ \(.*? tokens\)$/, ` (${toolInfo.inputTokens} + ${resultTokens} tokens)`)
+
+                await msg.edit(`\`\`\`\n${newContent}\n\`\`\``)
+                toolMessages.delete(message.tool_use_id)
+              } catch (err) {
+                console.error('failed to edit tool message:', err)
+              }
+            }
+          } else if (message.type === 'done') {
+            // flush any pending condensed tool batch
+            if (config?.condenseToolCalls) {
+              await flushToolBatch(sessionId, textChannel)
+            }
+            // finalize any streaming message with remaining buffer
+            await finalizeStreamingMessage()
+            sendLocks.delete(sessionId)
+            stopTyping(channelId)
+            // clean up any stale queued reactions for this channel
+            const staleReactionMsgId = queuedReactions.get(channelId)
+            if (staleReactionMsgId) {
+              try {
+                const staleMsg = await textChannel.messages.fetch(staleReactionMsgId)
+                const botReaction = staleMsg.reactions.cache.get('⏳')
+                if (botReaction) await botReaction.users.remove(client!.user!.id)
+              } catch {}
+              queuedReactions.delete(channelId)
+            }
+          } else if (message.type === 'error') {
+            // send error message
+            await textChannel.send(`❌ Error: ${message.message}`)
+            stopTyping(channelId)
+          }
+        } catch (err) {
+          console.error(`discord output error:`, err)
+          stopTyping(channelId)
+        }
+      })
+
+      sendLocks.set(sessionId, currentLock)
+      await currentLock
+    },
+
+    async init(cfg: unknown) {
+      config = cfg as DiscordConfig
+      if (!config?.token) {
+        console.warn('discord plugin: no token provided, tools will fail')
+        return
+      }
+
+      client = new Client({
+        intents: [
+          GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.DirectMessages,
+          GatewayIntentBits.MessageContent,
+        ],
+        partials: [Partials.Channel],  // required for DM events
+      })
+
+      client.on(Events.MessageCreate, async (msg: DiscordMessage) => {
+        // ignore bot messages
+        if (msg.author.bot) return
+
+        // check user whitelist (required for safety)
+        if (!config!.allowedUsers.includes(msg.author.id)) {
+          console.log(`discord: ignored message from non-whitelisted user ${msg.author.username} (${msg.author.id})`)
+          return
+        }
+
+        const isDM = msg.channel.type === ChannelType.DM
+        const guildChannel = !isDM ? (msg.channel as TextChannel) : null
+        const route = buildRoute(
+          msg.channelId,
+          isDM,
+          msg.author.username,
+          guildChannel?.guild?.name,
+          guildChannel?.name,
+        )
+
+        // handle DMs
+        if (isDM) {
+          if (config!.allowDMs === false) return
+        } else {
+          // filter by channels if configured (only for guild messages)
+          if (config!.channels?.length && !config!.channels.includes(msg.channelId)) {
+            return
+          }
+
+          // filter by mentions if configured (skip for auto-reply channels)
+          if (config!.onlyRespondToMentions && !config!.autoReplyChannels?.includes(msg.channelId)) {
+            if (client?.user && !msg.mentions.has(client.user.id)) {
+              return
+            }
+          }
+        }
+
+        // handle /stop command — bypass message queue and abort directly
+        if (msg.content.trim() === '/stop') {
+          if (serverContext?.requestStop) {
+            await serverContext.requestStop(route)
+          }
+          return
+        }
+
+        // handle /reset command (reset session without summary)
+        if (msg.content.trim() === '/reset') {
+          if (!config!.sessionManager) return
+          try {
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const newId = await config!.sessionManager.resetSession(sessionId, route)
+            const channel = msg.channel as TextChannel | DMChannel
+            await channel.send(`✅ reset session \`${sessionId}\` → \`${newId}\``)
+          } catch (err) {
+            const channel = msg.channel as TextChannel | DMChannel
+            await channel.send(`❌ reset failed: ${err}`)
+          }
+          return
+        }
+
+        // start persistent typing indicator (re-fires every 4s until stopped)
+        startTyping(msg.channel as TextChannel | DMChannel)
+
+        let content = msg.content
+        const images: Array<{ media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string }> = []
+
+        // handle attachments
+        if (msg.attachments.size > 0) {
+          console.log(`discord: attachments count: ${msg.attachments.size}, types: ${[...msg.attachments.values()].map(a => a.contentType).join(", ")}`)
+          for (const attachment of msg.attachments.values()) {
+            // check if it's an image
+            const isImage = attachment.contentType?.startsWith('image/') &&
+                           (attachment.contentType === 'image/png' ||
+                            attachment.contentType === 'image/jpeg' ||
+                            attachment.contentType === 'image/jpg' ||
+                            attachment.contentType === 'image/gif' ||
+                            attachment.contentType === 'image/webp')
+
+            if (isImage) {
+              try {
+                const imageData = await downloadImageAsBase64(attachment.url)
+                images.push(imageData)
+              } catch (err) {
+                console.error('Failed to download image:', err)
+                content += `\n\n[Image attachment - download failed]`
+              }
+              continue
+            }
+
+            // check if it's an audio file
+            const isAudio = attachment.contentType?.startsWith('audio/') ||
+                           /\.(mp3|wav|ogg|m4a|opus|webm)$/i.test(attachment.name || '')
+
+            if (isAudio && config!.transcribeVoice !== false) {
+              try {
+                const audioDir = join(getDataDir(), 'discord', 'voice-notes')
+                await mkdir(audioDir, { recursive: true })
+                const audioFile = join(audioDir, `${Date.now()}-${attachment.name}`)
+                await downloadFile(attachment.url, audioFile)
+                const transcription = await transcribeAudio(audioFile)
+
+                // echo transcription back to the channel so user can verify
+                const echoChannel = msg.channel as TextChannel | DMChannel
+                await echoChannel.send(`\`\`\`\n[Voice transcription]\n${transcription}\n\`\`\``)
+
+                content += `\n\n[Voice message transcription: ${transcription}]`
+              } catch (err) {
+                console.error('Failed to transcribe audio:', err)
+                content += `\n\n[Voice message - transcription failed]`
+              }
+              continue
+            }
+
+            // general attachment: download and save to disk
+            try {
+              await mkdir(ATTACHMENT_DIR, { recursive: true })
+              const safeName = (attachment.name || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_')
+              const filename = `${msg.id}_${attachment.id}_${safeName}`
+              const filePath = join(ATTACHMENT_DIR, filename)
+              await downloadFile(attachment.url, filePath)
+              content += `\n\n[attachment: ${filePath}]`
+              console.log(`discord: saved attachment ${filename} (${attachment.contentType || 'unknown type'})`)
+            } catch (err) {
+              console.error('Failed to download attachment:', err)
+              content += `\n\n[attachment: download failed - ${attachment.name || 'unknown'}]`
+            }
+          }
+        }
+
+        // track last message ID for this channel (enables "last" shorthand in discord_react)
+        lastMessageIds.set(msg.channelId, msg.id)
+
+        queueMessage(msg.channelId, content, msg.author.username, isDM, route, guildChannel?.name, guildChannel?.guild?.name, images, msg.id)
+      })
+
+      client.on(Events.ClientReady, async () => {
+        console.log(`discord: logged in as ${client!.user?.tag}`)
+
+        // register slash commands
+        try {
+          await client!.application?.commands.set([
+            { name: 'compact', description: 'Force compact the current session' },
+            { name: 'reset', description: 'Reset session without summary (clean slate)' },
+            { name: 'status', description: 'Show current session info' },
+            { name: 'stop', description: 'Stop the current operation immediately' },
+          ])
+          console.log('discord: registered slash commands')
+        } catch (err) {
+          console.error('discord: failed to register slash commands:', err)
+        }
+      })
+
+      client.on(Events.InteractionCreate, async (interaction) => {
+        if (!interaction.isChatInputCommand()) return
+
+        // check user whitelist
+        if (!config!.allowedUsers.includes(interaction.user.id)) {
+          await interaction.reply({ content: '❌ not authorized', ephemeral: true })
+          return
+        }
+
+        if (!config!.sessionManager) {
+          await interaction.reply({ content: '❌ session manager not available', ephemeral: true })
+          return
+        }
+
+        try {
+          const isDM = interaction.channel?.type === ChannelType.DM || interaction.guildId == null
+          const guildChannel = !isDM && interaction.channel && 'name' in interaction.channel
+            ? interaction.channel as TextChannel
+            : null
+          const route = buildRoute(
+            interaction.channelId,
+            isDM,
+            interaction.user.username,
+            interaction.guild?.name,
+            guildChannel?.name,
+          )
+          if (interaction.commandName === 'stop') {
+            if (serverContext?.requestStop) {
+              await serverContext.requestStop(route)
+            }
+            await interaction.reply({ content: 'stopping...', ephemeral: true })
+            return
+          } else if (interaction.commandName === 'compact') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            if (serverContext?.requestCompact) {
+              await interaction.editReply(`⏳ running learn/finalize compaction for \`${sessionId}\`...`)
+              const newId = await serverContext.requestCompact(route)
+              if (newId) {
+                await interaction.editReply(`✅ compacted session \`${sessionId}\` → \`${newId}\``)
+              } else {
+                await interaction.editReply(`⚠️ learn turn did not finalize session \`${sessionId}\``)
+              }
+            } else {
+              await interaction.editReply(`❌ compact not available (server context missing)`)
+            }
+          } else if (interaction.commandName === 'reset') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const newId = await config!.sessionManager.resetSession(sessionId, route)
+            await interaction.editReply(`✅ reset session \`${sessionId}\` → \`${newId}\``)
+          } else if (interaction.commandName === 'status') {
+            await interaction.deferReply()
+            const sessionId = await config!.sessionManager.getSessionForMessage(route)
+            const info = await config!.sessionManager.getSessionInfo(sessionId)
+
+            const createdStr = info.createdAt ? formatLocalTime(info.createdAt) : 'unknown'
+            const lastActivityStr = info.lastActivity ? formatLocalTime(info.lastActivity) : 'unknown'
+            const ageMinutes = info.createdAt ? Math.floor((Date.now() - info.createdAt.getTime()) / 60000) : 0
+
+            let reply = '📊 **Session Info**\n'
+            reply += `**ID:** \`${info.id}\`\n`
+            reply += `**Messages:** ${info.messageCount}\n`
+            reply += `**Tokens:** ~${info.estimatedTokens} (system: ~${info.systemPromptTokens})\n`
+            reply += `**Created:** ${createdStr}\n`
+            reply += `**Last Activity:** ${lastActivityStr}\n`
+            reply += `**Age:** ${ageMinutes} minutes`
+
+            // active plugin tasks (coding agents, bash, etc.)
+            if (serverContext?.pluginManager) {
+              const statuses = await serverContext.pluginManager.getPluginStatuses()
+              reply += formatPluginStatuses(statuses)
+            }
+
+            // upcoming timers
+            const timers = await getUpcomingTimers(5)
+            if (timers.length > 0) {
+              reply += '\n⏰ **Upcoming Timers**\n'
+              for (const t of timers) {
+                reply += `\`${t.filename}\` — ${formatLocalTime(t.nextFire)} (in ${formatTimeUntil(t.nextFire)})\n`
+              }
+            }
+
+            await interaction.editReply(reply)
+          }
+        } catch (err) {
+          const errorMsg = `❌ command error: ${err}`
+          if (interaction.deferred) {
+            await interaction.editReply(errorMsg)
+          } else {
+            await interaction.reply({ content: errorMsg, ephemeral: true })
+          }
+        }
+      })
+
+      await client.login(config.token)
+
+      // run attachment cleanup on startup and every 6 hours
+      cleanupOldAttachments()
+      cleanupInterval = setInterval(cleanupOldAttachments, 6 * 60 * 60 * 1000)
+    },
+
+    async destroy() {
+      if (cleanupInterval) {
+        clearInterval(cleanupInterval)
+        cleanupInterval = null
+      }
+      if (client) {
+        await client.destroy()
+        client = null
+      }
+    },
+  }
+}

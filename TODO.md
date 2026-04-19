@@ -1,0 +1,38 @@
+- [x] add a plugin to support Discord
+- [x] write a nicer README.md explaining the core concepts (e.g. core, plugin, list of core plugins, llm provider, what's in the core server, what can be accomplished with plugins)
+- [x] test the client in tmux
+- [x] can you number session files starting from 0000 instead of randomly
+- [x] i'd like to give the agent more personality. could you add a SOUL.md next to config.json5? i have some IDENTITY.md and SOUL.md files from another project i'd like to draw inspiration from.
+- [x] discord: when receiving messages over discord, should have some metadata attached like channel id and message id so bot can react
+- [x] cli: make it a full blown ink tui
+- [x] cli: make ctrl+d exit
+- [x] debug: add tui subcommands for listing sessions, printing out what would be the context sent to a session
+- [x] claude code skill: i would like you to implement a claude code plugin that lets the agent control claude code. recursive, i know.
+- [x] add ability to parse voice notes coming from discord, through a plugin.
+- [x] wakeups and cron
+- [x] better claude code skill
+- [x] session management
+- [x] manual compaction
+- [x] basic web browsing tool
+- [x] qwen3-tts voice
+- [x] see images
+- [x] more correct debug cli commands
+- [x] browser stealth -- ONESHOT
+- [x] knowledge revamp -- plugin is responsible for daily & user files, core only compaction
+- [x] lower effort claude by default
+- [x] connect to gmail
+- [x] knowledge revamp -- why the hell is it 15k tokens of system context
+- [x] visual web browser tool
+- [x] tui should display a full audit log, including a history of all tool calls
+- [x] brave web search api
+- [x] kimi k2.5
+- [x] help me with verizon plan
+- [x] support agent skills
+- [ ] bitwarden
+- [ ] make /stop able to interrupt a running tool call
+- [ ] fix tts-server architecture. sucks it needs a port number
+- [ ] fix the incoming message queueing issue
+- [ ] google local places api
+- [ ] archive old state files
+- [ ] phone calling
+- [ ] local llm support?

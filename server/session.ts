@@ -1,0 +1,415 @@
+import { mkdir, unlink } from 'node:fs/promises'
+import { homedir } from 'os'
+import { join } from 'path'
+import { EventEmitter } from 'events'
+import type { Message, MessageCost, SessionInfo, SessionEntry, ContentBlock } from './types.ts'
+import { countMessagesTokens } from './tokens.ts'
+import { formatLocalDate } from './time.ts'
+
+/** Emits 'entry' events with { sessionId, entry } when entries are appended. */
+export const sessionEvents = new EventEmitter()
+sessionEvents.setMaxListeners(100)
+
+const TOEBEANS_DIR = join(homedir(), '.toebeans')
+const SESSIONS_DIR = join(TOEBEANS_DIR, 'sessions')
+const RESUME_PATH = join(TOEBEANS_DIR, 'resume.json')
+
+export interface ActiveTurnState {
+  sessionId: string
+  route: string
+  outputTarget: string | null
+  pluginName: string
+  startedAt: string
+  initialContent: ContentBlock[]
+  userMessagePersisted: boolean
+}
+
+interface ResumeStateFile {
+  outputTarget?: string
+  route?: string
+  activeTurns?: Record<string, ActiveTurnState>
+}
+
+let resumeStateWriteQueue: Promise<void> = Promise.resolve()
+
+export async function ensureDataDirs(): Promise<void> {
+  await mkdir(SESSIONS_DIR, { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'memory'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'plugins'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'skills'), { recursive: true })
+  await mkdir(join(TOEBEANS_DIR, 'workspace'), { recursive: true })
+}
+
+function getSessionPath(sessionId: string): string {
+  return join(SESSIONS_DIR, `${sessionId}.jsonl`)
+}
+
+// sanitize a route string for use in filenames
+// "discord:1466679760976609393" -> "discord-1466679760976609393"
+export function sanitizeRoute(route: string): string {
+  return route.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+// extract the sanitized route prefix from a session ID.
+// session IDs have the format: {sanitizedRoute}-{YYYY-MM-DD}-{NNNN} or {YYYY-MM-DD}-{NNNN} (unrouted)
+export function routeFromSessionId(sessionId: string): string {
+  const match = sessionId.match(/^(.*?)-?(\d{4}-\d{2}-\d{2}-\d{4})$/)
+  if (!match) return ''
+  return match[1] || ''
+}
+
+export async function generateSessionId(route?: string): Promise<string> {
+  const today = formatLocalDate(new Date()) // YYYY-MM-DD in configured timezone
+  const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
+  const prefix = `${routePrefix}${today}-`
+
+  const glob = new Bun.Glob('*.jsonl')
+  const usedNumbers = new Set<number>()
+
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const sessionId = path.replace('.jsonl', '')
+    // only look at sessions with this prefix
+    if (sessionId.startsWith(prefix)) {
+      const numPart = sessionId.slice(prefix.length) // extract NNNN part
+      const num = parseInt(numPart, 10)
+      if (!isNaN(num) && num >= 0 && num <= 9999) {
+        usedNumbers.add(num)
+      }
+    }
+  }
+
+  // find smallest unused number in range 0-9999
+  for (let i = 0; i <= 9999; i++) {
+    if (!usedNumbers.has(i)) {
+      return `${prefix}${i.toString().padStart(4, '0')}`
+    }
+  }
+
+  // all 10000 slots taken (unlikely)
+  throw new Error(`all session IDs exhausted for ${prefix} (0000-9999)`)
+}
+
+/**
+ * Parse a JSONL line as a SessionEntry. Handles both new entry format
+ * (has a `type` field) and legacy format (raw Message objects with `role`).
+ */
+function parseSessionLine(line: string): SessionEntry | null {
+  const parsed = JSON.parse(line)
+  if (parsed.type === 'system_prompt' || parsed.type === 'message') {
+    return parsed as SessionEntry
+  }
+  // legacy: standalone cost entries — skip (costs are now on message entries)
+  if (parsed.type === 'cost') {
+    return null
+  }
+  // legacy: raw Message object — wrap it
+  return { type: 'message', timestamp: '', message: parsed as Message }
+}
+
+/**
+ * Load all session entries (new format).
+ */
+export async function loadSessionEntries(sessionId: string): Promise<SessionEntry[]> {
+  const path = getSessionPath(sessionId)
+  const file = Bun.file(path)
+
+  if (!(await file.exists())) {
+    return []
+  }
+
+  const text = await file.text()
+  const lines = text.trim().split('\n').filter(Boolean)
+  const parsed = lines.map(parseSessionLine)
+  return parsed.filter((e): e is SessionEntry => e !== null)
+}
+
+/**
+ * Load only the Message objects from a session (for LLM calls).
+ */
+export async function loadSession(sessionId: string): Promise<Message[]> {
+  const entries = await loadSessionEntries(sessionId)
+  return entries
+    .filter((e): e is SessionEntry & { type: 'message' } => e.type === 'message')
+    .map(e => e.message)
+}
+
+/**
+ * Load the system prompt from a session (first system_prompt entry), or null if none.
+ */
+export async function loadSystemPrompt(sessionId: string): Promise<string | null> {
+  const entries = await loadSessionEntries(sessionId)
+  const sp = entries.find((e): e is SessionEntry & { type: 'system_prompt' } => e.type === 'system_prompt')
+  return sp?.content ?? null
+}
+
+/**
+ * Load all cost data from a session (extracted from message entries with cost fields).
+ */
+export async function loadCostEntries(sessionId: string): Promise<MessageCost[]> {
+  const entries = await loadSessionEntries(sessionId)
+  const costs: MessageCost[] = []
+  for (const e of entries) {
+    if (e.type === 'message' && e.cost) {
+      costs.push(e.cost)
+    }
+  }
+  return costs
+}
+
+/**
+ * Append a session entry to the JSONL file.
+ */
+export async function appendEntry(sessionId: string, entry: SessionEntry): Promise<void> {
+  const path = getSessionPath(sessionId)
+  const line = JSON.stringify(entry) + '\n'
+
+  const file = Bun.file(path)
+  if (await file.exists()) {
+    const existing = await file.text()
+    await Bun.write(path, existing + line)
+  } else {
+    await Bun.write(path, line)
+  }
+
+  sessionEvents.emit('entry', { sessionId, entry })
+}
+
+/**
+ * Append a message to the session (wraps in a SessionEntry).
+ */
+export async function appendMessage(sessionId: string, message: Message, cost?: MessageCost): Promise<void> {
+  const entry: SessionEntry = {
+    type: 'message',
+    timestamp: new Date().toISOString(),
+    message,
+  }
+  if (cost) {
+    ;(entry as SessionEntry & { type: 'message' }).cost = cost
+  }
+  await appendEntry(sessionId, entry)
+}
+
+export async function listSessions(): Promise<SessionInfo[]> {
+  const glob = new Bun.Glob('*.jsonl')
+  const sessions: SessionInfo[] = []
+
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const sessionId = path.replace('.jsonl', '')
+    const fullPath = join(SESSIONS_DIR, path)
+    const stat = await Bun.file(fullPath).stat()
+
+    const createdAt = stat ? new Date(stat.birthtime) : new Date()
+    const lastActiveAt = stat ? new Date(stat.mtime) : createdAt
+
+    sessions.push({
+      id: sessionId,
+      createdAt,
+      lastActiveAt,
+    })
+  }
+
+  return sessions.sort((a, b) => b.lastActiveAt.getTime() - a.lastActiveAt.getTime())
+}
+
+export function getDataDir(): string {
+  return TOEBEANS_DIR
+}
+
+export function getMemoryDir(): string {
+  return join(TOEBEANS_DIR, 'memory')
+}
+
+export function getPluginsDir(): string {
+  return join(TOEBEANS_DIR, 'plugins')
+}
+
+export function getWorkspaceDir(): string {
+  return join(TOEBEANS_DIR, 'workspace')
+}
+
+export function getSoulPath(): string {
+  return join(TOEBEANS_DIR, 'SOUL.md')
+}
+
+// in-memory route → current session mapping (authoritative once populated)
+const currentSessionMap = new Map<string, string>()
+
+// resolve route key for the map (empty string for default route)
+function routeKey(route?: string): string {
+  return route ?? ''
+}
+
+// set the current session for a route (called after compaction / reset to atomically switch)
+export function setCurrentSessionId(route: string | undefined, sessionId: string): void {
+  currentSessionMap.set(routeKey(route), sessionId)
+}
+
+// get the current session for a route.
+// uses in-memory map if available; falls back to filename ordering on cold start.
+export async function getCurrentSessionId(route?: string): Promise<string> {
+  const key = routeKey(route)
+  const cached = currentSessionMap.get(key)
+  if (cached) return cached
+
+  // cold start: pick the session with the lexicographically highest filename.
+  // filenames are {route-prefix}{YYYY-MM-DD}-{NNNN}.jsonl, so lexicographic
+  // order = chronological order. this avoids mtime heuristics which can be
+  // invalidated by stale async writes, backup tools, or filesystem quirks.
+  const routePrefix = route ? `${sanitizeRoute(route)}-` : ''
+
+  const glob = new Bun.Glob('*.jsonl')
+  let latestId: string | null = null
+
+  for await (const path of glob.scan(SESSIONS_DIR)) {
+    const sessionId = path.replace('.jsonl', '')
+
+    if (routePrefix) {
+      // routed session: must start with the prefix
+      if (!sessionId.startsWith(routePrefix)) continue
+    } else {
+      // default route: must start with a digit (date-prefixed, no route)
+      if (!/^\d/.test(sessionId)) continue
+    }
+
+    // extract the date-sequence suffix for comparison
+    const suffix = routePrefix ? sessionId.slice(routePrefix.length) : sessionId
+    const latestSuffix = latestId
+      ? (routePrefix ? latestId.slice(routePrefix.length) : latestId)
+      : ''
+
+    if (!latestId || suffix > latestSuffix) {
+      latestId = sessionId
+    }
+  }
+
+  if (latestId) {
+    currentSessionMap.set(key, latestId)
+    return latestId
+  }
+
+  // no session found, create a new ID
+  const newId = await generateSessionId(route)
+  currentSessionMap.set(key, newId)
+  return newId
+}
+
+// get all active route → session mappings (for status dashboard)
+export function getActiveRoutes(): Map<string, string> {
+  return new Map(currentSessionMap)
+}
+
+// exported for testing: clear the in-memory route map
+export function _clearSessionMap(): void {
+  currentSessionMap.clear()
+}
+
+// estimate token count for a session
+export async function estimateSessionTokens(sessionId: string): Promise<number> {
+  const messages = await loadSession(sessionId)
+  return countMessagesTokens(messages)
+}
+
+// get session creation time from file birthtime
+export async function getSessionCreatedAt(sessionId: string): Promise<Date | null> {
+  const path = getSessionPath(sessionId)
+  const file = Bun.file(path)
+  if (!(await file.exists())) return null
+
+  const stat = await file.stat()
+  return stat ? new Date(stat.birthtime) : null
+}
+
+// get last activity time from file mtime
+export async function getSessionLastActivity(sessionId: string): Promise<Date | null> {
+  const path = getSessionPath(sessionId)
+  const file = Bun.file(path)
+  if (!(await file.exists())) return null
+  const stat = await file.stat()
+  return stat ? new Date(stat.mtime) : null
+}
+
+// write a session from scratch (used for compacted sessions)
+export async function writeSession(sessionId: string, entries: SessionEntry[]): Promise<void> {
+  const path = getSessionPath(sessionId)
+  const lines = entries.map(e => JSON.stringify(e)).join('\n') + '\n'
+  await Bun.write(path, lines)
+}
+
+async function readResumeState(): Promise<ResumeStateFile | null> {
+  const file = Bun.file(RESUME_PATH)
+  if (!(await file.exists())) return null
+  try {
+    return await file.json() as ResumeStateFile
+  } catch {
+    return null
+  }
+}
+
+async function writeResumeState(state: ResumeStateFile | null): Promise<void> {
+  const hasOutputTarget = !!state?.outputTarget
+  const hasActiveTurns = !!state?.activeTurns && Object.keys(state.activeTurns).length > 0
+  if (!hasOutputTarget && !hasActiveTurns) {
+    try { await unlink(RESUME_PATH) } catch { /* doesn't exist */ }
+    return
+  }
+  await Bun.write(RESUME_PATH, JSON.stringify(state))
+}
+
+async function runResumeStateMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const run = resumeStateWriteQueue.then(fn, fn)
+  resumeStateWriteQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+// set the last output target and route (for auto-resume after restart)
+export async function setLastOutputTarget(outputTarget: string | null, route?: string): Promise<void> {
+  await runResumeStateMutation(async () => {
+    const current = await readResumeState()
+    if (outputTarget) {
+      await writeResumeState({
+        ...current,
+        outputTarget,
+        route: route || outputTarget,
+      })
+    } else {
+      await writeResumeState(current?.activeTurns ? { activeTurns: current.activeTurns } : null)
+    }
+  })
+}
+
+// get the last output target and route
+export async function getLastOutputTarget(): Promise<{ outputTarget: string; route: string } | null> {
+  await resumeStateWriteQueue
+  const data = await readResumeState()
+  if (!data?.outputTarget) return null
+  return { outputTarget: data.outputTarget, route: data.route || data.outputTarget }
+}
+
+export async function setActiveTurn(activeTurn: ActiveTurnState | null, sessionId?: string): Promise<void> {
+  await runResumeStateMutation(async () => {
+    const current = await readResumeState()
+    const activeTurns = { ...(current?.activeTurns ?? {}) }
+    if (activeTurn) {
+      activeTurns[activeTurn.sessionId] = activeTurn
+    } else if (sessionId) {
+      delete activeTurns[sessionId]
+    }
+    await writeResumeState({
+      ...(current?.outputTarget ? { outputTarget: current.outputTarget, route: current.route } : {}),
+      ...(Object.keys(activeTurns).length > 0 ? { activeTurns } : {}),
+    })
+  })
+}
+
+export async function getActiveTurn(): Promise<ActiveTurnState | null> {
+  await resumeStateWriteQueue
+  const data = await readResumeState()
+  const activeTurns = data?.activeTurns ? Object.values(data.activeTurns) : []
+  return activeTurns[0] ?? null
+}
+
+export async function getActiveTurns(): Promise<ActiveTurnState[]> {
+  await resumeStateWriteQueue
+  const data = await readResumeState()
+  return data?.activeTurns ? Object.values(data.activeTurns) : []
+}

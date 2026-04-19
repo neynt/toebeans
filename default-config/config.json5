@@ -1,0 +1,33 @@
+{
+  "server": {
+    "port": 3000
+  },
+  "session": {
+    "compactAtTokens": 200000,
+    "compactMinTokens": 10000,
+    "warnAtTokens": 150000,
+    "lifespanSeconds": 3600,
+    "compactionPrompt": "Summarize this conversation for your future self. You are being compacted, and this summary will be the only context you have when the conversation continues. Be brief but keep all useful information. Include key topics, decisions, completed tasks, pending tasks, and important details like IDs, names, and technical specifics.",
+    "compactionTrimLength": 200,
+    "autoSummarize": true
+  },
+  "llm": {
+    // provider: "anthropic" | "moonshot" | "chatgpt-codex"
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5-20250929",
+    "apiKey": "",
+    "effort": "medium",
+    "maxOutputTokens": 16384,
+    "maxToolResultTokens": 10000,
+    "maxToolResultChars": 50000
+
+    // Moonshot/Kimi fields (only used when provider is "moonshot"):
+    // "baseUrl": "https://api.moonshot.ai/v1",
+    // "thinking": true,
+    // "temperature": 1.0,
+    // "topP": 0.95
+  },
+  "plugins": {},
+  "notifyOnRestart": "",
+  "restartMessage": "server restarted successfully. continue from where you left off."
+}

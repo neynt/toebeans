@@ -1,0 +1,171 @@
+import type { Plugin, PreCompactionContext } from '../../server/plugin.ts'
+import type { Message } from '../../server/types.ts'
+import { getMemoryDir } from '../../server/session.ts'
+import { join } from 'path'
+import { formatLocalDate, formatLocalTimeOnly } from '../../server/time.ts'
+
+function buildExtractionPrompt(): string {
+  return `You are extracting knowledge from a conversation that is about to be compacted.
+
+## Summary
+Brief summary of what happened in this conversation. Include key events, decisions, and outcomes.`
+}
+
+function trimForCompaction(messages: Message[], trimLength: number): Message[] {
+  return messages.map(msg => ({
+    role: msg.role,
+    content: msg.content.map(block => {
+      if (block.type === 'tool_result') {
+        if (typeof block.content === 'string') {
+          const trimmed = block.content.length > trimLength
+            ? block.content.slice(0, trimLength) + '... (truncated)'
+            : block.content
+          return { ...block, content: trimmed }
+        }
+        const trimmed = block.content
+          .filter(b => b.type === 'text')
+          .map(b => {
+            if (b.type === 'text' && b.text.length > trimLength) {
+              return { ...b, text: b.text.slice(0, trimLength) + '... (truncated)' }
+            }
+            return b
+          })
+        return { ...block, content: trimmed }
+      }
+      return block
+    }),
+  }))
+}
+
+const DEFAULT_USER_MD_PATH = new URL('../../default-config/USER.md', import.meta.url)
+
+async function getDefaultUserMd(): Promise<string> {
+  return await Bun.file(DEFAULT_USER_MD_PATH).text()
+}
+
+async function appendToDailyLog(content: string, sessionId: string): Promise<void> {
+  const now = new Date()
+  const today = formatLocalDate(now)
+  const dailyLogPath = join(getMemoryDir(), `${today}.md`)
+  const file = Bun.file(dailyLogPath)
+  const timestamp = formatLocalTimeOnly(now)
+  const entry = `\n### ${timestamp} (session ${sessionId})\n\n${content}\n`
+
+  if (await file.exists()) {
+    const existing = await file.text()
+    await Bun.write(dailyLogPath, existing + entry)
+  } else {
+    await Bun.write(dailyLogPath, `# Daily Log - ${today}\n${entry}`)
+  }
+}
+
+export default function create(serverContext?: { config?: { session?: { compactionTrimLength?: number }; plugins?: { memory?: { extractionPrompt?: string } } } }): Plugin {
+  const compactionTrimLength = serverContext?.config?.session?.compactionTrimLength ?? 200
+  const extractionPrompt = serverContext?.config?.plugins?.memory?.extractionPrompt ?? buildExtractionPrompt()
+
+  return {
+    name: 'memory',
+    description: `Long-term memory. Stored as markdown files in ~/.toebeans/memory/.`,
+
+    async onPreCompaction(context: PreCompactionContext) {
+      const { sessionId, messages, provider } = context
+
+      // trim tool results before sending to LLM
+      const trimmed = trimForCompaction(messages, compactionTrimLength)
+
+      // append extraction prompt
+      const lastMsg = trimmed[trimmed.length - 1]
+      if (lastMsg?.role === 'user') {
+        lastMsg.content.push({ type: 'text', text: extractionPrompt })
+      } else {
+        trimmed.push({
+          role: 'user',
+          content: [{ type: 'text', text: extractionPrompt }],
+        })
+      }
+
+      let result = ''
+      for await (const chunk of provider.stream({
+        messages: trimmed,
+        system: 'You are extracting knowledge before compaction. Respond with the requested sections.',
+        tools: [],
+      })) {
+        if (chunk.type === 'text') {
+          result += chunk.text
+        }
+      }
+
+      // parse summary
+      const summaryMatch = result.match(/## Summary\s*\n([\s\S]*)/)
+      const summary = summaryMatch?.[1]?.trim() || result.trim()
+
+      // write summary to daily log
+      await appendToDailyLog(summary, sessionId)
+    },
+
+    async buildSystemPrompt() {
+      const parts: string[] = []
+      const memoryDir = getMemoryDir()
+
+      // user profile (seed default if missing)
+      const userProfilePath = join(memoryDir, 'USER.md')
+      const userProfileFile = Bun.file(userProfilePath)
+      if (!await userProfileFile.exists()) {
+        await Bun.write(userProfilePath, await getDefaultUserMd())
+      }
+      const userContent = await Bun.file(userProfilePath).text()
+      if (userContent.trim()) {
+        parts.push(
+          `### User info (${userProfilePath})\n` +
+          `Below the line is what you know about the user. If you learn anything more about the user that could be useful in the future, add it to the file with bash. Pay special attention to expressed preferences and corrections.\n` +
+          `---\n` +
+          userContent
+        )
+      }
+
+      // memory directory listing: top-level files individually, subdirectories as entries
+      const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/
+      const excludeFiles = new Set(['USER.md'])
+      const topLevelGlob = new Bun.Glob('*.md')
+      const topicFiles: string[] = []
+      for await (const file of topLevelGlob.scan(memoryDir)) {
+        if (datePattern.test(file)) continue
+        if (excludeFiles.has(file)) continue
+        topicFiles.push(file)
+      }
+
+      // discover subdirectories containing .md files
+      const subdirGlob = new Bun.Glob('**/*.md')
+      const subdirs = new Set<string>()
+      for await (const file of subdirGlob.scan(memoryDir)) {
+        if (!file.includes('/')) continue
+        subdirs.add(file.split('/')[0]!)
+      }
+
+      const entries = [...topicFiles, ...[...subdirs].map(d => `${d}/`)].sort()
+      if (entries.length > 0) {
+        parts.push(
+          `### Memory directory (${memoryDir})\n` +
+          `Entries:\n` +
+          entries.map(f => `- ${f}`).join('\n') + '\n\n' +
+          `You should read these files on-demand. Prior to working on any task, read relevant files. ` +
+          `Markdown files created here will be surfaced here in future conversations. ` +
+          `For subdirectories, list their contents with bash before reading.\n\n` +
+          `### Proactive memory loading\n` +
+          `Treat these memory files as extended memory. When the user's message contains relevant keywords or topics, ` +
+          `search for and read matching memory files BEFORE responding. Examples:\n` +
+          `- User asks about schedule, availability, or plans → look for schedule/calendar memory files\n` +
+          `- User mentions finances, budget, or portfolio → check for finance-related memory files\n` +
+          `- User references a project by name → load that project's memory file if it exists\n` +
+          `- User asks about a person (by name, relationship, etc.) → check for memory files about that person\n` +
+          `- User asks about preferences, habits, or routines → re-read USER.md and check for relevant topic files\n` +
+          `- User starts a task in a domain (cooking, travel, coding, etc.) → check for domain-specific memory files\n\n` +
+          `Don't wait to be asked — if a memory file likely contains relevant context, read it proactively. ` +
+          `When in doubt, a quick scan of a potentially relevant file is better than missing useful context.`
+        )
+      }
+
+      return parts.length > 0 ? parts.join('\n\n') : null
+    },
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "toebeans",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "server": "bun run server/index.ts",
+    "cli": "bun run cli/cli.ts",
+    "debug": "bun run cli/debug.ts",
+    "auth:chatgpt-codex": "bun run scripts/auth-chatgpt-codex.ts",
+    "dashboard": "bun run server/status-dashboard.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/tokenizer": "^0.0.4",
+    "discord.js": "^14.25.1",
+    "googleapis": "^171.4.0",
+    "json5": "^2.2.3",
+    "openai": "^6.22.0",
+    "patchright": "^1.52.0",
+    "turndown": "^7.2.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/turndown": "^5.0.6"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

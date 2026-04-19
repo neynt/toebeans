@@ -1,0 +1,345 @@
+// shared TTS (text-to-speech) service client for toebeans
+// manages the persistent qwen3-tts server and provides speech generation
+// degrades gracefully if the server fails to start — retries in background with backoff
+
+import { spawn, type ChildProcess } from 'node:child_process'
+import { unlink } from 'node:fs/promises'
+import { homedir } from 'os'
+import { join } from 'path'
+import { unixRequest, unixRequestStream, isProcessAlive, killPidfile } from './unix-socket.ts'
+
+const TOEBEANS_DIR = join(homedir(), '.toebeans')
+const TTS_SOCKET_PATH = join(TOEBEANS_DIR, 'tts.sock')
+const TTS_PIDFILE_PATH = join(TOEBEANS_DIR, 'tts.pid')
+const TTS_PLUGIN_DIR = join(TOEBEANS_DIR, 'plugins', 'tts')
+const TTS_REQUEST_TIMEOUT = 30_000  // 30s — slightly longer than server-side 25s timeout
+const STARTUP_TIMEOUT = 120_000     // 120s — model loading can be slow
+
+// backoff: 5s, 10s, 20s, 40s, 60s, 60s, 60s, ...
+const RETRY_BACKOFF_BASE = 5_000
+const RETRY_BACKOFF_MAX = 60_000
+
+let ttsProcess: ChildProcess | null = null
+let ttsAvailable = false
+let ttsStarting: Promise<boolean> | null = null
+let retryTimer: ReturnType<typeof setTimeout> | null = null
+let retryCount = 0
+let lastOpts: TtsOptions | undefined
+
+export class TtsUnavailableError extends Error {
+  constructor(reason?: string) {
+    super(`TTS server is unavailable${reason ? `: ${reason}` : ''}`)
+    this.name = 'TtsUnavailableError'
+  }
+}
+
+async function isTtsReady(): Promise<boolean> {
+  try {
+    const { status } = await unixRequest(TTS_SOCKET_PATH, 'GET', '/health')
+    return status === 200
+  } catch {
+    return false
+  }
+}
+
+export interface TtsOptions {
+  language?: string
+  instruct?: string
+  voiceInstruct?: string  // env-level default voice instruct
+  seed?: number           // torch random seed for consistent voice across calls
+  temperature?: number    // sampling temperature (lower = more consistent voice)
+  subtalkerTemperature?: number  // sub-talker sampling temperature
+}
+
+/** whether the TTS server is currently available */
+export function isTtsAvailable(): boolean {
+  return ttsAvailable
+}
+
+/**
+ * ensure the TTS server is running and ready.
+ * returns true if the server is available, false if startup failed.
+ * never throws — failures are logged and trigger background retries.
+ */
+export async function ensureTtsServer(opts?: TtsOptions): Promise<boolean> {
+  lastOpts = opts
+
+  // fast path: already running and healthy
+  if (ttsAvailable && await isTtsReady()) return true
+
+  // if another call is already starting the server, wait for it
+  if (ttsStarting) return ttsStarting
+
+  // take the lock and do the actual startup
+  let resolve!: (ok: boolean) => void
+  ttsStarting = new Promise<boolean>((res) => { resolve = res })
+
+  try {
+    const ok = await doEnsureTtsServer(opts)
+    resolve(ok)
+    return ok
+  } catch (err) {
+    console.error('tts: unexpected error during startup:', err)
+    resolve(false)
+    return false
+  } finally {
+    ttsStarting = null
+  }
+}
+
+/**
+ * require the TTS server — like ensureTtsServer but throws TtsUnavailableError
+ * if the server isn't available. used by speak()/speakStreaming().
+ */
+async function requireTtsServer(opts?: TtsOptions): Promise<void> {
+  const ok = await ensureTtsServer(opts)
+  if (!ok) throw new TtsUnavailableError()
+}
+
+async function doEnsureTtsServer(opts?: TtsOptions): Promise<boolean> {
+  // re-check after acquiring lock (another caller may have started it)
+  if (ttsAvailable && await isTtsReady()) return true
+
+  // check if an existing server is alive (may have been started by another plugin or previous run)
+  try {
+    const pidContent = await Bun.file(TTS_PIDFILE_PATH).text()
+    const pid = parseInt(pidContent.trim(), 10)
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      if (await isTtsReady()) {
+        ttsAvailable = true
+        retryCount = 0
+        cancelRetry()
+        return true
+      }
+      // process alive but not healthy — kill it before spawning a new one
+      console.log(`tts: killing unhealthy existing server (pid ${pid})`)
+      process.kill(pid, 'SIGTERM')
+      // give it a moment to exit
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      if (isProcessAlive(pid)) {
+        process.kill(pid, 'SIGKILL')
+      }
+    }
+  } catch {}
+
+  // clean up stale files and spawn fresh
+  for (const path of [TTS_SOCKET_PATH, TTS_PIDFILE_PATH]) {
+    try { await unlink(path) } catch {}
+  }
+
+  console.log('tts: spawning TTS server...')
+  const startScript = join(TTS_PLUGIN_DIR, 'start.sh')
+
+  const env: Record<string, string> = { ...process.env as Record<string, string> }
+  if (opts?.voiceInstruct) {
+    env.VOICE_INSTRUCT = opts.voiceInstruct
+  }
+
+  try {
+    ttsProcess = spawn(startScript, ['--socket', TTS_SOCKET_PATH, '--pidfile', TTS_PIDFILE_PATH], {
+      cwd: TTS_PLUGIN_DIR,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+      env,
+    })
+  } catch (err) {
+    console.error('tts: failed to spawn TTS server process:', err)
+    scheduleRetry()
+    return false
+  }
+  ttsProcess.unref()
+
+  ttsProcess.stdout?.on('data', (data: Buffer) => {
+    console.log(`tts-server: ${data.toString().trim()}`)
+  })
+  ttsProcess.stderr?.on('data', (data: Buffer) => {
+    console.error(`tts-server: ${data.toString().trim()}`)
+  })
+  ttsProcess.on('exit', (code: number | null) => {
+    console.log(`tts-server exited with code ${code}`)
+    ttsAvailable = false
+    ttsProcess = null
+    // if the server crashes unexpectedly, schedule a retry
+    if (code !== 0 && code !== null) {
+      scheduleRetry()
+    }
+  })
+
+  // wait for server to respond (model loading can take a while)
+  const start = Date.now()
+  while (Date.now() - start < STARTUP_TIMEOUT) {
+    if (await isTtsReady()) {
+      ttsAvailable = true
+      retryCount = 0
+      cancelRetry()
+      console.log('tts: TTS server is ready!')
+      return true
+    }
+    // if the process already exited, don't keep polling
+    if (!ttsProcess) {
+      console.error('tts: server process exited before becoming ready')
+      scheduleRetry()
+      return false
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000))
+  }
+
+  console.error('tts: server did not start within 120s — will retry in background')
+  scheduleRetry()
+  return false
+}
+
+function scheduleRetry(): void {
+  cancelRetry()
+  const delay = Math.min(RETRY_BACKOFF_BASE * (2 ** retryCount), RETRY_BACKOFF_MAX)
+  retryCount++
+  console.log(`tts: scheduling retry #${retryCount} in ${(delay / 1000).toFixed(0)}s`)
+  retryTimer = setTimeout(() => {
+    retryTimer = null
+    ensureTtsServer(lastOpts).then(ok => {
+      if (ok) console.log('tts: background retry succeeded')
+    })
+  }, delay)
+  retryTimer.unref()  // don't prevent process exit
+}
+
+function cancelRetry(): void {
+  if (retryTimer) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+}
+
+/**
+ * generate speech from text using the persistent TTS server.
+ * returns the raw WAV buffer.
+ * throws TtsUnavailableError if the server is not available.
+ */
+export async function speak(text: string, opts?: TtsOptions): Promise<Buffer> {
+  await requireTtsServer(opts)
+
+  const requestBody: Record<string, unknown> = {
+    text,
+    language: opts?.language || 'english',
+  }
+  if (opts?.instruct) requestBody.instruct = opts.instruct
+  if (opts?.seed != null) requestBody.seed = opts.seed
+  if (opts?.temperature != null) requestBody.temperature = opts.temperature
+  if (opts?.subtalkerTemperature != null) requestBody.subtalker_temperature = opts.subtalkerTemperature
+
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), TTS_REQUEST_TIMEOUT)
+
+  try {
+    const { status, data } = await unixRequest(
+      TTS_SOCKET_PATH,
+      'POST',
+      '/tts',
+      JSON.stringify(requestBody),
+      undefined,
+      ac.signal,
+    )
+
+    if (status !== 200) {
+      throw new Error(`TTS server error: ${status} ${data.toString()}`)
+    }
+
+    return data
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * stream speech generation from text. yields raw PCM int16 LE chunks at 24kHz
+ * as they're produced by the model (first chunk in ~400ms for fast time-to-first-audio).
+ * throws TtsUnavailableError if the server is not available.
+ */
+export async function* speakStreaming(text: string, opts?: TtsOptions): AsyncGenerator<Buffer> {
+  await requireTtsServer(opts)
+
+  const requestBody: Record<string, unknown> = {
+    text,
+    language: opts?.language || 'english',
+  }
+  if (opts?.instruct) requestBody.instruct = opts.instruct
+  if (opts?.seed != null) requestBody.seed = opts.seed
+  if (opts?.temperature != null) requestBody.temperature = opts.temperature
+  if (opts?.subtalkerTemperature != null) requestBody.subtalker_temperature = opts.subtalkerTemperature
+
+  const ac = new AbortController()
+  const resetTimeout = () => {
+    clearTimeout(timer)
+    timer = setTimeout(() => ac.abort(), TTS_REQUEST_TIMEOUT)
+  }
+  let timer = setTimeout(() => ac.abort(), TTS_REQUEST_TIMEOUT)
+
+  const t0 = performance.now()
+  const tag = `tts-stream[${text.slice(0, 30)}]`
+  let chunkIndex = 0
+  let totalBytes = 0
+  let lastChunkTime = t0
+
+  try {
+    const connectStart = performance.now()
+    const { status, stream } = await unixRequestStream(
+      TTS_SOCKET_PATH,
+      'POST',
+      '/tts/stream',
+      JSON.stringify(requestBody),
+      undefined,
+      ac.signal,
+    )
+    const connectMs = performance.now() - connectStart
+    console.log(`${tag}: connected in ${connectMs.toFixed(0)}ms status=${status}`)
+
+    if (status !== 200) {
+      const chunks: Buffer[] = []
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+      throw new Error(`TTS stream error: ${status} ${Buffer.concat(chunks).toString()}`)
+    }
+
+    for await (const chunk of stream) {
+      resetTimeout()  // each chunk resets the idle timeout
+      const now = performance.now()
+      const interChunkMs = now - lastChunkTime
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      chunkIndex++
+      totalBytes += buf.length
+
+      if (chunkIndex === 1) {
+        console.log(`${tag}: first chunk ${buf.length}B ttfc=${(now - t0).toFixed(0)}ms`)
+      } else if (interChunkMs > 500) {
+        console.log(`${tag}: chunk#${chunkIndex} ${buf.length}B gap=${interChunkMs.toFixed(0)}ms (stall?)`)
+      }
+
+      lastChunkTime = now
+      yield buf
+    }
+  } finally {
+    clearTimeout(timer)
+    const elapsed = performance.now() - t0
+    console.log(`${tag}: done ${chunkIndex} chunks ${totalBytes}B in ${elapsed.toFixed(0)}ms`)
+    if (ac.signal.aborted) {
+      console.log(`${tag}: aborted (timeout or cancel)`)
+    }
+  }
+}
+
+/**
+ * stop the TTS server — kills tracked process AND any process from pidfile.
+ */
+export async function stopTtsServer(): Promise<void> {
+  ttsAvailable = false
+  cancelRetry()
+
+  if (ttsProcess) {
+    ttsProcess.kill()
+    ttsProcess = null
+  }
+
+  // also kill by pidfile in case we lost the reference (server restart, etc.)
+  await killPidfile(TTS_PIDFILE_PATH)
+}

@@ -1,0 +1,442 @@
+import type { Plugin, PluginStatus } from '../../server/plugin.ts'
+import type { ToolResult, ToolContext, Message } from '../../server/types.ts'
+import { resolve, join } from 'path'
+import { mkdir } from 'node:fs/promises'
+import { getDataDir } from '../../server/session.ts'
+import { formatLocalFilenameTimestamp } from '../../server/time.ts'
+
+interface BashConfig {
+  defaultTimeout?: number
+  maxTimeout?: number
+  spawnDefaultTimeout?: number
+  spawnMaxTimeout?: number
+}
+
+let pluginConfig: BashConfig = {}
+
+const BASH_LOGS_DIR = join(getDataDir(), 'bash')
+
+interface SpawnedProcess {
+  proc: ReturnType<typeof Bun.spawn>
+  pid: number
+  command: string
+  logPath: string
+  startedAt: string
+}
+
+const spawnedProcesses = new Map<number, SpawnedProcess>()
+
+async function ensureBashLogsDir(): Promise<void> {
+  await mkdir(BASH_LOGS_DIR, { recursive: true })
+}
+
+function generateLogFilename(): string {
+  const now = new Date()
+  return `${formatLocalFilenameTimestamp(now)}.log`
+}
+
+async function readLastLines(filePath: string, lineCount: number): Promise<string> {
+  try {
+    const file = Bun.file(filePath)
+    if (!(await file.exists())) return '(log file not found)'
+    const content = await file.text()
+    const lines = content.split('\n')
+    const lastLines = lines.slice(-lineCount).filter(l => l.trim())
+    return lastLines.join('\n') || '(empty log)'
+  } catch {
+    return '(failed to read log)'
+  }
+}
+
+export default function create(): Plugin {
+  const messageQueue: { message: Message; outputTarget?: string }[] = []
+  let resolveWaiter: (() => void) | null = null
+
+  function queueNotification(text: string, outputTarget?: string) {
+    messageQueue.push({
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text }],
+      },
+      outputTarget,
+    })
+    if (resolveWaiter) {
+      resolveWaiter()
+      resolveWaiter = null
+    }
+  }
+
+  async function* inputGenerator(): AsyncGenerator<{ message: Message; outputTarget?: string }> {
+    while (true) {
+      while (messageQueue.length > 0) {
+        const msg = messageQueue.shift()!
+        yield msg
+      }
+      await new Promise<void>(resolve => {
+        resolveWaiter = resolve
+      })
+    }
+  }
+
+  return {
+    name: 'bash',
+    configSchema: [
+      { key: 'defaultTimeout', type: 'number', description: 'default timeout for bash commands (ms)' },
+      { key: 'maxTimeout', type: 'number', description: 'max allowed timeout for bash commands (ms)' },
+      { key: 'spawnDefaultTimeout', type: 'number', description: 'default timeout for spawned processes (ms)' },
+      { key: 'spawnMaxTimeout', type: 'number', description: 'max allowed timeout for spawned processes (ms)' },
+    ],
+    description: [
+      'Execute bash commands via `bash -c`.',
+      'The command string is passed verbatim — all shell features work:',
+      'pipes (`|`), redirects (`>`, `>>`), command substitution (`$(cmd)`),',
+      'variable expansion (`$VAR`), process substitution (`<(cmd)`), globs, heredocs, etc.',
+      'Prefer single compound commands over multiple tool calls when possible.',
+    ].join(' '),
+
+    status(): PluginStatus | null {
+      if (spawnedProcesses.size === 0) return null
+      const tasks = [...spawnedProcesses.values()].map(p => ({
+        id: String(p.pid),
+        description: p.command,
+        startedAt: p.startedAt,
+        logPath: p.logPath,
+      }))
+      return { tasks }
+    },
+
+    async init(cfg: unknown) {
+      pluginConfig = (cfg as BashConfig) ?? {}
+    },
+
+    input: inputGenerator(),
+
+    tools: [
+      {
+        name: 'bash',
+        description: 'Execute a bash command via `bash -c`. The command string is passed verbatim to the shell — pipes, redirects, command substitution ($(...)), variable expansion, globbing, and all other bash features work as expected.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'The bash command to execute. Passed directly to `bash -c` with no escaping — use full shell syntax freely.' },
+            workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
+            timeout: {
+              type: 'number',
+              description: 'Timeout in seconds (default: 60, max: 600, configurable)',
+            },
+          },
+          required: ['command'],
+        },
+        pathFields: ['workingDir'],
+        async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
+          const defaultTimeout = pluginConfig.defaultTimeout ?? 60
+          const maxTimeout = pluginConfig.maxTimeout ?? 600
+          const { command, workingDir, timeout = defaultTimeout } = input as {
+            command: string
+            workingDir?: string
+            timeout?: number
+          }
+          if (!command || typeof command !== 'string') {
+            return { content: 'Missing or invalid "command" field', is_error: true }
+          }
+          const cwd = workingDir ? resolve(context.workingDir, workingDir) : context.workingDir
+          const timeoutMs = Math.min(Math.max(timeout, 1), maxTimeout) * 1000
+
+          const proc = Bun.spawn(['bash', '-c', command], {
+            cwd,
+            stdout: 'pipe',
+            stderr: 'pipe',
+          })
+
+          // listen for abort signal from /stop command
+          const onAbort = () => {
+            proc.kill()
+          }
+          context.abortSignal?.addEventListener('abort', onAbort)
+
+          const result = await Promise.race([
+            proc.exited.then(async (code) => {
+              const stdout = await new Response(proc.stdout).text()
+              const stderr = await new Response(proc.stderr).text()
+              return { code, stdout, stderr, timedOut: false }
+            }),
+            new Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>(resolve =>
+              setTimeout(() => {
+                proc.kill()
+                resolve({ code: -1, stdout: '', stderr: '', timedOut: true })
+              }, timeoutMs)
+            ),
+          ])
+
+          context.abortSignal?.removeEventListener('abort', onAbort)
+
+          if (result.timedOut) {
+            return {
+              content: `Command timed out after ${timeout} seconds`,
+              is_error: true,
+            }
+          }
+
+          const output = [result.stdout, result.stderr].filter(Boolean).join('\n')
+
+          if (result.code !== 0) {
+            return {
+              content: output || `Command failed with exit code ${result.code}`,
+              is_error: true,
+            }
+          }
+
+          return { content: output || '(no output)' }
+        },
+      },
+
+      {
+        name: 'bash_spawn',
+        description: 'Start a long-running bash command in the background via `bash -c`. You will be notified when it completes. Full shell syntax (pipes, redirects, $(...), etc.) is supported.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'The bash command to execute. Passed directly to `bash -c` with no escaping.' },
+            workingDir: { type: 'string', description: 'Optional working directory. Tilde (~) is expanded.' },
+            timeout: {
+              type: 'number',
+              description: 'Timeout in seconds (default: 600, max: 3600, configurable)',
+            },
+          },
+          required: ['command'],
+        },
+        pathFields: ['workingDir'],
+        async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
+          const spawnDefaultTimeout = pluginConfig.spawnDefaultTimeout ?? 600
+          const spawnMaxTimeout = pluginConfig.spawnMaxTimeout ?? 3600
+          const { command, workingDir, timeout = spawnDefaultTimeout } = input as {
+            command: string
+            workingDir?: string
+            timeout?: number
+          }
+          if (!command || typeof command !== 'string') {
+            return { content: 'Missing or invalid "command" field', is_error: true }
+          }
+
+          await ensureBashLogsDir()
+
+          const cwd = workingDir ? resolve(context.workingDir, workingDir) : context.workingDir
+          const timeoutMs = Math.min(Math.max(timeout, 1), spawnMaxTimeout) * 1000
+          const logFilename = generateLogFilename()
+          const logPath = join(BASH_LOGS_DIR, logFilename)
+
+          try {
+            // spawn with stdout/stderr piped
+            const proc = Bun.spawn(
+              ['bash', '-c', command],
+              {
+                cwd,
+                env: process.env,
+                stdout: 'pipe',
+                stderr: 'pipe',
+              }
+            )
+
+            const processInfo: SpawnedProcess = {
+              proc,
+              pid: proc.pid,
+              command,
+              logPath,
+              startedAt: new Date().toISOString(),
+            }
+
+            spawnedProcesses.set(proc.pid, processInfo)
+
+            // stream stdout/stderr to log file
+            const logFile = Bun.file(logPath).writer()
+
+            // pipe stdout
+            const stdoutReader = proc.stdout.getReader()
+            ;(async () => {
+              try {
+                while (true) {
+                  const { done, value } = await stdoutReader.read()
+                  if (done) break
+                  logFile.write(value)
+                }
+              } catch (err) {
+                console.error(`[bash_spawn] error reading stdout for pid ${proc.pid}:`, err)
+              }
+            })()
+
+            // pipe stderr
+            const stderrReader = proc.stderr.getReader()
+            ;(async () => {
+              try {
+                while (true) {
+                  const { done, value } = await stderrReader.read()
+                  if (done) break
+                  logFile.write(value)
+                }
+              } catch (err) {
+                console.error(`[bash_spawn] error reading stderr for pid ${proc.pid}:`, err)
+              }
+            })()
+
+            // capture output target so notifications route back to the originating session
+            const { outputTarget } = context
+
+            // set up completion notification
+            proc.exited.then(async (code) => {
+              try {
+                // flush and close log file
+                await logFile.end()
+
+                spawnedProcesses.delete(proc.pid)
+
+                const status = code === 0 ? 'completed successfully' : `failed with exit code ${code}`
+                const commandPreview = command.length > 80 ? command.slice(0, 80) + '...' : command
+                const lastLines = await readLastLines(logPath, 10)
+
+                queueNotification(
+                  `[bash process ${status}]\nPID: ${proc.pid}\nCommand: ${commandPreview}\nExit code: ${code ?? 1}\nLog: ${logPath}\n\nLast 10 lines:\n${lastLines}\n\nUse bash_check to see more output.`,
+                  outputTarget
+                )
+              } catch (err) {
+                console.error(`[bash_spawn] error in exit handler for pid ${proc.pid}:`, err)
+              }
+            }).catch((err) => {
+              console.error(`[bash_spawn] proc.exited promise rejected for pid ${proc.pid}:`, err)
+            })
+
+            // set up timeout killer
+            setTimeout(() => {
+              try {
+                process.kill(proc.pid, 0) // check if still alive
+                proc.kill()
+                queueNotification(
+                  `[bash process timed out]\nPID: ${proc.pid}\nCommand: ${command.slice(0, 80)}${command.length > 80 ? '...' : ''}\nKilled after ${timeout}s`,
+                  outputTarget
+                )
+              } catch {
+                // already dead
+              }
+            }, timeoutMs)
+
+            return {
+              content: JSON.stringify({
+                pid: proc.pid,
+                logPath,
+                status: 'started',
+              }, null, 2)
+            }
+          } catch (err: unknown) {
+            const error = err as { message?: string }
+            return { content: `Failed to spawn command: ${error.message}`, is_error: true }
+          }
+        },
+      },
+
+      {
+        name: 'bash_check',
+        description: 'Check on a spawned bash process and read its output.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'Process ID returned from bash_spawn' },
+            tail: { type: 'number', description: 'Number of lines to show from end of log (default: 20)' },
+          },
+          required: ['pid'],
+        },
+        async execute(input: unknown): Promise<ToolResult> {
+          const { pid, tail = 20 } = input as { pid: number; tail?: number }
+
+          const processInfo = spawnedProcesses.get(pid)
+
+          // check if process is running
+          let isRunning = false
+          try {
+            process.kill(pid, 0)
+            isRunning = true
+          } catch {
+            isRunning = false
+          }
+
+          const status = isRunning ? 'running' : 'completed'
+
+          // try to get log path
+          let logPath: string
+          let command: string
+          if (processInfo) {
+            logPath = processInfo.logPath
+            command = processInfo.command
+          } else {
+            // process not tracked - can't get log
+            return {
+              content: JSON.stringify({
+                status: 'unknown',
+                message: 'Process not found in tracked processes. It may have completed before server started or was not spawned via bash_spawn.',
+              }, null, 2),
+              is_error: true,
+            }
+          }
+
+          const lastLines = await readLastLines(logPath, tail)
+
+          return {
+            content: JSON.stringify({
+              pid,
+              command,
+              status,
+              logPath,
+              lastLines,
+            }, null, 2)
+          }
+        },
+      },
+
+      {
+        name: 'bash_kill',
+        description: 'Kill a spawned bash process.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'Process ID to kill' },
+          },
+          required: ['pid'],
+        },
+        async execute(input: unknown): Promise<ToolResult> {
+          const { pid } = input as { pid: number }
+
+          try {
+            // check if process exists first
+            process.kill(pid, 0)
+            // send SIGTERM
+            process.kill(pid, 15)
+
+            // clean up from tracking
+            spawnedProcesses.delete(pid)
+
+            return {
+              content: JSON.stringify({
+                pid,
+                status: 'killed',
+                signal: 'SIGTERM',
+              }, null, 2)
+            }
+          } catch (err: unknown) {
+            const error = err as { code?: string; message?: string }
+            if (error.code === 'ESRCH') {
+              return {
+                content: JSON.stringify({
+                  pid,
+                  status: 'not_found',
+                  message: 'Process not found or already terminated',
+                }, null, 2)
+              }
+            }
+            return {
+              content: `Failed to kill process: ${error.message}`,
+              is_error: true,
+            }
+          }
+        },
+      },
+    ],
+  }
+}
